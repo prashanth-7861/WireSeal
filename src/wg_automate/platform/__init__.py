@@ -9,6 +9,9 @@ Public API:
                             PrerequisiteError, FirewallValidationError, SetupError
 """
 
+from .detect import get_adapter, get_platform_info
+from .base import AbstractPlatformAdapter
+from .progress import Progress
 from .exceptions import (
     PlatformError,
     PrivilegeError,
@@ -17,22 +20,6 @@ from .exceptions import (
     FirewallValidationError,
     SetupError,
 )
-from .progress import Progress
-
-
-def __getattr__(name: str):  # type: ignore[return]
-    """Lazy imports for symbols that depend on base.py and detect.py (added in Task 2)."""
-    if name == "get_adapter":
-        from .detect import get_adapter
-        return get_adapter
-    if name == "get_platform_info":
-        from .detect import get_platform_info
-        return get_platform_info
-    if name == "AbstractPlatformAdapter":
-        from .base import AbstractPlatformAdapter
-        return AbstractPlatformAdapter
-    raise AttributeError(f"module 'wg_automate.platform' has no attribute {name!r}")
-
 
 __all__ = [
     "get_adapter",
