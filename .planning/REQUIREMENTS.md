@@ -34,12 +34,12 @@
 
 ### Config Generation and Validation
 
-- [ ] **CONFIG-01**: Server and client WireGuard configs are rendered in memory using Jinja2 templates with `undefined=StrictUndefined` and `autoescape=True` -- missing variables cause hard failure, not empty strings
-- [ ] **CONFIG-02**: Pre-apply validator runs on every generated config before it is written or any service is reloaded; validator checks: key format (base64, 44 chars, decodes to 32 bytes), PSK format, IP validity (RFC 1918, correct subnet, no conflicts), port range (1024-65535), no duplicate peers, no overlapping AllowedIPs, endpoint format, no INI injection characters (`[`, `]`, `=`, newlines) in any field
-- [ ] **CONFIG-03**: All config file writes are atomic (`os.replace()` pattern); configs are written with 600 permissions (Unix) or SYSTEM+Administrators ACL (Windows)
-- [ ] **CONFIG-04**: After writing any config file, SHA-256 hash is computed and stored in the vault; before WireGuard reload, hash is verified -- tampered configs cause hard stop with user alert
-- [ ] **CONFIG-05**: WireGuard peers are updated via `wg syncconf` (not `wg setconf`) to preserve active sessions; the entire read-modify-write-apply cycle is protected by a file lock to prevent TOCTOU races
-- [ ] **CONFIG-06**: Client names are validated as alphanumeric + hyphens only, max 32 characters -- path traversal and INI injection via name are impossible
+- [x] **CONFIG-01**: Server and client WireGuard configs are rendered in memory using Jinja2 templates with `undefined=StrictUndefined` and `autoescape=True` -- missing variables cause hard failure, not empty strings
+- [x] **CONFIG-02**: Pre-apply validator runs on every generated config before it is written or any service is reloaded; validator checks: key format (base64, 44 chars, decodes to 32 bytes), PSK format, IP validity (RFC 1918, correct subnet, no conflicts), port range (1024-65535), no duplicate peers, no overlapping AllowedIPs, endpoint format, no INI injection characters (`[`, `]`, `=`, newlines) in any field
+- [x] **CONFIG-03**: All config file writes are atomic (`os.replace()` pattern); configs are written with 600 permissions (Unix) or SYSTEM+Administrators ACL (Windows)
+- [x] **CONFIG-04**: After writing any config file, SHA-256 hash is computed and stored in the vault; before WireGuard reload, hash is verified -- tampered configs cause hard stop with user alert
+- [x] **CONFIG-05**: WireGuard peers are updated via `wg syncconf` (not `wg setconf`) to preserve active sessions; the entire read-modify-write-apply cycle is protected by a file lock to prevent TOCTOU races
+- [x] **CONFIG-06**: Client names are validated as alphanumeric + hyphens only, max 32 characters -- path traversal and INI injection via name are impossible
 
 ### IP Pool Management
 

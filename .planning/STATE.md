@@ -5,29 +5,29 @@
 See: .planning/PROJECT.md (updated 2026-03-17)
 
 **Core value:** Zero plaintext secrets on disk, ever -- if the vault is compromised without the passphrase, no key material is exposed.
-**Current focus:** Phase 1: Secure Core Engine
+**Current focus:** Phase 1: Secure Core Engine -- COMPLETE. Next: Phase 2 (Platform Adapters)
 
 ## Current Position
 
-Phase: 1 of 5 (Secure Core Engine)
-Plan: 3 of 4 in current phase
-Status: Executing
-Last activity: 2026-03-18 -- Completed plan 01-03 (key generation X25519/PSK + IP pool manager)
+Phase: 1 of 5 (Secure Core Engine) -- COMPLETE
+Plan: 4 of 4 in current phase (all plans complete)
+Status: Phase 1 Complete
+Last activity: 2026-03-18 -- Completed plan 01-04 (config generation pipeline: templates, validator, integrity, permissions)
 
-Progress: [██░░░░░░░░] 19% (3/16 plans complete)
+Progress: [███░░░░░░░] 25% (4/16 plans complete)
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 3
-- Average duration: 2 min
-- Total execution time: 0.10 hours
+- Total plans completed: 4
+- Average duration: 3 min
+- Total execution time: 0.20 hours
 
 **By Phase:**
 
 | Phase | Plans | Total | Avg/Plan |
 |-------|-------|-------|----------|
-| 01-secure-core-engine | 3/4 | 7 min | 2 min |
+| 01-secure-core-engine | 4/4 | 12 min | 3 min |
 
 **Recent Trend:**
 - Last 5 plans: 3 min
@@ -56,6 +56,9 @@ Recent decisions affecting current work:
 - [01-03]: Public key returned as plain bytes (not SecretBytes) -- WireGuard public keys are non-secret by design
 - [01-03]: Standard base64 (not url-safe) used for key encoding -- matches wg CLI output format
 - [01-03]: IPPool uses ip_network(strict=False) for user-friendly host-bit input (e.g., 10.0.0.1/24)
+- [Phase 01-04]: validate_subnet uses strict=False to accept server IP format (10.0.0.1/24) -- strict=True wrongly rejected valid server IPs with host bits set
+- [Phase 01-04]: autoescape=False in Jinja2 Environment is correct for WireGuard INI -- autoescape=True would corrupt base64 = characters to HTML entities
+- [Phase 01-04]: atomic_write extracted from vault.py to security/atomic.py -- single source of truth for atomic writes
 
 ### Pending Todos
 
@@ -70,5 +73,5 @@ None.
 ## Session Continuity
 
 Last session: 2026-03-18
-Stopped at: Completed 01-03-PLAN.md (X25519 key generation, PSK generation, IP pool manager)
+Stopped at: Completed 01-04-PLAN.md (config generation pipeline: templates, validator, integrity, permissions) -- Phase 1 complete
 Resume file: None

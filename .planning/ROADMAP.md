@@ -12,7 +12,7 @@ wg-automate delivers a cross-platform WireGuard VPN server automation CLI with a
 
 Decimal phases appear between their surrounding integers in numeric order.
 
-- [ ] **Phase 1: Secure Core Engine** - Security primitives, encrypted vault, key generation, config builder, and IP pool
+- [x] **Phase 1: Secure Core Engine** - Security primitives, encrypted vault, key generation, config builder, and IP pool (completed 2026-03-18)
 - [ ] **Phase 2: Platform Hardening** - ABC-based platform adapters for Linux, macOS, and Windows with firewall and service management
 - [ ] **Phase 3: Dynamic DNS and Audit** - Multi-source IP consensus, DuckDNS integration, and append-only audit logging
 - [ ] **Phase 4: CLI and Client Management** - Full 14-command Click CLI with client lifecycle, key rotation, and QR display
@@ -112,7 +112,7 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 5
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. Secure Core Engine | 3/4 | In Progress|  |
+| 1. Secure Core Engine | 4/4 | Complete   | 2026-03-18 |
 | 2. Platform Hardening | 0/4 | Not started | - |
 | 3. Dynamic DNS and Audit | 0/2 | Not started | - |
 | 4. CLI and Client Management | 0/3 | Not started | - |
