@@ -41,20 +41,20 @@ Plans:
 ### Phase 2: Platform Hardening
 **Goal**: Users can run one-command server setup on Linux, macOS, or Windows with platform-native firewall hardening, service management, and correct file permissions
 **Depends on**: Phase 1
-**Requirements**: PLAT-01, PLAT-02, PLAT-03, PLAT-04, PLAT-05, PLAT-06, FW-01, FW-02, FW-03
+**Requirements**: PLAT-01, PLAT-02, PLAT-03, PLAT-04, PLAT-05, PLAT-06, FW-01, FW-02, FW-03, HARD-04
 **Success Criteria** (what must be TRUE):
   1. Platform is detected at startup and the tool refuses to run without root/admin, on unsupported OS, or with missing prerequisites
   2. All three platform adapters implement the same AbstractPlatformAdapter ABC -- missing methods cause import-time failure
   3. WireGuard is installed, configured, and started as a persistent service on each platform (systemd / launchd / Windows tunnel service)
   4. Firewall rules are deny-by-default on the WireGuard interface with rate-limited UDP accept and NAT masquerade only on the outbound interface
   5. File permissions use os.chmod(600) on Unix and icacls/pywin32 ACLs on Windows -- os.chmod is never used for security on Windows
-**Plans**: TBD
+**Plans**: 4 plans
 
 Plans:
-- [ ] 02-01: Platform detection and AbstractPlatformAdapter ABC (platform/detect.py, platform/base.py)
-- [ ] 02-02: Linux adapter -- systemd, nftables/iptables, sysctl (platform/linux.py)
-- [ ] 02-03: macOS adapter -- launchd, pfctl, sysctl (platform/macos.py)
-- [ ] 02-04: Windows adapter -- tunnel service, netsh, registry, DPAPI (platform/windows.py)
+- [ ] 02-01-PLAN.md — AbstractPlatformAdapter ABC, platform detection factory, exceptions, and progress reporter
+- [ ] 02-02-PLAN.md — Linux adapter: systemd, nftables deny-by-default, sysctl, non-root DNS user
+- [ ] 02-03-PLAN.md — macOS adapter: launchd, pfctl anchor, Homebrew, non-admin DNS user
+- [ ] 02-04-PLAN.md — Windows adapter: tunnel service, netsh firewall, registry IP forwarding, Task Scheduler DNS
 
 ### Phase 3: Dynamic DNS and Audit
 **Goal**: Users have hardened DuckDNS integration with multi-source IP consensus and a tamper-evident append-only audit trail of every tool action
