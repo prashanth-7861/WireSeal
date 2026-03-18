@@ -30,13 +30,13 @@ Decimal phases appear between their surrounding integers in numeric order.
   3. X25519 key pairs and per-peer PSKs are generated in-process (never via subprocess) and stored only in the vault
   4. Generated WireGuard configs pass the pre-apply validator (key format, IP conflicts, INI injection, subnet rules) and are written atomically with correct permissions
   5. Config integrity is tracked via SHA-256 hashes stored in the vault; tampering is detected before any reload
-**Plans**: TBD
+**Plans**: 4 plans
 
 Plans:
-- [ ] 01-01: SecretBytes type and memory safety primitives (security/secret_types.py, security/secrets_wipe.py)
-- [ ] 01-02: Encrypted vault with Argon2id KDF and AES-256-GCM (security/vault.py)
-- [ ] 01-03: Key generation, PSK, and IP pool management (core/keygen.py, core/psk.py, core/ip_pool.py)
-- [ ] 01-04: Config builder, validator, integrity tracking, and atomic writes (core/config_builder.py, security/validator.py, security/integrity.py, security/permissions.py)
+- [ ] 01-01-PLAN.md — SecretBytes type and memory safety primitives (security/secret_types.py, security/secrets_wipe.py)
+- [ ] 01-02-PLAN.md — Encrypted vault with Argon2id KDF and AES-256-GCM (security/vault.py)
+- [ ] 01-03-PLAN.md — Key generation, PSK, and IP pool management (core/keygen.py, core/psk.py, core/ip_pool.py)
+- [ ] 01-04-PLAN.md — Config builder, validator, integrity tracking, and atomic writes (core/config_builder.py, security/validator.py, security/integrity.py, security/permissions.py)
 
 ### Phase 2: Platform Hardening
 **Goal**: Users can run one-command server setup on Linux, macOS, or Windows with platform-native firewall hardening, service management, and correct file permissions
