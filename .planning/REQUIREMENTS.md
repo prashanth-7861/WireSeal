@@ -18,11 +18,11 @@
 
 ### Secret Types and Memory Safety
 
-- [ ] **SEC-01**: A `SecretBytes` wrapper type (using `bytearray`, not `bytes`) is implemented as the very first component -- overrides `__repr__`, `__str__`, `__eq__`, `__hash__`, `__getstate__` to prevent accidental secret exposure in logs, tracebacks, or serialization
-- [ ] **SEC-02**: `SecretBytes` calls `mlock()` via ctypes (best-effort, no exception on failure) to prevent secret memory from being swapped to disk
-- [ ] **SEC-03**: `secrets_wipe.wipe_bytes(bytearray)` overwrites memory with zeros, random bytes, zeros before releasing; `wipe_string(str)` uses ctypes to overwrite the internal buffer (best-effort)
-- [ ] **SEC-04**: All config/key generation uses `bytearray`/`SecretBytes` buffers -- secrets are never held in immutable Python `str` or `bytes` longer than necessary
-- [ ] **SEC-05**: Exception handlers wipe secrets in `finally` blocks; traceback chaining is suppressed with `raise X from None` where secrets could appear in frame locals
+- [x] **SEC-01**: A `SecretBytes` wrapper type (using `bytearray`, not `bytes`) is implemented as the very first component -- overrides `__repr__`, `__str__`, `__eq__`, `__hash__`, `__getstate__` to prevent accidental secret exposure in logs, tracebacks, or serialization
+- [x] **SEC-02**: `SecretBytes` calls `mlock()` via ctypes (best-effort, no exception on failure) to prevent secret memory from being swapped to disk
+- [x] **SEC-03**: `secrets_wipe.wipe_bytes(bytearray)` overwrites memory with zeros, random bytes, zeros before releasing; `wipe_string(str)` uses ctypes to overwrite the internal buffer (best-effort)
+- [x] **SEC-04**: All config/key generation uses `bytearray`/`SecretBytes` buffers -- secrets are never held in immutable Python `str` or `bytes` longer than necessary
+- [x] **SEC-05**: Exception handlers wipe secrets in `finally` blocks; traceback chaining is suppressed with `raise X from None` where secrets could appear in frame locals
 - [ ] **SEC-06**: AES-GCM nonces are generated with `os.urandom(12)` per encryption operation -- nonce reuse is architecturally impossible (never counters, never timestamps)
 
 ### Key Generation
@@ -97,9 +97,9 @@
 
 ### Security Hardening
 
-- [ ] **HARD-01**: Python minimum version is 3.12 (3.10 reaches EOL October 2026; 3.12 is the stable cross-platform target through 2028)
-- [ ] **HARD-02**: All dependencies are pinned with SHA-256 hashes in `requirements.txt` (via pip-tools `--generate-hashes`); installation requires `pip install --require-hashes`
-- [ ] **HARD-03**: `pip-audit` is run against pinned requirements as a CI validation step to catch known CVEs
+- [x] **HARD-01**: Python minimum version is 3.12 (3.10 reaches EOL October 2026; 3.12 is the stable cross-platform target through 2028)
+- [x] **HARD-02**: All dependencies are pinned with SHA-256 hashes in `requirements.txt` (via pip-tools `--generate-hashes`); installation requires `pip install --require-hashes`
+- [x] **HARD-03**: `pip-audit` is run against pinned requirements as a CI validation step to catch known CVEs
 - [ ] **HARD-04**: Process privilege is dropped after setup where possible; DuckDNS scheduled tasks run as non-root/non-SYSTEM user
 
 ### Test Suite
