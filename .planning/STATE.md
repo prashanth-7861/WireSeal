@@ -5,16 +5,16 @@
 See: .planning/PROJECT.md (updated 2026-03-17)
 
 **Core value:** Zero plaintext secrets on disk, ever -- if the vault is compromised without the passphrase, no key material is exposed.
-**Current focus:** Phase 1: Secure Core Engine -- COMPLETE. Next: Phase 2 (Platform Adapters)
+**Current focus:** Phase 2: Platform Hardening -- IN PROGRESS (plan 1 of 4 complete)
 
 ## Current Position
 
-Phase: 1 of 5 (Secure Core Engine) -- COMPLETE
-Plan: 4 of 4 in current phase (all plans complete)
-Status: Phase 1 Complete
-Last activity: 2026-03-18 -- Completed plan 01-04 (config generation pipeline: templates, validator, integrity, permissions)
+Phase: 2 of 5 (Platform Hardening) -- IN PROGRESS
+Plan: 1 of 4 in current phase (02-01 complete)
+Status: In Progress
+Last activity: 2026-03-18 -- Completed plan 02-01 (platform adapter foundation: ABC, exceptions, progress, firewall validator)
 
-Progress: [███░░░░░░░] 25% (4/16 plans complete)
+Progress: [████░░░░░░] 31% (5/16 plans complete)
 
 ## Performance Metrics
 
@@ -28,6 +28,7 @@ Progress: [███░░░░░░░] 25% (4/16 plans complete)
 | Phase | Plans | Total | Avg/Plan |
 |-------|-------|-------|----------|
 | 01-secure-core-engine | 4/4 | 12 min | 3 min |
+| 02-platform-hardening | 1/4 | 5 min | 5 min |
 
 **Recent Trend:**
 - Last 5 plans: 3 min
@@ -59,6 +60,10 @@ Recent decisions affecting current work:
 - [Phase 01-04]: validate_subnet uses strict=False to accept server IP format (10.0.0.1/24) -- strict=True wrongly rejected valid server IPs with host bits set
 - [Phase 01-04]: autoescape=False in Jinja2 Environment is correct for WireGuard INI -- autoescape=True would corrupt base64 = characters to HTML entities
 - [Phase 01-04]: atomic_write extracted from vault.py to security/atomic.py -- single source of truth for atomic writes
+- [02-01]: Lazy imports in get_adapter() isolate platform-specific stdlib (winreg, etc.) from cross-OS imports
+- [02-01]: validate_firewall_rules is both a module-level function and a concrete adapter method -- standalone use and subclass inheritance via delegation
+- [02-01]: PrivilegeError message format locked per platform: "sudo wg-automate" (Unix) vs "Run as Administrator" (Windows)
+- [02-01]: Progress.fail() uses (current - 1) for "steps completed" count to give accurate recovery hint
 
 ### Pending Todos
 
@@ -73,5 +78,5 @@ None.
 ## Session Continuity
 
 Last session: 2026-03-18
-Stopped at: Completed 01-04-PLAN.md (config generation pipeline: templates, validator, integrity, permissions) -- Phase 1 complete
+Stopped at: Completed 02-01-PLAN.md (platform adapter foundation: ABC, exceptions, progress reporter, firewall validator)
 Resume file: None

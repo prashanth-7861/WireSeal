@@ -36,7 +36,7 @@ Plans:
 - [x] 01-01-PLAN.md — SecretBytes type and memory safety primitives (security/secret_types.py, security/secrets_wipe.py)
 - [x] 01-02-PLAN.md — Encrypted vault with Argon2id KDF and AES-256-GCM (security/vault.py)
 - [x] 01-03-PLAN.md — Key generation, PSK, and IP pool management (core/keygen.py, core/psk.py, core/ip_pool.py)
-- [ ] 01-04-PLAN.md — Config builder, validator, integrity tracking, and atomic writes (core/config_builder.py, security/validator.py, security/integrity.py, security/permissions.py)
+- [x] 01-04-PLAN.md — Config builder, validator, integrity tracking, and atomic writes (core/config_builder.py, security/validator.py, security/integrity.py, security/permissions.py)
 
 ### Phase 2: Platform Hardening
 **Goal**: Users can run one-command server setup on Linux, macOS, or Windows with platform-native firewall hardening, service management, and correct file permissions
@@ -51,7 +51,7 @@ Plans:
 **Plans**: 4 plans
 
 Plans:
-- [ ] 02-01-PLAN.md — AbstractPlatformAdapter ABC, platform detection factory, exceptions, and progress reporter
+- [x] 02-01-PLAN.md — AbstractPlatformAdapter ABC, platform detection factory, exceptions, and progress reporter
 - [ ] 02-02-PLAN.md — Linux adapter: systemd, nftables deny-by-default, sysctl, non-root DNS user
 - [ ] 02-03-PLAN.md — macOS adapter: launchd, pfctl anchor, Homebrew, non-admin DNS user
 - [ ] 02-04-PLAN.md — Windows adapter: tunnel service, netsh firewall, registry IP forwarding, Task Scheduler DNS
@@ -113,7 +113,7 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 5
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 1. Secure Core Engine | 4/4 | Complete    | 2026-03-18 |
-| 2. Platform Hardening | 0/4 | Not started | - |
+| 2. Platform Hardening | 1/4 | In Progress | - |
 | 3. Dynamic DNS and Audit | 0/2 | Not started | - |
 | 4. CLI and Client Management | 0/3 | Not started | - |
 | 5. Tests and Packaging | 0/3 | Not started | - |

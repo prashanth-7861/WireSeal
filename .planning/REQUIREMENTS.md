@@ -49,18 +49,18 @@
 
 ### Platform Detection and Setup
 
-- [ ] **PLAT-01**: OS and version are detected at startup; tool refuses to run if not root/admin, OS is unsupported/EOL, or required tools are missing and cannot be installed
-- [ ] **PLAT-02**: Platform modules implement a shared `AbstractPlatformAdapter` ABC -- all three platforms (Linux, macOS, Windows) implement the same interface; missing method implementations cause import-time failure
+- [x] **PLAT-01**: OS and version are detected at startup; tool refuses to run if not root/admin, OS is unsupported/EOL, or required tools are missing and cannot be installed
+- [x] **PLAT-02**: Platform modules implement a shared `AbstractPlatformAdapter` ABC -- all three platforms (Linux, macOS, Windows) implement the same interface; missing method implementations cause import-time failure
 - [ ] **PLAT-03**: Linux setup installs WireGuard via package manager (with GPG signature verification), writes server config with atomic write + 600 permissions, enables IP forwarding via `/etc/sysctl.d/99-wireguard.conf`, applies nftables deny-by-default firewall (rate limit: 5 new connections/second burst 10), enables `wg-quick@wg0` via systemd, sets up DuckDNS cron as non-root `wg-automate` user
 - [ ] **PLAT-04**: macOS setup installs WireGuard via Homebrew, writes config with 600 permissions, enables IP forwarding via `/etc/sysctl.conf`, applies pfctl deny-by-default firewall anchor, configures launchd plist for auto-start and DuckDNS updates
 - [ ] **PLAT-05**: Windows setup installs WireGuard via winget (verifies installer signature), writes config to `%ProgramData%\WireGuard\wg0.conf` with SYSTEM+Administrators ACL only, sets `IPEnableRouter=1` in registry (warns about reboot), applies `netsh advfirewall` deny-by-default on WG interface, installs tunnel service via `wireguard.exe /installtunnelservice`, sets up DuckDNS via Task Scheduler
-- [ ] **PLAT-06**: File permission enforcement uses `os.chmod(600)` on Unix and `icacls`/`pywin32` on Windows -- `os.chmod()` is NOT used on Windows for security (it only sets read-only flag, not ACLs)
+- [x] **PLAT-06**: File permission enforcement uses `os.chmod(600)` on Unix and `icacls`/`pywin32` on Windows -- `os.chmod()` is NOT used on Windows for security (it only sets read-only flag, not ACLs)
 
 ### Firewall Hardening
 
 - [ ] **FW-01**: All platform firewall configurations are deny-by-default on the WireGuard interface -- only established/related traffic and rate-limited new UDP connections on the WireGuard port are accepted
 - [ ] **FW-02**: NAT masquerade is applied only on the detected outbound interface (via default route), not globally
-- [ ] **FW-03**: Generated firewall rules are validated against expected deny-by-default templates before application
+- [x] **FW-03**: Generated firewall rules are validated against expected deny-by-default templates before application
 
 ### Dynamic DNS
 
@@ -100,7 +100,7 @@
 - [x] **HARD-01**: Python minimum version is 3.12 (3.10 reaches EOL October 2026; 3.12 is the stable cross-platform target through 2028)
 - [x] **HARD-02**: All dependencies are pinned with SHA-256 hashes in `requirements.txt` (via pip-tools `--generate-hashes`); installation requires `pip install --require-hashes`
 - [x] **HARD-03**: `pip-audit` is run against pinned requirements as a CI validation step to catch known CVEs
-- [ ] **HARD-04**: Process privilege is dropped after setup where possible; DuckDNS scheduled tasks run as non-root/non-SYSTEM user
+- [x] **HARD-04**: Process privilege is dropped after setup where possible; DuckDNS scheduled tasks run as non-root/non-SYSTEM user
 
 ### Test Suite
 
