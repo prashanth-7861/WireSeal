@@ -35,8 +35,6 @@ Progress: [█████░░░░░] 50% (8/16 plans complete)
 - Trend: Stable
 
 *Updated after each plan completion*
-| Phase 02-platform-hardening P02 | 3 | 2 tasks | 1 files |
-| Phase 02-platform-hardening P04 | 3 | 2 tasks | 1 files |
 
 ## Accumulated Context
 
