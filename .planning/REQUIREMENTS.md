@@ -27,10 +27,10 @@
 
 ### Key Generation
 
-- [ ] **KEYGEN-01**: Server and client Curve25519 key pairs are generated using `cryptography.X25519PrivateKey.generate()` -- no subprocess call to `wg genkey` (keys never appear in `ps aux`)
-- [ ] **KEYGEN-02**: Generated private keys are extracted as `bytearray` (raw bytes), base64-encoded in memory, and passed directly to the vault -- they never touch disk unencrypted
-- [ ] **KEYGEN-03**: Per-peer pre-shared keys (PSK) are generated using `os.urandom(32)` -- 256-bit symmetric layer on top of Curve25519 for post-quantum resistance; every peer gets a unique PSK (no reuse)
-- [ ] **KEYGEN-04**: After use, key bytes are wiped via `secrets_wipe.wipe_bytes()` before the buffer is released
+- [x] **KEYGEN-01**: Server and client Curve25519 key pairs are generated using `cryptography.X25519PrivateKey.generate()` -- no subprocess call to `wg genkey` (keys never appear in `ps aux`)
+- [x] **KEYGEN-02**: Generated private keys are extracted as `bytearray` (raw bytes), base64-encoded in memory, and passed directly to the vault -- they never touch disk unencrypted
+- [x] **KEYGEN-03**: Per-peer pre-shared keys (PSK) are generated using `os.urandom(32)` -- 256-bit symmetric layer on top of Curve25519 for post-quantum resistance; every peer gets a unique PSK (no reuse)
+- [x] **KEYGEN-04**: After use, key bytes are wiped via `secrets_wipe.wipe_bytes()` before the buffer is released
 
 ### Config Generation and Validation
 
@@ -43,9 +43,9 @@
 
 ### IP Pool Management
 
-- [ ] **IP-01**: VPN subnet is configurable (default `10.0.0.0/24`); server always gets `.1`; clients get sequential addresses starting at `.2`
-- [ ] **IP-02**: IP allocation table is stored in the vault (encrypted); before assigning, conflicts are validated and subnet is verified as RFC 1918
-- [ ] **IP-03**: IP is released immediately and unconditionally when a client is removed -- no grace period
+- [x] **IP-01**: VPN subnet is configurable (default `10.0.0.0/24`); server always gets `.1`; clients get sequential addresses starting at `.2`
+- [x] **IP-02**: IP allocation table is stored in the vault (encrypted); before assigning, conflicts are validated and subnet is verified as RFC 1918
+- [x] **IP-03**: IP is released immediately and unconditionally when a client is removed -- no grace period
 
 ### Platform Detection and Setup
 

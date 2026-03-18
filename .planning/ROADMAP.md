@@ -35,7 +35,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 Plans:
 - [x] 01-01-PLAN.md — SecretBytes type and memory safety primitives (security/secret_types.py, security/secrets_wipe.py)
 - [x] 01-02-PLAN.md — Encrypted vault with Argon2id KDF and AES-256-GCM (security/vault.py)
-- [ ] 01-03-PLAN.md — Key generation, PSK, and IP pool management (core/keygen.py, core/psk.py, core/ip_pool.py)
+- [x] 01-03-PLAN.md — Key generation, PSK, and IP pool management (core/keygen.py, core/psk.py, core/ip_pool.py)
 - [ ] 01-04-PLAN.md — Config builder, validator, integrity tracking, and atomic writes (core/config_builder.py, security/validator.py, security/integrity.py, security/permissions.py)
 
 ### Phase 2: Platform Hardening
@@ -112,7 +112,7 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 5
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. Secure Core Engine | 2/4 | In Progress|  |
+| 1. Secure Core Engine | 3/4 | In Progress|  |
 | 2. Platform Hardening | 0/4 | Not started | - |
 | 3. Dynamic DNS and Audit | 0/2 | Not started | - |
 | 4. CLI and Client Management | 0/3 | Not started | - |

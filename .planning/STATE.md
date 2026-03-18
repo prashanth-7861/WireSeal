@@ -10,24 +10,24 @@ See: .planning/PROJECT.md (updated 2026-03-17)
 ## Current Position
 
 Phase: 1 of 5 (Secure Core Engine)
-Plan: 2 of 4 in current phase
+Plan: 3 of 4 in current phase
 Status: Executing
-Last activity: 2026-03-18 -- Completed plan 01-02 (encrypted vault with AES-256-GCM + Argon2id)
+Last activity: 2026-03-18 -- Completed plan 01-03 (key generation X25519/PSK + IP pool manager)
 
-Progress: [██░░░░░░░░] 13% (2/16 plans complete)
+Progress: [██░░░░░░░░] 19% (3/16 plans complete)
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 2
-- Average duration: 3 min
-- Total execution time: 0.08 hours
+- Total plans completed: 3
+- Average duration: 2 min
+- Total execution time: 0.10 hours
 
 **By Phase:**
 
 | Phase | Plans | Total | Avg/Plan |
 |-------|-------|-------|----------|
-| 01-secure-core-engine | 2/4 | 5 min | 3 min |
+| 01-secure-core-engine | 3/4 | 7 min | 2 min |
 
 **Recent Trend:**
 - Last 5 plans: 3 min
@@ -53,6 +53,9 @@ Recent decisions affecting current work:
 - [01-02]: Corrupted ct_len field raises VaultUnlockError (not VaultTamperedError) to preserve generic error contract
 - [01-02]: Argon2 params stored in binary header for forward-compatible decryption across parameter upgrades
 - [01-02]: 47-byte header used as AES-GCM AAD so header tampering also invalidates the authentication tag
+- [01-03]: Public key returned as plain bytes (not SecretBytes) -- WireGuard public keys are non-secret by design
+- [01-03]: Standard base64 (not url-safe) used for key encoding -- matches wg CLI output format
+- [01-03]: IPPool uses ip_network(strict=False) for user-friendly host-bit input (e.g., 10.0.0.1/24)
 
 ### Pending Todos
 
@@ -67,5 +70,5 @@ None.
 ## Session Continuity
 
 Last session: 2026-03-18
-Stopped at: Completed 01-02-PLAN.md (encrypted vault with AES-256-GCM + Argon2id KDF)
+Stopped at: Completed 01-03-PLAN.md (X25519 key generation, PSK generation, IP pool manager)
 Resume file: None
