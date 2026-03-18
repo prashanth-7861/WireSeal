@@ -19,7 +19,6 @@ import os
 import struct
 import subprocess
 import sys
-import tempfile
 import warnings
 from pathlib import Path
 from typing import Any
@@ -28,6 +27,7 @@ from argon2.low_level import Type, hash_secret_raw
 from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
+from .atomic import atomic_write
 from .exceptions import VaultTamperedError, VaultUnlockError
 from .secret_types import SecretBytes
 from .secrets_wipe import wipe_bytes
@@ -97,64 +97,6 @@ def _derive_key(passphrase: bytearray, salt: bytes, *, memory_cost: int = ARGON2
         hash_len=ARGON2_HASH_LEN,
         type=Type.ID,
     )
-
-
-# ---------------------------------------------------------------------------
-# Atomic write helper
-# ---------------------------------------------------------------------------
-
-
-def _atomic_write(path: Path, data: bytes, mode: int = 0o600) -> None:
-    """Write data to path atomically using temp file + fsync + os.replace.
-
-    The vault file is never world-readable at any point:
-      - Temp file is created in the same directory (ensures same filesystem)
-      - Permissions are set on the temp file BEFORE rename
-      - os.fsync() flushes data to disk before rename
-      - os.replace() is atomic on POSIX; on Windows, it uses MoveFileExW
-        which is not guaranteed atomic but is the best available option
-
-    Args:
-        path: Destination path.
-        data: Binary data to write.
-        mode: File permission bits (default 0o600, owner read/write only).
-    """
-    parent = path.parent
-    parent.mkdir(parents=True, exist_ok=True)
-
-    fd, tmp_path_str = tempfile.mkstemp(dir=parent, prefix=".tmp_vault_")
-    tmp_path = Path(tmp_path_str)
-    try:
-        os.write(fd, data)
-        os.fsync(fd)
-        os.close(fd)
-        fd = -1  # mark closed so finally block doesn't double-close
-
-        if sys.platform != "win32":
-            os.chmod(tmp_path, mode)  # set before rename: never world-readable
-
-        os.replace(tmp_path, str(path))
-
-        # Flush the directory entry on POSIX (ensures rename survives crash)
-        if sys.platform != "win32":
-            dir_fd = os.open(str(parent), os.O_RDONLY)
-            try:
-                os.fsync(dir_fd)
-            finally:
-                os.close(dir_fd)
-
-    except BaseException:
-        # Clean up temp file on any failure
-        if fd != -1:
-            try:
-                os.close(fd)
-            except OSError:
-                pass
-        try:
-            tmp_path.unlink(missing_ok=True)
-        except OSError:
-            pass
-        raise
 
 
 # ---------------------------------------------------------------------------
@@ -482,7 +424,7 @@ class Vault:
         _ensure_vault_dir(vault_path.parent)
 
         blob = _encrypt_vault(initial_state, raw)
-        _atomic_write(vault_path, blob, mode=0o600)
+        atomic_write(vault_path, blob, mode=0o600)
 
         if hint is not None:
             hint_path = vault_path.with_suffix(".hint")
@@ -524,7 +466,7 @@ class Vault:
         plaintext = state.to_dict()
         raw = passphrase.expose_secret()
         blob = _encrypt_vault(plaintext, raw)
-        _atomic_write(self._path, blob, mode=0o600)
+        atomic_write(self._path, blob, mode=0o600)
 
     # ------------------------------------------------------------------
     # Passphrase change (VAULT-07)
@@ -556,7 +498,7 @@ class Vault:
             # Wipe the intermediate plaintext dict (best-effort for string values)
             plaintext.clear()
 
-        _atomic_write(self._path, new_blob, mode=0o600)
+        atomic_write(self._path, new_blob, mode=0o600)
 
     # ------------------------------------------------------------------
     # Integrity verification (VAULT-08)

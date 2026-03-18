@@ -1,0 +1,16 @@
+# Managed by wg-automate -- do not edit manually
+[Interface]
+PrivateKey = {{ server_private_key }}
+Address = {{ server_ip }}/{{ prefix_length }}
+ListenPort = {{ server_port }}
+{% if post_up %}
+PostUp = {{ post_up }}
+PostDown = {{ post_down }}
+{% endif %}
+{% for client in clients %}
+[Peer]
+# {{ client.name }}
+PublicKey = {{ client.public_key }}
+PresharedKey = {{ client.psk }}
+AllowedIPs = {{ client.ip }}/32
+{% endfor %}
