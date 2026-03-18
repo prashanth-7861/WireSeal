@@ -10,28 +10,28 @@ See: .planning/PROJECT.md (updated 2026-03-17)
 ## Current Position
 
 Phase: 1 of 5 (Secure Core Engine)
-Plan: 1 of 4 in current phase
+Plan: 2 of 4 in current phase
 Status: Executing
-Last activity: 2026-03-18 -- Completed plan 01-01 (project skeleton + security primitives)
+Last activity: 2026-03-18 -- Completed plan 01-02 (encrypted vault with AES-256-GCM + Argon2id)
 
-Progress: [█░░░░░░░░░] 6% (1/16 plans complete)
+Progress: [██░░░░░░░░] 13% (2/16 plans complete)
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 1
-- Average duration: 2 min
-- Total execution time: 0.03 hours
+- Total plans completed: 2
+- Average duration: 3 min
+- Total execution time: 0.08 hours
 
 **By Phase:**
 
 | Phase | Plans | Total | Avg/Plan |
 |-------|-------|-------|----------|
-| 01-secure-core-engine | 1/4 | 2 min | 2 min |
+| 01-secure-core-engine | 2/4 | 5 min | 3 min |
 
 **Recent Trend:**
-- Last 5 plans: 2 min
-- Trend: Baseline established
+- Last 5 plans: 3 min
+- Trend: Stable
 
 *Updated after each plan completion*
 
@@ -50,6 +50,9 @@ Recent decisions affecting current work:
 - [01-01]: Python upper bound widened to <3.15 -- installed Python is 3.14.2; original <3.14 excluded it
 - [01-01]: setuptools.build_meta used (not setuptools.backends.legacy:build -- path invalid in setuptools 80.9)
 - [01-01]: wipe_bytes uses simple index-based loop (cleaner than ctypes memmove for bytearray item assignment)
+- [01-02]: Corrupted ct_len field raises VaultUnlockError (not VaultTamperedError) to preserve generic error contract
+- [01-02]: Argon2 params stored in binary header for forward-compatible decryption across parameter upgrades
+- [01-02]: 47-byte header used as AES-GCM AAD so header tampering also invalidates the authentication tag
 
 ### Pending Todos
 
@@ -64,5 +67,5 @@ None.
 ## Session Continuity
 
 Last session: 2026-03-18
-Stopped at: Completed 01-01-PLAN.md (project skeleton + SecretBytes security primitives)
+Stopped at: Completed 01-02-PLAN.md (encrypted vault with AES-256-GCM + Argon2id KDF)
 Resume file: None

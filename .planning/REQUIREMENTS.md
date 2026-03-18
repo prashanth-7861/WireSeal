@@ -7,14 +7,14 @@
 
 ### Vault (Encrypted State Storage)
 
-- [ ] **VAULT-01**: User's private keys and tokens are stored encrypted at rest using AES-256-GCM with Argon2id-derived key (256MB/4iter/4par) -- vault file at `~/.wg-automate/vault.enc` (chmod 600)
-- [ ] **VAULT-02**: Vault directory `~/.wg-automate/` is created with 700 permissions; on Windows, ACL is set via icacls/pywin32 (SYSTEM + Administrators only; no Users)
-- [ ] **VAULT-03**: Master passphrase is collected via `getpass` (never echoed, never logged); minimum 12 characters enforced
-- [ ] **VAULT-04**: Vault state is decrypted to memory only, operated on in a context manager (`with vault.open() as state:`), and wiped in the `finally` block even on exception
-- [ ] **VAULT-05**: All vault writes are atomic -- written to `.tmp` with `O_CREAT|O_EXCL`, fsynced, then renamed via `os.replace()` (cross-platform atomic, unlike `os.rename()`)
-- [ ] **VAULT-06**: Tampered vault (wrong passphrase or modified ciphertext) is detected and rejected immediately via GCM authentication tag -- no partial decryption
-- [ ] **VAULT-07**: Vault passphrase can be changed without losing state (`change_passphrase(old, new)` -- decrypt with old, re-encrypt with new, atomic write)
-- [ ] **VAULT-08**: Vault integrity can be verified on demand (`verify_integrity()` -- checks AES-GCM tag + Argon2 salt integrity)
+- [x] **VAULT-01**: User's private keys and tokens are stored encrypted at rest using AES-256-GCM with Argon2id-derived key (256MB/4iter/4par) -- vault file at `~/.wg-automate/vault.enc` (chmod 600)
+- [x] **VAULT-02**: Vault directory `~/.wg-automate/` is created with 700 permissions; on Windows, ACL is set via icacls/pywin32 (SYSTEM + Administrators only; no Users)
+- [x] **VAULT-03**: Master passphrase is collected via `getpass` (never echoed, never logged); minimum 12 characters enforced
+- [x] **VAULT-04**: Vault state is decrypted to memory only, operated on in a context manager (`with vault.open() as state:`), and wiped in the `finally` block even on exception
+- [x] **VAULT-05**: All vault writes are atomic -- written to `.tmp` with `O_CREAT|O_EXCL`, fsynced, then renamed via `os.replace()` (cross-platform atomic, unlike `os.rename()`)
+- [x] **VAULT-06**: Tampered vault (wrong passphrase or modified ciphertext) is detected and rejected immediately via GCM authentication tag -- no partial decryption
+- [x] **VAULT-07**: Vault passphrase can be changed without losing state (`change_passphrase(old, new)` -- decrypt with old, re-encrypt with new, atomic write)
+- [x] **VAULT-08**: Vault integrity can be verified on demand (`verify_integrity()` -- checks AES-GCM tag + Argon2 salt integrity)
 
 ### Secret Types and Memory Safety
 
@@ -23,7 +23,7 @@
 - [x] **SEC-03**: `secrets_wipe.wipe_bytes(bytearray)` overwrites memory with zeros, random bytes, zeros before releasing; `wipe_string(str)` uses ctypes to overwrite the internal buffer (best-effort)
 - [x] **SEC-04**: All config/key generation uses `bytearray`/`SecretBytes` buffers -- secrets are never held in immutable Python `str` or `bytes` longer than necessary
 - [x] **SEC-05**: Exception handlers wipe secrets in `finally` blocks; traceback chaining is suppressed with `raise X from None` where secrets could appear in frame locals
-- [ ] **SEC-06**: AES-GCM nonces are generated with `os.urandom(12)` per encryption operation -- nonce reuse is architecturally impossible (never counters, never timestamps)
+- [x] **SEC-06**: AES-GCM nonces are generated with `os.urandom(12)` per encryption operation -- nonce reuse is architecturally impossible (never counters, never timestamps)
 
 ### Key Generation
 
