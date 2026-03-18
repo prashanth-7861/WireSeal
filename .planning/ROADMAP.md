@@ -23,7 +23,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 ### Phase 1: Secure Core Engine
 **Goal**: Users have a cryptographically sound foundation where secrets are type-safe, vault-encrypted, and never exposed -- all downstream phases build on this proven base
 **Depends on**: Nothing (first phase)
-**Requirements**: SEC-01, SEC-02, SEC-03, SEC-04, SEC-05, SEC-06, VAULT-01, VAULT-02, VAULT-03, VAULT-04, VAULT-05, VAULT-06, VAULT-07, VAULT-08, KEYGEN-01, KEYGEN-02, KEYGEN-03, KEYGEN-04, CONFIG-01, CONFIG-02, CONFIG-03, CONFIG-04, CONFIG-05, CONFIG-06, IP-01, IP-02, IP-03, HARD-01, HARD-02, HARD-03, HARD-04
+**Requirements**: SEC-01, SEC-02, SEC-03, SEC-04, SEC-05, SEC-06, VAULT-01, VAULT-02, VAULT-03, VAULT-04, VAULT-05, VAULT-06, VAULT-07, VAULT-08, KEYGEN-01, KEYGEN-02, KEYGEN-03, KEYGEN-04, CONFIG-01, CONFIG-02, CONFIG-03, CONFIG-04, CONFIG-05, CONFIG-06, IP-01, IP-02, IP-03, HARD-01, HARD-02, HARD-03
 **Success Criteria** (what must be TRUE):
   1. `SecretBytes` wrapper prevents secret exposure in repr, str, tracebacks, and serialization -- and wipes memory on release
   2. Vault encrypts and decrypts state via context manager; wrong passphrase and tampered ciphertext are both rejected immediately
