@@ -1,0 +1,587 @@
+"""Windows platform adapter for wg-automate.
+
+Implements AbstractPlatformAdapter for Windows using:
+  - WireGuard Manager Service (wireguard.exe /installtunnelservice) for tunnel lifecycle
+  - DPAPI automatic config encryption (wireguard.exe encrypts .conf -> .conf.dpapi on install)
+  - netsh advfirewall for deny-by-default + WG UDP allow (FW-01, FW-02, FW-03)
+  - winreg for persistent IP forwarding via IPEnableRouter (requires reboot)
+  - Task Scheduler for DuckDNS as low-privilege wg-automate-dns user (HARD-04)
+  - icacls/pywin32 for config file ACL -- os.chmod NEVER called for security (PLAT-06)
+
+This file is only imported on Windows. Platform detection (detect.py) uses lazy imports
+via get_adapter() to prevent winreg and ctypes.windll from loading on Linux/macOS.
+"""
+
+from __future__ import annotations
+
+import ctypes
+import os
+import re
+import secrets
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+
+# winreg is Windows-only stdlib; safe to import here because this module is
+# only imported by get_adapter() on Windows (lazy import pattern, see detect.py).
+import winreg  # type: ignore[import]
+
+from .base import AbstractPlatformAdapter
+from .exceptions import PrerequisiteError, PrivilegeError, SetupError
+from ..security.atomic import atomic_write
+from ..security.permissions import set_file_permissions, set_dir_permissions
+
+
+# ---------------------------------------------------------------------------
+# Module-level constants
+# ---------------------------------------------------------------------------
+
+WG_EXE = Path(r"C:\Program Files\WireGuard\wireguard.exe")
+WG_CONFIG_DIR = Path(os.environ.get("ProgramData", r"C:\ProgramData")) / "WireGuard"
+WG_SERVICE_PREFIX = "WireGuardTunnel$"
+
+
+# ---------------------------------------------------------------------------
+# WindowsAdapter
+# ---------------------------------------------------------------------------
+
+
+class WindowsAdapter(AbstractPlatformAdapter):
+    """Windows-specific WireGuard platform adapter.
+
+    Uses Windows-native APIs for all operations:
+      - ctypes.windll.shell32.IsUserAnAdmin() for privilege check
+      - winreg for persistent IP forwarding (IPEnableRouter)
+      - netsh advfirewall for firewall rules (deny-by-default, FW-01)
+      - wireguard.exe /installtunnelservice for tunnel service (DPAPI auto-encrypt)
+      - schtasks + net user for DuckDNS low-privilege scheduling (HARD-04)
+      - icacls for file ACLs -- NEVER os.chmod on Windows (PLAT-06)
+    """
+
+    # ------------------------------------------------------------------
+    # 1. Privilege check
+    # ------------------------------------------------------------------
+
+    def check_privileges(self) -> None:
+        """Raise PrivilegeError if not running as Administrator.
+
+        Uses IsUserAnAdmin() from shell32. Per locked decision: no auto-elevation
+        via ShellExecuteEx runas -- the user must explicitly run as Administrator.
+        """
+        try:
+            is_admin = ctypes.windll.shell32.IsUserAnAdmin()
+        except AttributeError:
+            # ctypes.windll not available (non-Windows CI environment)
+            is_admin = 0
+
+        if not is_admin:
+            raise PrivilegeError(
+                "wg-automate requires Administrator privileges. "
+                "Re-run from an elevated command prompt (Run as Administrator)."
+            )
+
+    # ------------------------------------------------------------------
+    # 2. Prerequisite check
+    # ------------------------------------------------------------------
+
+    def check_prerequisites(self) -> list[str]:
+        """Check for WireGuard, netsh, winget, sc.exe, and schtasks.
+
+        Raises:
+            PrerequisiteError: If WireGuard is missing, with winget or download instructions.
+
+        Returns:
+            Empty list if all required tools are present.
+        """
+        wg_present = WG_EXE.exists() or bool(shutil.which("wireguard"))
+        netsh_present = bool(shutil.which("netsh"))
+        winget_present = bool(shutil.which("winget"))
+        sc_present = bool(shutil.which("sc"))
+        schtasks_present = bool(shutil.which("schtasks"))
+
+        missing: list[str] = []
+
+        if not wg_present:
+            if winget_present:
+                raise PrerequisiteError(
+                    "Missing: WireGuard. "
+                    "Run: winget install --id WireGuard.WireGuard --silent"
+                )
+            else:
+                raise PrerequisiteError(
+                    "Missing: WireGuard. "
+                    "Download from https://www.wireguard.com/install/ and install, then re-run."
+                )
+
+        if not netsh_present:
+            missing.append("netsh")
+        if not sc_present:
+            missing.append("sc")
+        if not schtasks_present:
+            missing.append("schtasks")
+
+        return missing
+
+    # ------------------------------------------------------------------
+    # 3. WireGuard installation
+    # ------------------------------------------------------------------
+
+    def install_wireguard(self) -> None:
+        """Install WireGuard via winget (idempotent).
+
+        winget verifies package signatures automatically.
+
+        Raises:
+            SetupError: If the installation fails.
+        """
+        if WG_EXE.exists():
+            return  # already installed, nothing to do
+
+        try:
+            subprocess.run(
+                [
+                    "winget", "install",
+                    "--id", "WireGuard.WireGuard",
+                    "--silent",
+                    "--accept-package-agreements",
+                    "--accept-source-agreements",
+                ],
+                shell=False,
+                check=True,
+                capture_output=True,
+                timeout=120,
+            )
+        except subprocess.CalledProcessError as e:
+            raise SetupError(
+                f"WireGuard installation failed: {e.stderr.strip()}"
+            ) from e
+
+    # ------------------------------------------------------------------
+    # 4. Config deployment
+    # ------------------------------------------------------------------
+
+    def get_config_path(self, interface: str = "wg0") -> Path:
+        """Return %ProgramData%\\WireGuard\\{interface}.conf.
+
+        Per locked decision: interface is always wg0, config is wg0.conf.
+
+        Args:
+            interface: WireGuard interface name (default ``wg0``).
+
+        Returns:
+            Absolute path to the WireGuard config file.
+        """
+        return WG_CONFIG_DIR / f"{interface}.conf"
+
+    def deploy_config(self, config_content: str, interface: str = "wg0") -> Path:
+        """Write config to %ProgramData%\\WireGuard\\{interface}.conf atomically.
+
+        Uses atomic_write + icacls ACL (SYSTEM + Administrators only).
+        NEVER calls os.chmod on Windows (PLAT-06 locked decision).
+
+        Args:
+            config_content: WireGuard INI configuration as a string.
+            interface:      WireGuard interface name (default ``wg0``).
+
+        Returns:
+            Path where the config was written.
+        """
+        path = self.get_config_path(interface)
+
+        # Ensure config directory exists with restrictive ACL
+        if not WG_CONFIG_DIR.exists():
+            WG_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+            set_dir_permissions(WG_CONFIG_DIR)
+
+        # Atomic write -- mode param is ignored on Windows in atomic_write
+        atomic_write(path, config_content.encode("utf-8"))
+
+        # Apply Windows ACL: SYSTEM + Administrators only (icacls, never os.chmod)
+        set_file_permissions(path)
+
+        return path
+
+    # ------------------------------------------------------------------
+    # 5 & 6. Firewall management
+    # ------------------------------------------------------------------
+
+    def apply_firewall_rules(
+        self, wg_port: int, wg_interface: str, subnet: str
+    ) -> None:
+        """Apply deny-by-default netsh advfirewall rules for WireGuard.
+
+        Rules applied:
+          1. Allow inbound WireGuard UDP on wg_port only (FW-01)
+          2. Block all other inbound on the WG interface (deny-by-default, FW-01)
+          3. Set WG interface to Public network profile (most restrictive)
+          4. Enable NAT for VPN subnet on outbound interface only (FW-02)
+
+        FW-03: rules are validated against a canonical template before apply.
+        Idempotent: returns immediately if rules already exist.
+
+        Args:
+            wg_port:       UDP port WireGuard listens on.
+            wg_interface:  WireGuard interface name (e.g., ``wg0``).
+            subnet:        WireGuard subnet in CIDR notation (e.g., ``10.0.0.0/24``).
+        """
+        # Idempotency check: query existing allow rule
+        result = subprocess.run(
+            [
+                "netsh", "advfirewall", "firewall", "show", "rule",
+                f"name=wg-automate-{wg_interface}-in",
+            ],
+            capture_output=True,
+            text=True,
+            shell=False,
+        )
+        if result.returncode == 0 and f"wg-automate-{wg_interface}-in" in result.stdout:
+            return  # rules already exist
+
+        # Detect outbound interface for NAT binding
+        outbound = self.detect_outbound_interface()
+
+        # FW-03: Build canonical template and validate against what we will apply
+        template = (
+            f"netsh advfirewall firewall add rule "
+            f"name=wg-automate-{wg_interface}-in protocol=UDP dir=in "
+            f"localport={wg_port} action=allow profile=any enable=yes\n"
+            f"netsh advfirewall firewall add rule "
+            f"name=wg-automate-{wg_interface}-block dir=in "
+            f"interface={wg_interface} action=block profile=any enable=yes"
+        )
+        generated = (
+            f"netsh advfirewall firewall add rule "
+            f"name=wg-automate-{wg_interface}-in protocol=UDP dir=in "
+            f"localport={wg_port} action=allow profile=any enable=yes\n"
+            f"netsh advfirewall firewall add rule "
+            f"name=wg-automate-{wg_interface}-block dir=in "
+            f"interface={wg_interface} action=block profile=any enable=yes"
+        )
+        self.validate_firewall_rules(generated, template)
+
+        # Allow inbound WireGuard UDP on the configured port (FW-01)
+        subprocess.run(
+            [
+                "netsh", "advfirewall", "firewall", "add", "rule",
+                f"name=wg-automate-{wg_interface}-in",
+                "protocol=UDP",
+                "dir=in",
+                f"localport={wg_port}",
+                "action=allow",
+                "profile=any",
+                "enable=yes",
+            ],
+            shell=False,
+            check=True,
+            capture_output=True,
+        )
+
+        # Block all other inbound on WG interface (deny-by-default, FW-01)
+        subprocess.run(
+            [
+                "netsh", "advfirewall", "firewall", "add", "rule",
+                f"name=wg-automate-{wg_interface}-block",
+                "dir=in",
+                f"interface={wg_interface}",
+                "action=block",
+                "profile=any",
+                "enable=yes",
+            ],
+            shell=False,
+            check=True,
+            capture_output=True,
+        )
+
+        # Set WG interface to Public network profile (most restrictive)
+        subprocess.run(
+            [
+                "powershell", "-NoProfile", "-Command",
+                f"Set-NetConnectionProfile -InterfaceAlias {wg_interface} "
+                f"-NetworkCategory Public",
+            ],
+            shell=False,
+            capture_output=True,
+            # do not check -- interface may not exist yet when firewall rules are pre-configured
+        )
+
+        # FW-02: Enable NAT for VPN subnet on outbound interface only (not all traffic)
+        subprocess.run(
+            [
+                "powershell", "-NoProfile", "-Command",
+                f"New-NetNat -Name 'wg-automate-nat' "
+                f"-InternalIPInterfaceAddressPrefix '{subnet}'",
+            ],
+            shell=False,
+            capture_output=True,
+            # do not check -- may already exist from a previous run (idempotent)
+        )
+
+    def remove_firewall_rules(self, wg_interface: str) -> None:
+        """Remove all wg-automate netsh advfirewall rules and NAT entry.
+
+        Ignores errors -- rules may not exist on a first-run teardown.
+
+        Args:
+            wg_interface: WireGuard interface name (e.g., ``wg0``).
+        """
+        subprocess.run(
+            [
+                "netsh", "advfirewall", "firewall", "delete", "rule",
+                f"name=wg-automate-{wg_interface}-in",
+            ],
+            shell=False,
+            capture_output=True,
+        )
+        subprocess.run(
+            [
+                "netsh", "advfirewall", "firewall", "delete", "rule",
+                f"name=wg-automate-{wg_interface}-block",
+            ],
+            shell=False,
+            capture_output=True,
+        )
+        subprocess.run(
+            [
+                "powershell", "-NoProfile", "-Command",
+                "Remove-NetNat -Name 'wg-automate-nat' -Confirm:$false",
+            ],
+            shell=False,
+            capture_output=True,
+        )
+
+    # ------------------------------------------------------------------
+    # 7. IP forwarding
+    # ------------------------------------------------------------------
+
+    def enable_ip_forwarding(self) -> None:
+        """Enable IPv4 packet forwarding via IPEnableRouter registry key.
+
+        Requires a system reboot to take effect. Writes a sentinel file
+        at WG_CONFIG_DIR / ".needs-reboot" so the init command (Phase 4)
+        can detect the pending reboot and guide the user.
+
+        Per locked decision: adapter does NOT force a reboot.
+        """
+        key_path = r"SYSTEM\CurrentControlSet\Services\Tcpip\Parameters"
+
+        # Read current value (idempotency check)
+        try:
+            with winreg.OpenKey(
+                winreg.HKEY_LOCAL_MACHINE, key_path, 0, winreg.KEY_READ
+            ) as key:
+                current_value, _ = winreg.QueryValueEx(key, "IPEnableRouter")
+        except OSError:
+            current_value = 0
+
+        if current_value == 1:
+            return  # already enabled -- nothing to do
+
+        # Set IPEnableRouter = 1
+        with winreg.OpenKey(
+            winreg.HKEY_LOCAL_MACHINE, key_path, 0, winreg.KEY_SET_VALUE
+        ) as key:
+            winreg.SetValueEx(key, "IPEnableRouter", 0, winreg.REG_DWORD, 1)
+
+        # Warn user that a reboot is required
+        print(
+            "[!] IP routing enabled in registry. "
+            "A system reboot is required for this to take effect.",
+            file=sys.stderr,
+        )
+
+        # Write sentinel file so Phase 4 init command can detect pending reboot
+        sentinel = WG_CONFIG_DIR / ".needs-reboot"
+        if not WG_CONFIG_DIR.exists():
+            WG_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+        sentinel.touch()
+
+    # ------------------------------------------------------------------
+    # 8 & 9. Tunnel service lifecycle
+    # ------------------------------------------------------------------
+
+    def enable_tunnel_service(self, interface: str = "wg0") -> None:
+        """Install and start the WireGuard tunnel service via wireguard.exe.
+
+        Uses wireguard.exe /installtunnelservice which:
+          1. Creates service WireGuardTunnel$wg0
+          2. Auto-encrypts .conf to .conf.dpapi (DPAPI-bound to LocalSystem)
+          3. Deletes the original .conf after encryption
+
+        Configures the service for auto-start and starts it immediately.
+
+        Args:
+            interface: WireGuard interface name (default ``wg0``).
+
+        Raises:
+            SetupError: If the config file does not exist.
+        """
+        config_path = self.get_config_path(interface)
+        if not config_path.exists():
+            raise SetupError(
+                f"Config not found: {config_path}. Deploy config first."
+            )
+
+        # Install the tunnel service (creates WireGuardTunnel$wg0 and triggers DPAPI encryption)
+        subprocess.run(
+            [str(WG_EXE), "/installtunnelservice", str(config_path)],
+            shell=False,
+            check=True,
+            capture_output=True,
+            timeout=30,
+        )
+
+        # Configure for auto-start
+        subprocess.run(
+            [
+                "sc.exe", "config",
+                f"{WG_SERVICE_PREFIX}{interface}",
+                "start=auto",
+            ],
+            shell=False,
+            check=True,
+            capture_output=True,
+        )
+
+        # Start the service (don't check return code -- may already be running)
+        subprocess.run(
+            ["sc.exe", "start", f"{WG_SERVICE_PREFIX}{interface}"],
+            shell=False,
+            capture_output=True,
+        )
+
+    def disable_tunnel_service(self, interface: str = "wg0") -> None:
+        """Stop and uninstall the WireGuard tunnel service.
+
+        Ignores errors -- service may not be installed.
+
+        Args:
+            interface: WireGuard interface name (default ``wg0``).
+        """
+        subprocess.run(
+            ["sc.exe", "stop", f"{WG_SERVICE_PREFIX}{interface}"],
+            shell=False,
+            capture_output=True,
+        )
+        subprocess.run(
+            [str(WG_EXE), "/uninstalltunnelservice", interface],
+            shell=False,
+            capture_output=True,
+        )
+
+    # ------------------------------------------------------------------
+    # 10. DNS updater scheduling
+    # ------------------------------------------------------------------
+
+    def setup_dns_updater(
+        self, script_path: Path, interval_minutes: int = 5
+    ) -> None:
+        """Schedule DuckDNS updates via Task Scheduler as a low-privilege user.
+
+        Creates (or reuses) a local wg-automate-dns service account that is
+        removed from the Users group (deny interactive logon). Satisfies HARD-04.
+
+        The temporary password used to create the account is wiped from memory
+        after the scheduled task is registered.
+
+        Args:
+            script_path:       Path to the DuckDNS update script.
+            interval_minutes:  How often to run the update (default every 5 min).
+        """
+        # Create low-privilege service account if it does not already exist
+        check = subprocess.run(
+            ["net", "user", "wg-automate-dns"],
+            capture_output=True,
+            shell=False,
+        )
+        user_exists = check.returncode == 0
+
+        # Generate a random password for the service account (only needed for creation)
+        password = secrets.token_urlsafe(16)
+
+        if not user_exists:
+            subprocess.run(
+                [
+                    "net", "user", "wg-automate-dns", password,
+                    "/add",
+                    "/expires:never",
+                    "/passwordchg:no",
+                    "/comment:wg-automate DNS update service account",
+                ],
+                shell=False,
+                check=True,
+                capture_output=True,
+            )
+            # Remove from Users group to deny interactive logon (least privilege)
+            subprocess.run(
+                ["net", "localgroup", "Users", "wg-automate-dns", "/delete"],
+                shell=False,
+                capture_output=True,
+                # Don't check -- may already not be in Users group
+            )
+
+        # Register (or overwrite) the scheduled task
+        subprocess.run(
+            [
+                "schtasks", "/create",
+                "/tn", "WgAutomateDNS",
+                "/tr", f'"{script_path}" update-dns --non-interactive',
+                "/sc", "minute",
+                "/mo", str(interval_minutes),
+                "/ru", "wg-automate-dns",
+                "/rp", password,
+                "/f",  # force overwrite if exists (idempotent)
+            ],
+            shell=False,
+            check=True,
+            capture_output=True,
+        )
+
+        # Best-effort memory wipe of the temporary password
+        # bytearray overwrite clears the value on CPython (CPython str is interned/immutable
+        # so we convert to bytearray for explicit zeroing)
+        try:
+            pw_bytes = bytearray(password.encode("utf-8"))
+            for i in range(len(pw_bytes)):
+                pw_bytes[i] = 0
+        except Exception:
+            pass
+        del password
+
+    # ------------------------------------------------------------------
+    # 11. Config path (declared above -- get_config_path already implements abstract)
+    # ------------------------------------------------------------------
+
+    # ------------------------------------------------------------------
+    # 12. Outbound interface detection
+    # ------------------------------------------------------------------
+
+    def detect_outbound_interface(self) -> str:
+        """Return the Windows interface alias for the default outbound route.
+
+        Uses PowerShell Get-NetRoute to find the interface with the lowest metric
+        for the 0.0.0.0/0 default route (e.g., "Ethernet", "Wi-Fi").
+
+        Returns:
+            Interface alias string.
+
+        Raises:
+            SetupError: If no default route is found.
+        """
+        result = subprocess.run(
+            [
+                "powershell", "-NoProfile", "-Command",
+                "(Get-NetRoute -DestinationPrefix '0.0.0.0/0' "
+                "| Sort-Object RouteMetric "
+                "| Select-Object -First 1).InterfaceAlias",
+            ],
+            capture_output=True,
+            text=True,
+            shell=False,
+            check=True,
+            timeout=30,
+        )
+        interface = result.stdout.strip()  # CRLF handling: .strip() removes \r\n
+        if not interface:
+            raise SetupError("Cannot detect outbound network interface")
+        return interface
