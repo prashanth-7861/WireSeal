@@ -5,30 +5,30 @@
 See: .planning/PROJECT.md (updated 2026-03-17)
 
 **Core value:** Zero plaintext secrets on disk, ever -- if the vault is compromised without the passphrase, no key material is exposed.
-**Current focus:** Phase 2: Platform Hardening -- IN PROGRESS (plan 3 of 4 complete)
+**Current focus:** Phase 2: Platform Hardening -- COMPLETE (all 4 plans done)
 
 ## Current Position
 
-Phase: 2 of 5 (Platform Hardening) -- IN PROGRESS
-Plan: 3 of 4 in current phase (02-03 complete)
-Status: In Progress
-Last activity: 2026-03-18 -- Completed plan 02-03 (MacOSAdapter: pfctl anchor firewall, launchd service, sysctl IP forwarding, Homebrew root refusal)
+Phase: 2 of 5 (Platform Hardening) -- COMPLETE
+Plan: 4 of 4 in current phase (02-04 complete)
+Status: Phase Complete -- ready for Phase 3
+Last activity: 2026-03-18 -- Completed plan 02-04 (WindowsAdapter: netsh firewall, winreg IP forwarding, wireguard.exe tunnel service, Task Scheduler DNS)
 
-Progress: [█████░░░░░] 44% (7/16 plans complete)
+Progress: [█████░░░░░] 50% (8/16 plans complete)
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 7
+- Total plans completed: 8
 - Average duration: 3 min
-- Total execution time: 0.30 hours
+- Total execution time: 0.40 hours
 
 **By Phase:**
 
 | Phase | Plans | Total | Avg/Plan |
 |-------|-------|-------|----------|
 | 01-secure-core-engine | 4/4 | 12 min | 3 min |
-| 02-platform-hardening | 3/4 | 9 min | 3 min |
+| 02-platform-hardening | 4/4 | 12 min | 3 min |
 
 **Recent Trend:**
 - Last 5 plans: 3 min
@@ -78,12 +78,12 @@ None.
 
 ### Blockers/Concerns
 
-- [Phase 2]: Windows WireGuard tunnel service API (DPAPI config store, named pipe IPC) needs verification -- biggest unknown in the project
+- [Phase 3]: Windows WireGuard tunnel service API (wireguard.exe /installtunnelservice + DPAPI) implemented per research -- needs runtime verification on actual Windows with WireGuard installed
 - [Phase 2]: macOS SIP/TCC restrictions evolve per release -- pfctl anchor approach needs testing on current macOS
 - [Phase 5]: PyInstaller behavior with ctypes mlock calls needs verification
 
 ## Session Continuity
 
 Last session: 2026-03-18
-Stopped at: Completed 02-02-PLAN.md (LinuxAdapter with nftables firewall, systemd service, sysctl.d IP forwarding, HARD-04 cron user)
+Stopped at: Completed 02-04-PLAN.md (WindowsAdapter: netsh advfirewall, winreg IPEnableRouter, wireguard.exe /installtunnelservice DPAPI, Task Scheduler DNS as wg-automate-dns)
 Resume file: None
