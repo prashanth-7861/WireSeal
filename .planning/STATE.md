@@ -5,36 +5,38 @@
 See: .planning/PROJECT.md (updated 2026-03-17)
 
 **Core value:** Zero plaintext secrets on disk, ever -- if the vault is compromised without the passphrase, no key material is exposed.
-**Current focus:** Phase 2: Platform Hardening -- IN PROGRESS (plan 1 of 4 complete)
+**Current focus:** Phase 2: Platform Hardening -- IN PROGRESS (plan 3 of 4 complete)
 
 ## Current Position
 
 Phase: 2 of 5 (Platform Hardening) -- IN PROGRESS
-Plan: 1 of 4 in current phase (02-01 complete)
+Plan: 3 of 4 in current phase (02-03 complete)
 Status: In Progress
-Last activity: 2026-03-18 -- Completed plan 02-01 (platform adapter foundation: ABC, exceptions, progress, firewall validator)
+Last activity: 2026-03-18 -- Completed plan 02-03 (MacOSAdapter: pfctl anchor firewall, launchd service, sysctl IP forwarding, Homebrew root refusal)
 
-Progress: [████░░░░░░] 31% (5/16 plans complete)
+Progress: [█████░░░░░] 44% (7/16 plans complete)
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 4
+- Total plans completed: 7
 - Average duration: 3 min
-- Total execution time: 0.20 hours
+- Total execution time: 0.30 hours
 
 **By Phase:**
 
 | Phase | Plans | Total | Avg/Plan |
 |-------|-------|-------|----------|
 | 01-secure-core-engine | 4/4 | 12 min | 3 min |
-| 02-platform-hardening | 1/4 | 5 min | 5 min |
+| 02-platform-hardening | 3/4 | 9 min | 3 min |
 
 **Recent Trend:**
 - Last 5 plans: 3 min
 - Trend: Stable
 
 *Updated after each plan completion*
+| Phase 02-platform-hardening P02 | 3 | 2 tasks | 1 files |
+| Phase 02-platform-hardening P04 | 3 | 2 tasks | 1 files |
 
 ## Accumulated Context
 
@@ -64,6 +66,11 @@ Recent decisions affecting current work:
 - [02-01]: validate_firewall_rules is both a module-level function and a concrete adapter method -- standalone use and subclass inheritance via delegation
 - [02-01]: PrivilegeError message format locked per platform: "sudo wg-automate" (Unix) vs "Run as Administrator" (Windows)
 - [02-01]: Progress.fail() uses (current - 1) for "steps completed" count to give accurate recovery hint
+- [Phase 02-platform-hardening]: _build_nftables_ruleset() used for both generated and template strings so FW-03 comparison is always symmetric
+- [Phase 02-platform-hardening]: deploy_config does not call set_file_permissions after atomic_write -- 0o600 is set on temp file before rename, making the extra chmod redundant
+- [Phase 02-platform-hardening]: ctypes.windll.shell32.IsUserAnAdmin() for privilege check on Windows -- no auto-elevation per locked decision
+- [Phase 02-platform-hardening]: os.chmod NEVER called in Windows code -- only icacls via set_file_permissions (PLAT-06)
+- [Phase 02-platform-hardening]: wireguard.exe /installtunnelservice manages DPAPI config encryption automatically
 
 ### Pending Todos
 
@@ -78,5 +85,5 @@ None.
 ## Session Continuity
 
 Last session: 2026-03-18
-Stopped at: Completed 02-01-PLAN.md (platform adapter foundation: ABC, exceptions, progress reporter, firewall validator)
+Stopped at: Completed 02-02-PLAN.md (LinuxAdapter with nftables firewall, systemd service, sysctl.d IP forwarding, HARD-04 cron user)
 Resume file: None

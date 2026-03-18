@@ -51,15 +51,15 @@
 
 - [x] **PLAT-01**: OS and version are detected at startup; tool refuses to run if not root/admin, OS is unsupported/EOL, or required tools are missing and cannot be installed
 - [x] **PLAT-02**: Platform modules implement a shared `AbstractPlatformAdapter` ABC -- all three platforms (Linux, macOS, Windows) implement the same interface; missing method implementations cause import-time failure
-- [ ] **PLAT-03**: Linux setup installs WireGuard via package manager (with GPG signature verification), writes server config with atomic write + 600 permissions, enables IP forwarding via `/etc/sysctl.d/99-wireguard.conf`, applies nftables deny-by-default firewall (rate limit: 5 new connections/second burst 10), enables `wg-quick@wg0` via systemd, sets up DuckDNS cron as non-root `wg-automate` user
+- [x] **PLAT-03**: Linux setup installs WireGuard via package manager (with GPG signature verification), writes server config with atomic write + 600 permissions, enables IP forwarding via `/etc/sysctl.d/99-wireguard.conf`, applies nftables deny-by-default firewall (rate limit: 5 new connections/second burst 10), enables `wg-quick@wg0` via systemd, sets up DuckDNS cron as non-root `wg-automate` user
 - [ ] **PLAT-04**: macOS setup installs WireGuard via Homebrew, writes config with 600 permissions, enables IP forwarding via `/etc/sysctl.conf`, applies pfctl deny-by-default firewall anchor, configures launchd plist for auto-start and DuckDNS updates
-- [ ] **PLAT-05**: Windows setup installs WireGuard via winget (verifies installer signature), writes config to `%ProgramData%\WireGuard\wg0.conf` with SYSTEM+Administrators ACL only, sets `IPEnableRouter=1` in registry (warns about reboot), applies `netsh advfirewall` deny-by-default on WG interface, installs tunnel service via `wireguard.exe /installtunnelservice`, sets up DuckDNS via Task Scheduler
+- [x] **PLAT-05**: Windows setup installs WireGuard via winget (verifies installer signature), writes config to `%ProgramData%\WireGuard\wg0.conf` with SYSTEM+Administrators ACL only, sets `IPEnableRouter=1` in registry (warns about reboot), applies `netsh advfirewall` deny-by-default on WG interface, installs tunnel service via `wireguard.exe /installtunnelservice`, sets up DuckDNS via Task Scheduler
 - [x] **PLAT-06**: File permission enforcement uses `os.chmod(600)` on Unix and `icacls`/`pywin32` on Windows -- `os.chmod()` is NOT used on Windows for security (it only sets read-only flag, not ACLs)
 
 ### Firewall Hardening
 
-- [ ] **FW-01**: All platform firewall configurations are deny-by-default on the WireGuard interface -- only established/related traffic and rate-limited new UDP connections on the WireGuard port are accepted
-- [ ] **FW-02**: NAT masquerade is applied only on the detected outbound interface (via default route), not globally
+- [x] **FW-01**: All platform firewall configurations are deny-by-default on the WireGuard interface -- only established/related traffic and rate-limited new UDP connections on the WireGuard port are accepted
+- [x] **FW-02**: NAT masquerade is applied only on the detected outbound interface (via default route), not globally
 - [x] **FW-03**: Generated firewall rules are validated against expected deny-by-default templates before application
 
 ### Dynamic DNS
