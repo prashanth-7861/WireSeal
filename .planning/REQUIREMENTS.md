@@ -64,11 +64,11 @@
 
 ### Dynamic DNS
 
-- [ ] **DNS-01**: Public IP is detected by querying 3 independent sources (ipify, amazonaws, icanhazip) over HTTPS with certificate verification; 2-of-3 consensus is required -- if no consensus, DNS update fails closed (no update, log warning)
-- [ ] **DNS-02**: Validated public IP is verified as a public IPv4 address (private ranges, multicast, loopback rejected)
-- [ ] **DNS-03**: DuckDNS token is stored encrypted in the vault -- never in plaintext on disk or in process arguments
-- [ ] **DNS-04**: DuckDNS updates use HTTPS only with TLS certificate verification; response must be exactly `"OK"` -- anything else is a failure; every attempt is logged to the audit log
-- [ ] **DNS-05**: Scheduled DNS updates run as a non-root user (Linux cron / macOS launchd / Windows Task Scheduler)
+- [x] **DNS-01**: Public IP is detected by querying 3 independent sources (ipify, amazonaws, icanhazip) over HTTPS with certificate verification; 2-of-3 consensus is required -- if no consensus, DNS update fails closed (no update, log warning)
+- [x] **DNS-02**: Validated public IP is verified as a public IPv4 address (private ranges, multicast, loopback rejected)
+- [x] **DNS-03**: DuckDNS token is stored encrypted in the vault -- never in plaintext on disk or in process arguments
+- [x] **DNS-04**: DuckDNS updates use HTTPS only with TLS certificate verification; response must be exactly `"OK"` -- anything else is a failure; every attempt is logged to the audit log
+- [x] **DNS-05**: Scheduled DNS updates run as a non-root user (Linux cron / macOS launchd / Windows Task Scheduler)
 
 ### Client Management
 
