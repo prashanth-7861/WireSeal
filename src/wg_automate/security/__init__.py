@@ -1,3 +1,4 @@
+from .audit import AuditEntry, AuditError, AuditLog
 from .exceptions import VaultError, VaultUnlockError, VaultTamperedError
 from .integrity import compute_config_hash, store_hash_in_state, verify_config_integrity
 from .permissions import check_file_permissions, set_dir_permissions, set_file_permissions
@@ -16,6 +17,10 @@ from .validator import (
 )
 
 __all__ = [
+    # Audit log
+    "AuditLog",
+    "AuditEntry",
+    "AuditError",
     # Exceptions
     "VaultError",
     "VaultUnlockError",

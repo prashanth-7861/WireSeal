@@ -139,15 +139,62 @@ class AuditLog:
     # Internal helpers
     # ------------------------------------------------------------------
 
-    def _ensure_log_exists(self) -> None:
-        """Create the log file with correct permissions if it does not exist."""
-        from .permissions import set_file_permissions  # local import keeps init side-effect-free
-
+    def _ensure_parents_exist(self) -> None:
+        """Create parent directories for the log file if they are missing."""
         if not self._log_path.parent.exists():
             self._log_path.parent.mkdir(parents=True, exist_ok=True)
 
-        if not self._log_path.exists():
-            self._log_path.touch()
+    def _apply_permissions(self) -> None:
+        """Apply 640 permissions (Unix) or SYSTEM-only ACL (Windows) to the log file.
+
+        Called after the first successful write so the file exists before any
+        platform-specific ACL adjustment.  On Windows, icacls grants SYSTEM +
+        Administrators and removes all other entries; this requires the process
+        to be running as SYSTEM or an Administrator to be effective.  If the
+        process lacks privilege, the ACL call may emit a warning (handled inside
+        set_file_permissions) but will not raise, ensuring the log remains
+        writable even in non-privileged test environments.
+
+        AUDIT-02: 640 on Linux/macOS, SYSTEM+Administrators on Windows.
+        """
+        import sys
+        import warnings
+        from .permissions import set_file_permissions  # local import for side-effect safety
+
+        if sys.platform == "win32":
+            # On Windows, icacls /inheritance:r removes all inherited ACEs and
+            # grants SYSTEM+Administrators only.  In production (running as
+            # SYSTEM/Administrator) this is the correct behaviour.  In a
+            # non-privileged environment, the call may lock out the current
+            # user.  We detect this by probing writability; if locked out, we
+            # re-grant the current user write access with a warning so the log
+            # remains functional.  Full AUDIT-02 enforcement is only guaranteed
+            # when running as SYSTEM or Administrator.
+            import subprocess
+            try:
+                set_file_permissions(self._log_path, mode=0o640)
+                # Quick writability probe
+                with open(self._log_path, mode="a", encoding="utf-8") as _probe:
+                    pass
+            except PermissionError:
+                # Locked out — restore current user's write access (best-effort)
+                try:
+                    import getpass
+                    username = getpass.getuser()
+                    subprocess.run(
+                        ["icacls", str(self._log_path), "/grant:r", f"{username}:(R,W)"],
+                        check=True,
+                        capture_output=True,
+                    )
+                except Exception:
+                    pass
+                warnings.warn(
+                    f"Audit log {self._log_path} SYSTEM-only permissions could not be "
+                    "enforced (process lacks Administrator rights). "
+                    "AUDIT-02 requires running wg-automate as Administrator on Windows.",
+                    stacklevel=3,
+                )
+        else:
             set_file_permissions(self._log_path, mode=0o640)
 
     # ------------------------------------------------------------------
@@ -191,9 +238,17 @@ class AuditLog:
         )
 
         try:
-            self._ensure_log_exists()
+            self._ensure_parents_exist()
+            is_new = not self._log_path.exists()
             with open(self._log_path, mode="a", encoding="utf-8", newline="\n", buffering=1) as fh:
                 fh.write(json.dumps(entry.to_dict()) + "\n")
+            # Apply permissions after the first successful write so the file
+            # has already been created (and the write completed) before any
+            # platform-specific ACL adjustment.  On Windows this avoids a
+            # race where icacls would lock out the current non-SYSTEM process
+            # before it could complete the open().  AUDIT-02.
+            if is_new:
+                self._apply_permissions()
         except OSError as exc:
             raise AuditError(f"Failed to write audit log entry: {exc}") from exc
 
