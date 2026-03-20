@@ -835,15 +835,163 @@ def remove_client(name: str) -> None:
 
 @cli.command("list-clients")
 def list_clients() -> None:
-    """List all registered WireGuard clients."""
-    _not_implemented("list-clients")
+    """List all registered WireGuard clients (name, IP, last handshake)."""
+    # Step 1: Collect passphrase — CLI-02
+    passphrase_str: str = click.prompt("Vault passphrase", hide_input=True)
+
+    from wg_automate.security.secret_types import SecretBytes
+    from wg_automate.security.secrets_wipe import wipe_string
+
+    passphrase = SecretBytes(bytearray(passphrase_str.encode("utf-8")))
+
+    try:
+        from wg_automate.security.vault import Vault
+        from wg_automate.security.audit import AuditLog
+
+        vault = Vault(DEFAULT_VAULT_PATH)
+
+        with vault.open(passphrase) as state:
+            clients_snapshot: dict = {}
+            for cname, cdata in state.clients.items():
+                clients_snapshot[cname] = {
+                    "public_key": _extract_secret_str(cdata["public_key"]),
+                    "ip": cdata["ip"],
+                }
+
+        if not clients_snapshot:
+            click.echo("No clients configured.")
+        else:
+            # Step 3: Run wg show dump to get latest-handshake per peer
+            handshake_by_pubkey: dict[str, str] = {}
+            try:
+                result = subprocess.run(
+                    ["wg", "show", "wg0", "dump"],
+                    capture_output=True,
+                    text=True,
+                    check=True,
+                )
+                # wg show dump format (tab-separated per line):
+                # peer: public_key  psk_hash  endpoint  allowed_ips  latest_handshake  rx  tx  keepalive
+                for line in result.stdout.splitlines():
+                    parts = line.split("\t")
+                    if len(parts) >= 6:
+                        # First line is the interface (5 fields), skip it
+                        pubkey = parts[0].strip()
+                        latest_handshake_epoch = parts[4].strip()
+                        if pubkey and latest_handshake_epoch != "0":
+                            try:
+                                import datetime as _dt
+                                ts = int(latest_handshake_epoch)
+                                handshake_str = _dt.datetime.fromtimestamp(
+                                    ts, tz=_dt.timezone.utc
+                                ).strftime("%Y-%m-%d %H:%M:%S UTC")
+                            except (ValueError, OSError):
+                                handshake_str = latest_handshake_epoch
+                            handshake_by_pubkey[pubkey] = handshake_str
+            except (subprocess.CalledProcessError, FileNotFoundError):
+                click.echo("WARNING: WireGuard not running or no active peers.")
+
+            # Step 4: Print table — CLIENT-03: no private keys or PSKs
+            click.echo(f"\n{'Name':20}  {'IP':15}  {'Last Handshake'}")
+            click.echo("-" * 65)
+            for cname, cinfo in clients_snapshot.items():
+                pubkey = cinfo["public_key"]
+                ip = cinfo["ip"]
+                handshake = handshake_by_pubkey.get(pubkey, "never")
+                click.echo(f"{cname:20}  {ip:15}  {handshake}")
+
+        # Step 6: Audit log
+        audit = AuditLog(DEFAULT_AUDIT_LOG_PATH)
+        audit.log(action="list-clients", metadata={})
+
+    except click.ClickException:
+        raise
+    except Exception as exc:
+        raise click.ClickException(str(exc)) from exc
+    finally:
+        passphrase.wipe()
+        wipe_string(passphrase_str)
 
 
 @cli.command("show-qr")
 @click.argument("name")
-def show_qr(name: str) -> None:
-    """Display the QR code for a client config."""
-    _not_implemented("show-qr")
+@click.option("--save-qr", "save_path", default=None, type=click.Path(),
+              help="Save QR to file (600 permissions)")
+@click.option("--auto-delete", is_flag=True, default=False,
+              help="Auto-delete saved QR file after 5 minutes")
+def show_qr(name: str, save_path: str | None, auto_delete: bool) -> None:
+    """Display the QR code for a client config (clears after 60 seconds)."""
+    # Step 1: Collect passphrase — CLI-02
+    passphrase_str: str = click.prompt("Vault passphrase", hide_input=True)
+
+    from wg_automate.security.secret_types import SecretBytes
+    from wg_automate.security.secrets_wipe import wipe_string
+
+    passphrase = SecretBytes(bytearray(passphrase_str.encode("utf-8")))
+    config_str: str | None = None
+
+    try:
+        from wg_automate.security.vault import Vault
+        from wg_automate.security.audit import AuditLog
+        from wg_automate.core.config_builder import ConfigBuilder
+        from wg_automate.core.qr_generator import generate_qr_terminal, save_qr
+
+        vault = Vault(DEFAULT_VAULT_PATH)
+
+        with vault.open(passphrase) as state:
+            # Step 2: Retrieve client config — abort if not found
+            if name not in state.clients:
+                raise click.ClickException(f"Client '{name}' not found.")
+
+            cdata = state.clients[name]
+            server_pub_key = _extract_secret_str(state.server["public_key"])
+            server_port = state.server["port"]
+            server_ip = state.server["ip"]
+
+            duckdns_domain = state.server.get("duckdns_domain")
+            if duckdns_domain:
+                server_endpoint = f"{duckdns_domain}.duckdns.org:{server_port}"
+            else:
+                server_endpoint = f"{server_ip}:{server_port}"
+
+            # Step 3: Reconstruct client config from vault state (in memory only)
+            builder = ConfigBuilder()
+            config_str = builder.render_client_config(
+                client_private_key=_extract_secret_str(cdata["private_key"]),
+                client_ip=cdata["ip"],
+                dns_server=server_ip,
+                server_public_key=server_pub_key,
+                psk=_extract_secret_str(cdata["psk"]),
+                server_endpoint=server_endpoint,
+            )
+
+        # Steps 4-8 outside vault context (state already wiped)
+        # Step 5: Print QR to terminal (CLIENT-04: ASCII only)
+        click.echo(generate_qr_terminal(config_str))
+
+        # Step 6: Optionally save to file (CLIENT-08)
+        if save_path is not None:
+            save_qr(config_str, Path(save_path), auto_delete=auto_delete)
+
+        # Step 7: 60-second auto-clear (CLIENT-04)
+        click.echo("Terminal will clear in 60 seconds...")
+        time.sleep(60)
+        click.clear()
+
+        # Audit log — no key material
+        audit = AuditLog(DEFAULT_AUDIT_LOG_PATH)
+        audit.log(action="show-qr", metadata={"name": name})
+
+    except click.ClickException:
+        raise
+    except Exception as exc:
+        raise click.ClickException(str(exc)) from exc
+    finally:
+        passphrase.wipe()
+        wipe_string(passphrase_str)
+        # Step 8: Wipe config string from memory (best-effort for str)
+        if config_str is not None:
+            del config_str
 
 
 @cli.command("rotate-keys")
@@ -1241,15 +1389,177 @@ def rotate_server_keys() -> None:
 
 @cli.command("update-dns")
 def update_dns() -> None:
-    """Push the current public IP to DuckDNS."""
-    _not_implemented("update-dns")
+    """Push the current public IP to DuckDNS (2-of-3 consensus)."""
+    # Step 1: Collect passphrase — CLI-02
+    passphrase_str: str = click.prompt("Vault passphrase", hide_input=True)
+
+    from wg_automate.security.secret_types import SecretBytes
+    from wg_automate.security.secrets_wipe import wipe_string
+
+    passphrase = SecretBytes(bytearray(passphrase_str.encode("utf-8")))
+
+    try:
+        from wg_automate.security.vault import Vault
+        from wg_automate.security.audit import AuditLog
+
+        vault = Vault(DEFAULT_VAULT_PATH)
+
+        # Step 2: Read DuckDNS domain and token from vault
+        with vault.open(passphrase) as state:
+            duckdns_domain = state.server.get("duckdns_domain")
+            if not duckdns_domain:
+                raise click.ClickException(
+                    "DuckDNS not configured. Run init with --duckdns-domain."
+                )
+
+            duckdns_token_raw = state.server.get("duckdns_token")
+            if duckdns_token_raw is None:
+                raise click.ClickException(
+                    "DuckDNS token not found in vault. Re-run init with --duckdns-domain."
+                )
+
+            # Keep token as SecretBytes; expose only for the HTTP call inside update_dns
+            from wg_automate.security.secret_types import SecretBytes as SB
+            if isinstance(duckdns_token_raw, SB):
+                token_secret = duckdns_token_raw
+            else:
+                token_secret = SB(bytearray(str(duckdns_token_raw).encode("utf-8")))
+
+            # Step 3: Resolve public IP with 2-of-3 consensus (DNS-01)
+            from wg_automate.dns.ip_resolver import resolve_public_ip, IPConsensusError
+
+            try:
+                public_ip = resolve_public_ip()
+            except IPConsensusError as exc:
+                raise click.ClickException(str(exc)) from exc
+
+            # Step 4: Update DuckDNS — token stays in SecretBytes (DNS-03)
+            from wg_automate.dns.duckdns import update_dns as _update_dns, DuckDNSError
+
+            try:
+                result = _update_dns(duckdns_domain, token_secret, str(public_ip))
+            except DuckDNSError as exc:
+                result = {
+                    "success": False,
+                    "domain": duckdns_domain,
+                    "ip": str(public_ip),
+                    "error": str(exc),
+                }
+
+        # Step 5: Audit log — result dict has success/domain/ip, no token
+        audit = AuditLog(DEFAULT_AUDIT_LOG_PATH)
+        audit.log(
+            action="update-dns",
+            metadata={
+                "domain": result.get("domain"),
+                "ip": result.get("ip"),
+                "success": result.get("success"),
+            },
+        )
+
+        # Step 6: Report outcome
+        if result.get("success"):
+            click.echo(f"DNS updated: {result['domain']}.duckdns.org -> {result['ip']}")
+        else:
+            click.echo(f"DNS update failed: {result.get('error', 'unknown error')}")
+            sys.exit(1)
+
+    except click.ClickException:
+        raise
+    except SystemExit:
+        raise
+    except Exception as exc:
+        raise click.ClickException(str(exc)) from exc
+    finally:
+        passphrase.wipe()
+        wipe_string(passphrase_str)
 
 
 @cli.command("export")
 @click.argument("name")
-def export(name: str) -> None:
-    """Export a client config as a file."""
-    _not_implemented("export")
+@click.argument("path", type=click.Path())
+def export(name: str, path: str) -> None:
+    """Export a client config to a file (600 permissions, private key warning)."""
+    # Step 1: Collect passphrase — CLI-02
+    passphrase_str: str = click.prompt("Vault passphrase", hide_input=True)
+
+    from wg_automate.security.secret_types import SecretBytes
+    from wg_automate.security.secrets_wipe import wipe_string
+
+    passphrase = SecretBytes(bytearray(passphrase_str.encode("utf-8")))
+    config_str: str | None = None
+
+    try:
+        from wg_automate.security.vault import Vault
+        from wg_automate.security.audit import AuditLog
+        from wg_automate.core.config_builder import ConfigBuilder
+        from wg_automate.security.atomic import atomic_write
+
+        vault = Vault(DEFAULT_VAULT_PATH)
+
+        with vault.open(passphrase) as state:
+            # Step 2: Retrieve client config — abort if not found
+            if name not in state.clients:
+                raise click.ClickException(f"Client '{name}' not found.")
+
+            cdata = state.clients[name]
+            server_pub_key = _extract_secret_str(state.server["public_key"])
+            server_port = state.server["port"]
+            server_ip = state.server["ip"]
+
+            duckdns_domain = state.server.get("duckdns_domain")
+            if duckdns_domain:
+                server_endpoint = f"{duckdns_domain}.duckdns.org:{server_port}"
+            else:
+                server_endpoint = f"{server_ip}:{server_port}"
+
+            # Step 3: Reconstruct full client config from vault state
+            builder = ConfigBuilder()
+            config_str = builder.render_client_config(
+                client_private_key=_extract_secret_str(cdata["private_key"]),
+                client_ip=cdata["ip"],
+                dns_server=server_ip,
+                server_public_key=server_pub_key,
+                psk=_extract_secret_str(cdata["psk"]),
+                server_endpoint=server_endpoint,
+            )
+
+        # Step 4: Write to path atomically with 600 permissions (CLIENT-07)
+        dest = Path(path)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        atomic_write(dest, config_str.encode("utf-8"), mode=0o600)
+
+        # On Windows: also apply ACL-based permissions
+        if sys.platform == "win32":
+            from wg_automate.security.permissions import set_file_permissions
+            set_file_permissions(dest, mode=0o600)
+
+        # Step 5: Print path and private-key warning (CLIENT-07)
+        click.echo(f"Client config written to: {path}")
+        click.echo("WARNING: This file contains a private key. Delete it after use.")
+        if sys.platform == "linux":
+            click.echo(f"Recommended: wipe with 'shred -u {path}' (Linux) or 'sdelete' (Windows).")
+        elif sys.platform == "win32":
+            click.echo(f"Recommended: wipe with 'sdelete {path}' (Windows).")
+        else:
+            click.echo(f"Recommended: securely delete '{path}' after use.")
+
+        # Step 6: Audit log — no key material
+        audit = AuditLog(DEFAULT_AUDIT_LOG_PATH)
+        audit.log(
+            action="export",
+            metadata={"name": name, "path": path},
+        )
+
+    except click.ClickException:
+        raise
+    except Exception as exc:
+        raise click.ClickException(str(exc)) from exc
+    finally:
+        passphrase.wipe()
+        wipe_string(passphrase_str)
+        if config_str is not None:
+            del config_str
 
 
 @cli.command("audit-log")
