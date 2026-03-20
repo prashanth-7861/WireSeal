@@ -89,11 +89,11 @@
 
 ### CLI Interface
 
-- [ ] **CLI-01**: All 14 commands are implemented: `init`, `add-client`, `remove-client`, `list-clients`, `show-qr`, `rotate-keys`, `rotate-server-keys`, `update-dns`, `status`, `export`, `audit-log`, `verify`, `lock`, `change-passphrase`
-- [ ] **CLI-02**: All passphrase inputs use `click.prompt(hide_input=True)` -- never echoed, never in command arguments
-- [ ] **CLI-03**: `verify` command checks SHA-256 of all deployed config files against vault records and reports any tampering
-- [ ] **CLI-04**: `lock` command wipes all decrypted state from memory and exits
-- [ ] **CLI-05**: `status` command shows connected peers, transfer stats, and last handshake times from `wg show` output -- no key material displayed
+- [x] **CLI-01**: All 14 commands are implemented: `init`, `add-client`, `remove-client`, `list-clients`, `show-qr`, `rotate-keys`, `rotate-server-keys`, `update-dns`, `status`, `export`, `audit-log`, `verify`, `lock`, `change-passphrase`
+- [x] **CLI-02**: All passphrase inputs use `click.prompt(hide_input=True)` -- never echoed, never in command arguments
+- [x] **CLI-03**: `verify` command checks SHA-256 of all deployed config files against vault records and reports any tampering
+- [x] **CLI-04**: `lock` command wipes all decrypted state from memory and exits
+- [x] **CLI-05**: `status` command shows connected peers, transfer stats, and last handshake times from `wg show` output -- no key material displayed
 
 ### Security Hardening
 
@@ -220,11 +220,11 @@
 | CLIENT-06 | Phase 4 | 04-03 | Pending |
 | CLIENT-07 | Phase 4 | 04-02 | Pending |
 | CLIENT-08 | Phase 4 | 04-02 | Pending |
-| CLI-01 | Phase 4 | 04-01 | Pending |
-| CLI-02 | Phase 4 | 04-01 | Pending |
-| CLI-03 | Phase 4 | 04-01 | Pending |
-| CLI-04 | Phase 4 | 04-01 | Pending |
-| CLI-05 | Phase 4 | 04-01 | Pending |
+| CLI-01 | Phase 4 | 04-01 | Complete |
+| CLI-02 | Phase 4 | 04-01 | Complete |
+| CLI-03 | Phase 4 | 04-01 | Complete |
+| CLI-04 | Phase 4 | 04-01 | Complete |
+| CLI-05 | Phase 4 | 04-01 | Complete |
 | TEST-01 | Phase 5 | 05-01 | Pending |
 | TEST-02 | Phase 5 | 05-02 | Pending |
 | TEST-03 | Phase 5 | 05-02 | Pending |

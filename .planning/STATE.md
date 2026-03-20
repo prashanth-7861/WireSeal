@@ -5,16 +5,16 @@
 See: .planning/PROJECT.md (updated 2026-03-17)
 
 **Core value:** Zero plaintext secrets on disk, ever -- if the vault is compromised without the passphrase, no key material is exposed.
-**Current focus:** Phase 3: Dynamic DNS and Audit -- IN PROGRESS (2 of 4 plans done)
+**Current focus:** Phase 4: CLI and Client Management -- IN PROGRESS (1 of 4 plans done)
 
 ## Current Position
 
-Phase: 3 of 5 (Dynamic DNS and Audit) -- IN PROGRESS
-Plan: 2 of 4 in current phase (03-02 complete)
+Phase: 4 of 5 (CLI and Client Management) -- IN PROGRESS
+Plan: 1 of 4 in current phase (04-01 complete)
 Status: In Progress
-Last activity: 2026-03-20 -- Completed plan 03-02 (Append-only audit log with 640/SYSTEM ACL permissions and get_recent_entries API)
+Last activity: 2026-03-20 -- Completed plan 04-01 (Click CLI skeleton with 14 commands + init/status/verify/lock/change-passphrase implementations)
 
-Progress: [███████░░░] 62% (10/16 plans complete)
+Progress: [████████░░] 69% (11/16 plans complete)
 
 ## Performance Metrics
 
@@ -76,6 +76,10 @@ Recent decisions affecting current work:
 - [03-01]: DuckDNS error message truncates response body to 20 chars to prevent token fragments leaking in logs
 - [Phase 03-dynamic-dns-and-audit]: Permission-after-write on Windows: icacls called AFTER first write to prevent process self-lockout; AUDIT-02 fully enforced only as SYSTEM/Administrator
 - [Phase 03-dynamic-dns-and-audit]: WireGuard key regex accepts {42,43} base64 chars + = to match plan test vector (43 chars) and real keys (44 chars)
+- [04-01]: Lazy imports inside Click command functions keep wg-automate --help fast (Vault, adapters, keygen imported inside function bodies)
+- [04-01]: click.ClickException wraps all exception paths so Python tracebacks never leak to users (passphrase fragments could appear in locals)
+- [04-01]: lock command does not require passphrase and must never fail; audit log write is silently swallowed in except Exception
+- [04-01]: wg show PrivateKey assertion in status command is defense-in-depth; wg show does not output private keys but we assert it explicitly
 
 ### Pending Todos
 
@@ -90,5 +94,5 @@ None.
 ## Session Continuity
 
 Last session: 2026-03-20
-Stopped at: Completed 03-02-PLAN.md (AuditLog: NDJSON append-only log, secret scrubbing, 640/SYSTEM ACL permissions, get_recent_entries API)
+Stopped at: Completed 04-01-PLAN.md (Click CLI: 14-command group, init/status/verify/lock/change-passphrase implementations, 9 stubs for 04-02/04-03)
 Resume file: None
