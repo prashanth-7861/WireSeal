@@ -5,16 +5,16 @@
 See: .planning/PROJECT.md (updated 2026-03-17)
 
 **Core value:** Zero plaintext secrets on disk, ever -- if the vault is compromised without the passphrase, no key material is exposed.
-**Current focus:** Phase 4: CLI and Client Management -- IN PROGRESS (1 of 4 plans done)
+**Current focus:** Phase 4: CLI and Client Management -- IN PROGRESS (3 of 4 plans done)
 
 ## Current Position
 
 Phase: 4 of 5 (CLI and Client Management) -- IN PROGRESS
-Plan: 1 of 4 in current phase (04-01 complete)
+Plan: 3 of 4 in current phase (04-01, 04-02, 04-03 complete)
 Status: In Progress
-Last activity: 2026-03-20 -- Completed plan 04-01 (Click CLI skeleton with 14 commands + init/status/verify/lock/change-passphrase implementations)
+Last activity: 2026-03-20 -- Completed plan 04-03 (rotate-keys, rotate-server-keys, audit-log implementations)
 
-Progress: [████████░░] 69% (11/16 plans complete)
+Progress: [█████████░] 81% (13/16 plans complete)
 
 ## Performance Metrics
 
@@ -30,9 +30,10 @@ Progress: [████████░░] 69% (11/16 plans complete)
 | 01-secure-core-engine | 4/4 | 12 min | 3 min |
 | 02-platform-hardening | 4/4 | 12 min | 3 min |
 | 03-dynamic-dns-and-audit | 2/4 | 10 min | 5 min |
+| 04-cli-and-client-management | 3/4 | 9 min | 3 min |
 
 **Recent Trend:**
-- Last 5 plans: 4 min
+- Last 5 plans: 3 min
 - Trend: Stable
 
 *Updated after each plan completion*
@@ -80,6 +81,8 @@ Recent decisions affecting current work:
 - [04-01]: click.ClickException wraps all exception paths so Python tracebacks never leak to users (passphrase fragments could appear in locals)
 - [04-01]: lock command does not require passphrase and must never fail; audit log write is silently swallowed in except Exception
 - [04-01]: wg show PrivateKey assertion in status command is defense-in-depth; wg show does not output private keys but we assert it explicitly
+- [Phase 04-03]: Generate-before-wipe rotation order: new keypair and PSK generated and configs validated before old SecretBytes.wipe() — old keys exist as fallback until new configs confirmed written to disk
+- [Phase 04-03]: audit-log requires no vault passphrase by design: AUDIT-01 ensures no secrets in log, so reading without authentication is safe
 
 ### Pending Todos
 
@@ -94,5 +97,5 @@ None.
 ## Session Continuity
 
 Last session: 2026-03-20
-Stopped at: Completed 04-01-PLAN.md (Click CLI: 14-command group, init/status/verify/lock/change-passphrase implementations, 9 stubs for 04-02/04-03)
+Stopped at: Completed 04-03-PLAN.md (rotate-keys, rotate-server-keys, audit-log — key rotation and audit display implemented; 1 plan remains: 04-04)
 Resume file: None
