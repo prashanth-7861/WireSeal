@@ -13,6 +13,7 @@ dependencies = [
     "jinja2>=3.1.6,<4",
     "filelock>=3.20.3,<4",
     "click>=8.3.1,<9",
+    "qrcode>=7.4",
 ]
 
 [tool.setuptools.packages.find]
