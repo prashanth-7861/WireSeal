@@ -114,6 +114,6 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 5
 |-------|----------------|--------|-----------|
 | 1. Secure Core Engine | 4/4 | Complete    | 2026-03-18 |
 | 2. Platform Hardening | 4/4 | Complete   | 2026-03-18 |
-| 3. Dynamic DNS and Audit | 2/2 | Complete   | 2026-03-20 |
+| 3. Dynamic DNS and Audit | 2/2 | Complete    | 2026-03-20 |
 | 4. CLI and Client Management | 0/3 | Not started | - |
 | 5. Tests and Packaging | 0/3 | Not started | - |
