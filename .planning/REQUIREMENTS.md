@@ -72,14 +72,14 @@
 
 ### Client Management
 
-- [ ] **CLIENT-01**: `add-client <name>` generates a keypair + PSK, allocates an IP, updates server config, verifies integrity, reloads WireGuard via `wg syncconf`, and displays QR in terminal -- all in one command
-- [ ] **CLIENT-02**: `remove-client <name>` removes peer from server config immediately with no grace period, reloads WireGuard, releases IP, purges keys from vault, and logs the revocation
-- [ ] **CLIENT-03**: `list-clients` displays client names, IPs, and last handshake times -- never displays private keys or PSKs
-- [ ] **CLIENT-04**: `show-qr <name>` displays client config as terminal QR code (ASCII art only); requires vault unlock; terminal is cleared after 60 seconds
-- [ ] **CLIENT-05**: `rotate-keys <name>` generates a new keypair + PSK for a client, updates both server and client configs, wipes old keys from vault, reloads WireGuard, and displays new QR
-- [ ] **CLIENT-06**: `rotate-server-keys` regenerates server keypair, updates all client configs with new server public key, reloads WireGuard
-- [ ] **CLIENT-07**: `export <name> <path>` writes client config to file with 600 permissions; warns user that the file contains private key; user is advised to delete after use
-- [ ] **CLIENT-08**: QR code is generated in memory using pure-Python `qrcode` library; by default, no image file is written; `--save-qr` flag writes with 600 permissions and optional `--auto-delete` removes after 5 minutes
+- [x] **CLIENT-01**: `add-client <name>` generates a keypair + PSK, allocates an IP, updates server config, verifies integrity, reloads WireGuard via `wg syncconf`, and displays QR in terminal -- all in one command
+- [x] **CLIENT-02**: `remove-client <name>` removes peer from server config immediately with no grace period, reloads WireGuard, releases IP, purges keys from vault, and logs the revocation
+- [x] **CLIENT-03**: `list-clients` displays client names, IPs, and last handshake times -- never displays private keys or PSKs
+- [x] **CLIENT-04**: `show-qr <name>` displays client config as terminal QR code (ASCII art only); requires vault unlock; terminal is cleared after 60 seconds
+- [x] **CLIENT-05**: `rotate-keys <name>` generates a new keypair + PSK for a client, updates both server and client configs, wipes old keys from vault, reloads WireGuard, and displays new QR
+- [x] **CLIENT-06**: `rotate-server-keys` regenerates server keypair, updates all client configs with new server public key, reloads WireGuard
+- [x] **CLIENT-07**: `export <name> <path>` writes client config to file with 600 permissions; warns user that the file contains private key; user is advised to delete after use
+- [x] **CLIENT-08**: QR code is generated in memory using pure-Python `qrcode` library; by default, no image file is written; `--save-qr` flag writes with 600 permissions and optional `--auto-delete` removes after 5 minutes
 
 ### Audit Logging
 

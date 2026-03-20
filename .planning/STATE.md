@@ -81,6 +81,10 @@ Recent decisions affecting current work:
 - [04-01]: click.ClickException wraps all exception paths so Python tracebacks never leak to users (passphrase fragments could appear in locals)
 - [04-01]: lock command does not require passphrase and must never fail; audit log write is silently swallowed in except Exception
 - [04-01]: wg show PrivateKey assertion in status command is defense-in-depth; wg show does not output private keys but we assert it explicitly
+- [04-02]: qrcode library (pure-Python) added to pyproject.toml — generate_qr_terminal uses io.StringIO for in-memory ASCII output, no file ever written
+- [04-02]: Vault context manager closed and state wiped before time.sleep(QR_DISPLAY_TIMEOUT) to avoid holding secrets during 60-second QR display window
+- [04-02]: _reload_wireguard() uses wg syncconf + bash process substitution on Linux/macOS; wg-quick down/up fallback on Windows
+- [04-02]: _extract_secret_str() helper unifies SecretBytes and plain str access across all client commands
 - [Phase 04-03]: Generate-before-wipe rotation order: new keypair and PSK generated and configs validated before old SecretBytes.wipe() — old keys exist as fallback until new configs confirmed written to disk
 - [Phase 04-03]: audit-log requires no vault passphrase by design: AUDIT-01 ensures no secrets in log, so reading without authentication is safe
 
@@ -97,5 +101,5 @@ None.
 ## Session Continuity
 
 Last session: 2026-03-20
-Stopped at: Completed 04-03-PLAN.md (rotate-keys, rotate-server-keys, audit-log — key rotation and audit display implemented; 1 plan remains: 04-04)
+Stopped at: Completed 04-02-PLAN.md (add-client, remove-client, list-clients, show-qr, export, update-dns — full client lifecycle, QR generator module, 6 commands implemented)
 Resume file: None

@@ -85,8 +85,8 @@ Plans:
 
 Plans:
 - [x] 04-01: Click CLI skeleton and init/status/verify/lock/change-passphrase commands (main.py)
-- [ ] 04-02: Client lifecycle commands -- add, remove, list, show-qr, export (main.py, core/qr_generator.py)
-- [ ] 04-03: Key rotation commands and audit-log display (main.py)
+- [x] 04-02: Client lifecycle commands -- add, remove, list, show-qr, export, update-dns (main.py, core/qr_generator.py)
+- [x] 04-03: Key rotation commands and audit-log display (main.py)
 
 ### Phase 5: Tests and Packaging
 **Goal**: Users can trust the release through a comprehensive security test suite and download verified standalone binaries for their platform
@@ -115,5 +115,5 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 5
 | 1. Secure Core Engine | 4/4 | Complete    | 2026-03-18 |
 | 2. Platform Hardening | 4/4 | Complete   | 2026-03-18 |
 | 3. Dynamic DNS and Audit | 2/2 | Complete    | 2026-03-20 |
-| 4. CLI and Client Management | 2/3 | In Progress|  |
+| 4. CLI and Client Management | 3/4 | In Progress|  |
 | 5. Tests and Packaging | 0/3 | Not started | - |
