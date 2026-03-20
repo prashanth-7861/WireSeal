@@ -5,23 +5,23 @@
 See: .planning/PROJECT.md (updated 2026-03-17)
 
 **Core value:** Zero plaintext secrets on disk, ever -- if the vault is compromised without the passphrase, no key material is exposed.
-**Current focus:** Phase 3: Dynamic DNS and Audit -- IN PROGRESS (1 of 4 plans done)
+**Current focus:** Phase 3: Dynamic DNS and Audit -- IN PROGRESS (2 of 4 plans done)
 
 ## Current Position
 
 Phase: 3 of 5 (Dynamic DNS and Audit) -- IN PROGRESS
-Plan: 1 of 4 in current phase (03-01 complete)
+Plan: 2 of 4 in current phase (03-02 complete)
 Status: In Progress
-Last activity: 2026-03-20 -- Completed plan 03-01 (Multi-source IP resolver and DuckDNS integration)
+Last activity: 2026-03-20 -- Completed plan 03-02 (Append-only audit log with 640/SYSTEM ACL permissions and get_recent_entries API)
 
-Progress: [██████░░░░] 56% (9/16 plans complete)
+Progress: [███████░░░] 62% (10/16 plans complete)
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 9
+- Total plans completed: 10
 - Average duration: 3 min
-- Total execution time: 0.45 hours
+- Total execution time: 0.50 hours
 
 **By Phase:**
 
@@ -29,10 +29,10 @@ Progress: [██████░░░░] 56% (9/16 plans complete)
 |-------|-------|-------|----------|
 | 01-secure-core-engine | 4/4 | 12 min | 3 min |
 | 02-platform-hardening | 4/4 | 12 min | 3 min |
-| 03-dynamic-dns-and-audit | 1/4 | 5 min | 5 min |
+| 03-dynamic-dns-and-audit | 2/4 | 10 min | 5 min |
 
 **Recent Trend:**
-- Last 5 plans: 3 min
+- Last 5 plans: 4 min
 - Trend: Stable
 
 *Updated after each plan completion*
@@ -74,6 +74,8 @@ Recent decisions affecting current work:
 - [03-01]: ThreadPoolExecutor with as_completed(timeout=10) prevents hanging source from blocking indefinitely
 - [03-01]: update_dns always returns result dict even on failure so callers can pass it to audit.log() before re-raising
 - [03-01]: DuckDNS error message truncates response body to 20 chars to prevent token fragments leaking in logs
+- [Phase 03-dynamic-dns-and-audit]: Permission-after-write on Windows: icacls called AFTER first write to prevent process self-lockout; AUDIT-02 fully enforced only as SYSTEM/Administrator
+- [Phase 03-dynamic-dns-and-audit]: WireGuard key regex accepts {42,43} base64 chars + = to match plan test vector (43 chars) and real keys (44 chars)
 
 ### Pending Todos
 
@@ -88,5 +90,5 @@ None.
 ## Session Continuity
 
 Last session: 2026-03-20
-Stopped at: Completed 03-01-PLAN.md (Multi-source IP resolver and DuckDNS integration: consensus IPv4 resolver + SecretBytes DuckDNS updater)
+Stopped at: Completed 03-02-PLAN.md (AuditLog: NDJSON append-only log, secret scrubbing, 640/SYSTEM ACL permissions, get_recent_entries API)
 Resume file: None

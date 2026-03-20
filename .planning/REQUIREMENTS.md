@@ -83,9 +83,9 @@
 
 ### Audit Logging
 
-- [ ] **AUDIT-01**: Every tool action is logged to an append-only audit log with ISO 8601 UTC timestamp, action type, and relevant metadata -- no secrets (keys, tokens, passphrases) ever appear in log entries
-- [ ] **AUDIT-02**: Audit log file has 640 permissions (root read/write, group read) on Linux/macOS; SYSTEM-only on Windows
-- [ ] **AUDIT-03**: `audit-log` command displays the last 50 log entries
+- [x] **AUDIT-01**: Every tool action is logged to an append-only audit log with ISO 8601 UTC timestamp, action type, and relevant metadata -- no secrets (keys, tokens, passphrases) ever appear in log entries
+- [x] **AUDIT-02**: Audit log file has 640 permissions (root read/write, group read) on Linux/macOS; SYSTEM-only on Windows
+- [x] **AUDIT-03**: `audit-log` command displays the last 50 log entries
 
 ### CLI Interface
 
