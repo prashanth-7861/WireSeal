@@ -10,14 +10,7 @@ Public API:
 from __future__ import annotations
 
 from .ip_resolver import IPConsensusError, resolve_public_ip
-
-# duckdns is imported lazily to avoid ImportError if duckdns.py is not yet present
-# (during Task 1 execution). After Task 2 completes this becomes a direct import.
-try:
-    from .duckdns import DuckDNSError, update_dns
-except ImportError:  # pragma: no cover
-    DuckDNSError = None  # type: ignore[assignment,misc]
-    update_dns = None  # type: ignore[assignment]
+from .duckdns import DuckDNSError, update_dns
 
 __all__ = [
     "resolve_public_ip",
