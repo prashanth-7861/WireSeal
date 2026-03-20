@@ -3,8 +3,8 @@
 CLI entry point using Click. All 14 commands are registered on the ``cli``
 group. Vault-lifecycle commands (init, status, verify, lock, change-passphrase)
 are implemented here. Client commands (add-client, remove-client, list-clients,
-show-qr, export) and rotation commands (rotate-keys, rotate-server-keys,
-update-dns, audit-log) are stubs that will be filled in by plans 04-02 / 04-03.
+show-qr, export, update-dns) are implemented in plans 04-02. Rotation commands
+(rotate-keys, rotate-server-keys, audit-log) remain stubs for plan 04-03.
 
 Security invariants:
   CLI-02: Every passphrase input uses click.prompt(hide_input=True).
@@ -12,8 +12,12 @@ Security invariants:
   AUDIT-01: No passphrase or key material passed to audit.log() calls.
 """
 
+import hashlib
 import os
+import re
+import subprocess
 import sys
+import time
 from pathlib import Path
 
 import click
@@ -569,14 +573,394 @@ def show_qr(name: str) -> None:
 @cli.command("rotate-keys")
 @click.argument("name")
 def rotate_keys(name: str) -> None:
-    """Rotate the keys for a specific client."""
-    _not_implemented("rotate-keys")
+    """Rotate the keypair and PSK for a specific client."""
+    import hashlib
+    import subprocess
+
+    passphrase_str: str = click.prompt("Vault passphrase", hide_input=True)
+
+    from wg_automate.security.secret_types import SecretBytes
+    from wg_automate.security.secrets_wipe import wipe_bytes, wipe_string
+    from wg_automate.security.audit import AuditLog
+
+    passphrase = SecretBytes(bytearray(passphrase_str.encode("utf-8")))
+
+    try:
+        from wg_automate.security.vault import Vault
+
+        vault = Vault(DEFAULT_VAULT_PATH)
+        with vault.open(passphrase) as state:
+            # Step 3: Verify client exists
+            if name not in state.clients:
+                raise click.ClickException(f"Client '{name}' not found in vault.")
+
+            client_data = state.clients[name]
+
+            # Step 4: Generate new material BEFORE touching old keys
+            from wg_automate.core.keygen import generate_keypair
+            from wg_automate.core.psk import generate_psk
+
+            new_keypair_priv, new_keypair_pub = generate_keypair()
+            new_psk = generate_psk()
+
+            new_pub_str = new_keypair_pub.decode("ascii")
+            new_priv_str = new_keypair_priv.expose_secret().decode("ascii")
+            new_psk_str = new_psk.expose_secret().decode("ascii")
+
+            # Step 5: Build and validate new configs
+            from wg_automate.core.config_builder import ConfigBuilder
+            from wg_automate.security.validator import validate_client_config, validate_server_config
+
+            server_data = state.server
+            server_pub_key = server_data["public_key"] if isinstance(server_data["public_key"], str) else server_data["public_key"].decode("ascii")
+            client_ip = client_data["ip"]
+            server_port = server_data["port"]
+            server_ip_raw = server_data["ip"]
+            subnet = state.ip_pool.get("subnet", "10.0.0.0/24")
+            dns_server = client_data.get("dns_server", "1.1.1.1")
+            server_endpoint = client_data.get("endpoint", f"{server_ip_raw}:{server_port}")
+
+            new_client_config_str = ConfigBuilder().render_client_config(
+                client_private_key=new_priv_str,
+                client_ip=client_ip,
+                dns_server=dns_server,
+                server_public_key=server_pub_key,
+                psk=new_psk_str,
+                server_endpoint=server_endpoint,
+            )
+
+            # Build updated server config with new client public key
+            clients_for_render = []
+            for cname, cdata in state.clients.items():
+                if cname == name:
+                    # Use new public key and new PSK for the rotated client
+                    cpub = new_pub_str
+                    cpsk = new_psk_str
+                else:
+                    cpub_raw = cdata.get("public_key", "")
+                    cpub = cpub_raw if isinstance(cpub_raw, str) else cpub_raw.decode("ascii")
+                    cpsk_raw = cdata.get("psk", "")
+                    cpsk = cpsk_raw if isinstance(cpsk_raw, str) else cpsk_raw.expose_secret().decode("ascii")
+                clients_for_render.append({
+                    "name": cname,
+                    "public_key": cpub,
+                    "psk": cpsk,
+                    "ip": cdata["ip"],
+                })
+
+            server_priv_raw = server_data.get("private_key", "")
+            server_priv_str = server_priv_raw if isinstance(server_priv_raw, str) else server_priv_raw.expose_secret().decode("ascii")
+            prefix_length = int(subnet.split("/")[1])
+
+            new_server_config_str = ConfigBuilder().render_server_config(
+                server_private_key=server_priv_str,
+                server_ip=server_ip_raw,
+                prefix_length=prefix_length,
+                server_port=server_port,
+                clients=clients_for_render,
+            )
+
+            # Validate both configs
+            try:
+                validate_client_config({
+                    "private_key": new_priv_str,
+                    "psk": new_psk_str,
+                    "ip": client_ip,
+                    "dns_server": dns_server,
+                    "server_public_key": server_pub_key,
+                    "endpoint": server_endpoint,
+                })
+            except ValueError as exc:
+                new_keypair_priv.wipe()
+                new_psk.wipe()
+                raise click.ClickException(f"New client config validation failed: {exc}") from exc
+
+            try:
+                validate_server_config({
+                    "private_key": server_priv_str,
+                    "public_key": "",
+                    "port": server_port,
+                    "subnet": subnet,
+                    "clients": clients_for_render,
+                })
+            except ValueError as exc:
+                new_keypair_priv.wipe()
+                new_psk.wipe()
+                raise click.ClickException(f"New server config validation failed: {exc}") from exc
+
+            # Step 6: Write new configs atomically
+            from wg_automate.security.atomic import atomic_write
+            from wg_automate.platform.detect import get_adapter
+
+            adapter = get_adapter()
+            clients_dir = DEFAULT_VAULT_DIR / "clients"
+            clients_dir.mkdir(parents=True, exist_ok=True)
+            client_conf_path = clients_dir / f"{name}.conf"
+
+            client_encoded = new_client_config_str.encode("utf-8")
+            atomic_write(client_conf_path, client_encoded, mode=0o600)
+            new_client_hash = hashlib.sha256(client_encoded).hexdigest()
+
+            server_conf_path = adapter.get_config_path("wg0")
+            server_encoded = new_server_config_str.encode("utf-8")
+            atomic_write(server_conf_path, server_encoded, mode=0o600)
+            new_server_hash = hashlib.sha256(server_encoded).hexdigest()
+
+            # Step 7: Reload WireGuard
+            try:
+                subprocess.run(
+                    ["wg", "syncconf", "wg0",
+                     f"<(wg-quick strip {server_conf_path})"],
+                    shell=True,
+                    capture_output=True,
+                    check=True,
+                )
+            except subprocess.CalledProcessError:
+                click.echo(
+                    "WARNING: WireGuard reload failed. Config on disk is updated but "
+                    "service may be stale. "
+                    f"Run: wg syncconf wg0 <(wg-quick strip {server_conf_path})"
+                )
+                # Do NOT abort — files on disk are already correct
+
+            # Step 8: Wipe old keys and update vault state
+            old_priv = state.clients[name].get("private_key")
+            if isinstance(old_priv, SecretBytes):
+                old_priv_bytes = bytearray(old_priv.expose_secret())
+                wipe_bytes(old_priv_bytes)
+                old_priv.wipe()
+
+            old_psk_val = state.clients[name].get("psk")
+            if isinstance(old_psk_val, SecretBytes):
+                old_psk_bytes = bytearray(old_psk_val.expose_secret())
+                wipe_bytes(old_psk_bytes)
+                old_psk_val.wipe()
+
+            # Update vault state with new keys and hashes
+            state.clients[name]["private_key"] = new_keypair_priv
+            state.clients[name]["public_key"] = new_pub_str
+            state.clients[name]["psk"] = new_psk
+            state.integrity[f"client-{name}"] = new_client_hash
+            state.integrity["server"] = new_server_hash
+
+            # Step 9: Audit log (no key material)
+            audit = AuditLog(DEFAULT_AUDIT_LOG_PATH)
+            audit.log(action="rotate-keys", metadata={"name": name})
+
+            # Commit vault: state is saved when context manager exits
+            vault.save(state, passphrase)
+
+        # Step 10: Show new QR from new config
+        from wg_automate.core.qr_generator import generate_qr_terminal
+        import time
+
+        qr_output = generate_qr_terminal(new_client_config_str)
+        click.echo(qr_output)
+        click.echo("QR will clear in 60 seconds...")
+        time.sleep(60)
+        click.clear()
+
+        # Wipe config string from memory best-effort
+        wipe_string(new_client_config_str)
+
+        # Step 11: Confirm
+        click.echo(f"Keys rotated for client '{name}'. New QR displayed above.")
+
+    except click.ClickException:
+        raise
+    except Exception as exc:
+        raise click.ClickException(str(exc)) from exc
+    finally:
+        passphrase.wipe()
+        wipe_string(passphrase_str)
 
 
 @cli.command("rotate-server-keys")
 def rotate_server_keys() -> None:
-    """Rotate the server keypair and redeploy the config."""
-    _not_implemented("rotate-server-keys")
+    """Rotate the server keypair and update all client configs."""
+    import hashlib
+    import subprocess
+
+    passphrase_str: str = click.prompt("Vault passphrase", hide_input=True)
+    click.echo(
+        "WARNING: This will regenerate the server keypair and update ALL client configs. "
+        "All clients must reconnect."
+    )
+    if not click.confirm("Proceed?", default=False):
+        click.echo("Aborted.")
+        return
+
+    from wg_automate.security.secret_types import SecretBytes
+    from wg_automate.security.secrets_wipe import wipe_bytes, wipe_string
+    from wg_automate.security.audit import AuditLog
+
+    passphrase = SecretBytes(bytearray(passphrase_str.encode("utf-8")))
+
+    try:
+        from wg_automate.security.vault import Vault
+
+        vault = Vault(DEFAULT_VAULT_PATH)
+        with vault.open(passphrase) as state:
+            clients = list(state.clients.keys())
+            client_count = len(clients)
+
+            # Step 4: Generate new server keypair
+            from wg_automate.core.keygen import generate_keypair
+
+            new_server_priv, new_server_pub = generate_keypair()
+            new_server_pub_str = new_server_pub.decode("ascii")
+            new_server_priv_str = new_server_priv.expose_secret().decode("ascii")
+
+            server_data = state.server
+            server_port = server_data["port"]
+            server_ip_raw = server_data["ip"]
+            subnet = state.ip_pool.get("subnet", "10.0.0.0/24")
+            prefix_length = int(subnet.split("/")[1])
+
+            from wg_automate.core.config_builder import ConfigBuilder
+            from wg_automate.security.validator import validate_client_config, validate_server_config
+            from wg_automate.security.atomic import atomic_write
+            from wg_automate.platform.detect import get_adapter
+
+            adapter = get_adapter()
+            clients_dir = DEFAULT_VAULT_DIR / "clients"
+            clients_dir.mkdir(parents=True, exist_ok=True)
+
+            # Step 5: Update all client configs with new server public key
+            new_client_hashes: dict = {}
+            for cname in clients:
+                cdata = state.clients[cname]
+                client_ip = cdata["ip"]
+                dns_server = cdata.get("dns_server", "1.1.1.1")
+                server_endpoint = cdata.get("endpoint", f"{server_ip_raw}:{server_port}")
+
+                cpriv_raw = cdata.get("private_key", "")
+                cpriv_str = cpriv_raw if isinstance(cpriv_raw, str) else cpriv_raw.expose_secret().decode("ascii")
+                cpsk_raw = cdata.get("psk", "")
+                cpsk_str = cpsk_raw if isinstance(cpsk_raw, str) else cpsk_raw.expose_secret().decode("ascii")
+                cpub_raw = cdata.get("public_key", "")
+                cpub_str = cpub_raw if isinstance(cpub_raw, str) else cpub_raw.decode("ascii")
+
+                updated_client_config = ConfigBuilder().render_client_config(
+                    client_private_key=cpriv_str,
+                    client_ip=client_ip,
+                    dns_server=dns_server,
+                    server_public_key=new_server_pub_str,
+                    psk=cpsk_str,
+                    server_endpoint=server_endpoint,
+                )
+
+                try:
+                    validate_client_config({
+                        "private_key": cpriv_str,
+                        "psk": cpsk_str,
+                        "ip": client_ip,
+                        "dns_server": dns_server,
+                        "server_public_key": new_server_pub_str,
+                        "endpoint": server_endpoint,
+                    })
+                except ValueError as exc:
+                    new_server_priv.wipe()
+                    raise click.ClickException(
+                        f"Client config validation failed for '{cname}': {exc}"
+                    ) from exc
+
+                client_conf_path = clients_dir / f"{cname}.conf"
+                client_encoded = updated_client_config.encode("utf-8")
+                atomic_write(client_conf_path, client_encoded, mode=0o600)
+                new_client_hashes[cname] = hashlib.sha256(client_encoded).hexdigest()
+
+            # Step 6: Update server config with new server private key
+            clients_for_render = []
+            for cname in clients:
+                cdata = state.clients[cname]
+                cpub_raw = cdata.get("public_key", "")
+                cpub_str = cpub_raw if isinstance(cpub_raw, str) else cpub_raw.decode("ascii")
+                cpsk_raw = cdata.get("psk", "")
+                cpsk_str = cpsk_raw if isinstance(cpsk_raw, str) else cpsk_raw.expose_secret().decode("ascii")
+                clients_for_render.append({
+                    "name": cname,
+                    "public_key": cpub_str,
+                    "psk": cpsk_str,
+                    "ip": cdata["ip"],
+                })
+
+            try:
+                validate_server_config({
+                    "private_key": new_server_priv_str,
+                    "public_key": "",
+                    "port": server_port,
+                    "subnet": subnet,
+                    "clients": clients_for_render,
+                })
+            except ValueError as exc:
+                new_server_priv.wipe()
+                raise click.ClickException(f"New server config validation failed: {exc}") from exc
+
+            new_server_config_str = ConfigBuilder().render_server_config(
+                server_private_key=new_server_priv_str,
+                server_ip=server_ip_raw,
+                prefix_length=prefix_length,
+                server_port=server_port,
+                clients=clients_for_render,
+            )
+
+            server_conf_path = adapter.get_config_path("wg0")
+            server_encoded = new_server_config_str.encode("utf-8")
+            atomic_write(server_conf_path, server_encoded, mode=0o600)
+            new_server_hash = hashlib.sha256(server_encoded).hexdigest()
+
+            # Step 7: Reload WireGuard
+            try:
+                subprocess.run(
+                    ["wg", "syncconf", "wg0",
+                     f"<(wg-quick strip {server_conf_path})"],
+                    shell=True,
+                    capture_output=True,
+                    check=True,
+                )
+            except subprocess.CalledProcessError:
+                click.echo(
+                    "WARNING: WireGuard reload failed. Config on disk is updated but "
+                    "service may be stale. "
+                    f"Run: wg syncconf wg0 <(wg-quick strip {server_conf_path})"
+                )
+
+            # Step 8: Wipe old server private key and update vault state
+            old_server_priv = state.server.get("private_key")
+            if isinstance(old_server_priv, SecretBytes):
+                old_bytes = bytearray(old_server_priv.expose_secret())
+                wipe_bytes(old_bytes)
+                old_server_priv.wipe()
+
+            state.server["private_key"] = new_server_priv
+            state.server["public_key"] = new_server_pub_str
+            state.integrity["server"] = new_server_hash
+            for cname, chash in new_client_hashes.items():
+                state.integrity[f"client-{cname}"] = chash
+
+            # Step 9: Audit log (no key material)
+            audit = AuditLog(DEFAULT_AUDIT_LOG_PATH)
+            audit.log(
+                action="rotate-server-keys",
+                metadata={"client_count": client_count},
+            )
+
+            vault.save(state, passphrase)
+
+        # Step 10: Confirm
+        click.echo(
+            f"Server keypair rotated. {client_count} client config(s) updated. "
+            "All clients must reconnect."
+        )
+
+    except click.ClickException:
+        raise
+    except Exception as exc:
+        raise click.ClickException(str(exc)) from exc
+    finally:
+        passphrase.wipe()
+        wipe_string(passphrase_str)
 
 
 @cli.command("update-dns")
@@ -596,8 +980,48 @@ def export(name: str) -> None:
 @click.option("--lines", default=50, type=int, show_default=True,
               help="Number of recent entries to display")
 def audit_log(lines: int) -> None:
-    """Display recent audit log entries."""
-    _not_implemented("audit-log")
+    """Display recent audit log entries (no vault passphrase required)."""
+    # Step 1: No vault unlock needed — audit log contains no secrets (AUDIT-01)
+
+    # Step 2: Retrieve entries via AuditLog API
+    from wg_automate.security.audit import AuditLog
+
+    audit = AuditLog(DEFAULT_AUDIT_LOG_PATH)
+    entries = audit.get_recent_entries(lines)
+
+    # Step 3: Empty log case
+    if not entries:
+        click.echo("Audit log is empty.")
+        return
+
+    # SECURITY INVARIANT: verify no entry contains key material field names
+    _SECRET_FIELD_NAMES = {"PrivateKey", "psk", "passphrase", "token"}
+
+    # Step 4: Format and print each entry
+    for entry in entries:
+        # Check for secret field names in this entry's metadata
+        secret_fields_found = _SECRET_FIELD_NAMES & set(entry.metadata.keys())
+        if secret_fields_found:
+            click.echo(
+                f"CRITICAL: Audit log entry contains secret field name(s): "
+                f"{secret_fields_found}. AUDIT-01 invariant violated at write time."
+            )
+
+        # Build metadata display string (skip error=None)
+        meta_pairs = []
+        for k, v in entry.metadata.items():
+            meta_pairs.append(f"{k}={v}")
+        if entry.error is not None:
+            meta_pairs.append(f"error={entry.error}")
+
+        meta_str = "  ".join(meta_pairs) if meta_pairs else ""
+        action_label = entry.action
+        status_label = "" if entry.success else " [FAILED]"
+
+        click.echo(f"{entry.timestamp}  [{action_label}{status_label}]  {meta_str}")
+
+    # Step 5: Divider and total count
+    click.echo(f"-- {len(entries)} entries shown --")
 
 
 # ===========================================================================
