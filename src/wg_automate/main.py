@@ -536,25 +536,301 @@ def change_passphrase() -> None:
 
 
 # ===========================================================================
-# Stub commands (plans 04-02 / 04-03 will fill in these bodies)
+# Client lifecycle commands (plan 04-02)
 # ===========================================================================
+
+
+def _reload_wireguard(interface: str = "wg0") -> None:
+    """Reload WireGuard interface via wg syncconf (preserves active sessions).
+
+    On Linux/macOS uses the shell process-substitution form:
+        wg syncconf wg0 <(wg-quick strip /etc/wireguard/wg0.conf)
+    On Windows falls back to wg-quick down/up since process substitution
+    is not supported.
+
+    Raises subprocess.CalledProcessError on failure so the vault context
+    manager can abort and discard the pending state change.
+    """
+    if sys.platform == "win32":
+        subprocess.run(["wg-quick", "down", interface], check=False, capture_output=True)
+        subprocess.run(["wg-quick", "up", interface], check=True, capture_output=True)
+    else:
+        from wg_automate.platform.detect import get_adapter
+        adapter = get_adapter()
+        config_path = adapter.get_config_path(interface)
+        subprocess.run(
+            f"wg syncconf {interface} <(wg-quick strip {config_path})",
+            shell=True,
+            executable="/bin/bash",
+            check=True,
+            capture_output=True,
+        )
+
 
 def _not_implemented(name: str) -> None:
     raise click.ClickException(f"Not yet implemented: {name}")
+
+
+def _extract_secret_str(value: object) -> str:
+    """Extract a plain string from either a str or SecretBytes value."""
+    from wg_automate.security.secret_types import SecretBytes
+    if isinstance(value, SecretBytes):
+        return value.expose_secret().decode("utf-8")
+    return str(value)
 
 
 @cli.command("add-client")
 @click.argument("name")
 def add_client(name: str) -> None:
     """Add a new WireGuard client and generate its config."""
-    _not_implemented("add-client")
+    # Step 1: Validate name — alphanumeric + hyphens, max 32 chars (CONFIG-06)
+    if not re.fullmatch(r'^[a-zA-Z0-9-]{1,32}$', name):
+        raise click.BadParameter(
+            "Name must be alphanumeric with hyphens only, max 32 characters.",
+            param_hint="'NAME'",
+        )
+
+    # Step 2: Collect passphrase — CLI-02
+    passphrase_str: str = click.prompt("Vault passphrase", hide_input=True)
+
+    from wg_automate.security.secret_types import SecretBytes
+    from wg_automate.security.secrets_wipe import wipe_string
+
+    passphrase = SecretBytes(bytearray(passphrase_str.encode("utf-8")))
+    client_config_str: str | None = None
+
+    try:
+        from wg_automate.security.vault import Vault
+        from wg_automate.security.audit import AuditLog
+        from wg_automate.core.keygen import generate_keypair
+        from wg_automate.core.psk import generate_psk
+        from wg_automate.core.ip_pool import IPPool
+        from wg_automate.core.config_builder import ConfigBuilder
+        from wg_automate.security.atomic import atomic_write
+        from wg_automate.core.qr_generator import generate_qr_terminal, QR_DISPLAY_TIMEOUT
+        from wg_automate.platform.detect import get_adapter
+
+        vault = Vault(DEFAULT_VAULT_PATH)
+
+        # Steps 3-14: Keep vault open for the entire operation.
+        # Vault is committed (vault.save) only AFTER wg syncconf succeeds.
+        with vault.open(passphrase) as state:
+            # Step 4: Check for duplicate client name
+            if name in state.clients:
+                raise click.ClickException(f"Client '{name}' already exists.")
+
+            # Step 5: Generate client keypair
+            private_key_secret, public_key_bytes = generate_keypair()
+            public_key_str = public_key_bytes.decode("ascii")
+            private_key_str = private_key_secret.expose_secret().decode("ascii")
+
+            # Step 6: Generate PSK
+            psk_secret = generate_psk()
+            psk_str = psk_secret.expose_secret().decode("ascii")
+
+            # Step 7: Allocate next available IP from pool
+            pool = IPPool(state.ip_pool["subnet"])
+            pool.load_state(state.ip_pool.get("allocated", {}))
+            allocated_ip = pool.allocate(name)
+
+            # Step 8: Build client config (stays in memory)
+            server_pub_key = _extract_secret_str(state.server["public_key"])
+            server_port = state.server["port"]
+            server_ip = state.server["ip"]
+
+            # Prefer DuckDNS domain if configured, else server VPN IP
+            duckdns_domain = state.server.get("duckdns_domain")
+            if duckdns_domain:
+                server_endpoint = f"{duckdns_domain}.duckdns.org:{server_port}"
+            else:
+                server_endpoint = f"{server_ip}:{server_port}"
+
+            builder = ConfigBuilder()
+            # Validation is performed inside render_client_config (CONFIG-02)
+            client_config_str = builder.render_client_config(
+                client_private_key=private_key_str,
+                client_ip=allocated_ip,
+                dns_server=server_ip,  # use server VPN IP as DNS
+                server_public_key=server_pub_key,
+                psk=psk_str,
+                server_endpoint=server_endpoint,
+            )
+
+            # Step 10: Write client config atomically with 600 permissions
+            clients_dir = DEFAULT_VAULT_DIR / "clients"
+            clients_dir.mkdir(parents=True, exist_ok=True)
+            client_conf_path = clients_dir / f"{name}.conf"
+            atomic_write(client_conf_path, client_config_str.encode("utf-8"), mode=0o600)
+
+            # Step 11: Compute SHA-256 of written file
+            config_hash = hashlib.sha256(client_config_str.encode("utf-8")).hexdigest()
+
+            # Step 12: Rebuild server config with all existing + new peer
+            peers = []
+            for cname, cdata in state.clients.items():
+                peers.append({
+                    "name": cname,
+                    "public_key": _extract_secret_str(cdata["public_key"]),
+                    "psk": _extract_secret_str(cdata["psk"]),
+                    "ip": cdata["ip"],
+                })
+            peers.append({
+                "name": name,
+                "public_key": public_key_str,
+                "psk": psk_str,
+                "ip": allocated_ip,
+            })
+
+            server_private_key_str = _extract_secret_str(state.server["private_key"])
+            server_config_content = builder.render_server_config(
+                server_private_key=server_private_key_str,
+                server_ip=server_ip,
+                prefix_length=int(state.ip_pool["subnet"].split("/")[1]),
+                server_port=server_port,
+                clients=peers,
+            )
+
+            adapter = get_adapter()
+            adapter.deploy_config(server_config_content)
+
+            # Step 13: Reload WireGuard — CLIENT-01 atomic revocation boundary
+            _reload_wireguard()
+
+            # Persist client in vault AFTER successful syncconf
+            state.clients[name] = {
+                "private_key": private_key_str,
+                "public_key": public_key_str,
+                "psk": psk_str,
+                "ip": allocated_ip,
+                "config_hash": config_hash,
+            }
+            state.ip_pool["allocated"] = pool.get_allocated()
+            state.integrity[f"client-{name}"] = config_hash
+            vault.save(state, passphrase)
+
+            # Step 14: Audit log — no key material
+            audit = AuditLog(DEFAULT_AUDIT_LOG_PATH)
+            audit.log(
+                action="add-client",
+                metadata={"name": name, "ip": allocated_ip},
+            )
+
+        # Step 15: Display QR — vault context already wiped
+        click.echo(f"\nClient '{name}' added successfully.")
+        click.echo(f"  IP: {allocated_ip}")
+        click.echo("\nScan the QR code below with your WireGuard app:\n")
+        click.echo(generate_qr_terminal(client_config_str))
+        click.echo(f"QR will clear in {QR_DISPLAY_TIMEOUT} seconds...")
+        time.sleep(QR_DISPLAY_TIMEOUT)
+        click.clear()
+
+    except (click.ClickException, click.BadParameter):
+        raise
+    except Exception as exc:
+        raise click.ClickException(str(exc)) from exc
+    finally:
+        passphrase.wipe()
+        wipe_string(passphrase_str)
+        # Step 16: Wipe client config string from memory (best-effort for str)
+        if client_config_str is not None:
+            del client_config_str
 
 
 @cli.command("remove-client")
 @click.argument("name")
 def remove_client(name: str) -> None:
-    """Remove a client and revoke its WireGuard access."""
-    _not_implemented("remove-client")
+    """Remove a client and revoke its WireGuard access immediately."""
+    # Step 1: Collect passphrase — CLI-02
+    passphrase_str: str = click.prompt("Vault passphrase", hide_input=True)
+
+    from wg_automate.security.secret_types import SecretBytes
+    from wg_automate.security.secrets_wipe import wipe_string
+
+    passphrase = SecretBytes(bytearray(passphrase_str.encode("utf-8")))
+
+    try:
+        from wg_automate.security.vault import Vault
+        from wg_automate.security.audit import AuditLog
+        from wg_automate.core.ip_pool import IPPool
+        from wg_automate.core.config_builder import ConfigBuilder
+        from wg_automate.platform.detect import get_adapter
+
+        vault = Vault(DEFAULT_VAULT_PATH)
+
+        with vault.open(passphrase) as state:
+            # Step 3: Verify client exists
+            if name not in state.clients:
+                raise click.ClickException(f"Client '{name}' not found.")
+
+            client_data = state.clients[name]
+            revoked_ip = client_data["ip"]
+
+            # Step 4: Rebuild server config WITHOUT the removed peer
+            peers = []
+            for cname, cdata in state.clients.items():
+                if cname == name:
+                    continue  # omit the client being revoked
+                peers.append({
+                    "name": cname,
+                    "public_key": _extract_secret_str(cdata["public_key"]),
+                    "psk": _extract_secret_str(cdata["psk"]),
+                    "ip": cdata["ip"],
+                })
+
+            server_private_key_str = _extract_secret_str(state.server["private_key"])
+            builder = ConfigBuilder()
+            server_config_content = builder.render_server_config(
+                server_private_key=server_private_key_str,
+                server_ip=state.server["ip"],
+                prefix_length=int(state.ip_pool["subnet"].split("/")[1]),
+                server_port=state.server["port"],
+                clients=peers,
+            )
+
+            adapter = get_adapter()
+            adapter.deploy_config(server_config_content)
+
+            # Step 5: Reload WireGuard — revocation moment (CLIENT-02: no grace period)
+            _reload_wireguard()
+
+            # Step 6: Release IP in pool
+            pool = IPPool(state.ip_pool["subnet"])
+            pool.load_state(state.ip_pool.get("allocated", {}))
+            pool.release(revoked_ip)
+            state.ip_pool["allocated"] = pool.get_allocated()
+
+            # Step 7: Purge client from vault (private key, PSK, IP, config hash)
+            del state.clients[name]
+            state.integrity.pop(f"client-{name}", None)
+            state.integrity.pop(f"client-{name}_verified", None)
+
+            # Step 8: Delete client config file if it exists
+            client_conf_path = DEFAULT_VAULT_DIR / "clients" / f"{name}.conf"
+            if client_conf_path.exists():
+                try:
+                    client_conf_path.unlink()
+                except OSError:
+                    pass
+
+            vault.save(state, passphrase)
+
+            # Step 9: Audit log — no key material
+            audit = AuditLog(DEFAULT_AUDIT_LOG_PATH)
+            audit.log(
+                action="remove-client",
+                metadata={"name": name},
+            )
+
+        # Step 10: Confirmation
+        click.echo(f"Client '{name}' removed and revoked.")
+
+    except click.ClickException:
+        raise
+    except Exception as exc:
+        raise click.ClickException(str(exc)) from exc
+    finally:
+        passphrase.wipe()
+        wipe_string(passphrase_str)
 
 
 @cli.command("list-clients")
