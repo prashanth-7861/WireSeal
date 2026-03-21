@@ -42,7 +42,7 @@ FORMAT_VERSION = 1
 
 # CRITICAL: memory_cost is in KiB. 256 MiB = 262144 KiB. Passing 256 = catastrophically weak.
 ARGON2_MEMORY_COST_KIB = 262144  # 256 MiB
-ARGON2_TIME_COST = 6
+ARGON2_TIME_COST = 10
 ARGON2_PARALLELISM = 4
 ARGON2_HASH_LEN = 32  # 256-bit AES key
 ARGON2_SALT_LEN = 16
@@ -97,14 +97,12 @@ def _derive_key(passphrase: bytearray, salt: bytes, *, memory_cost: int = ARGON2
         hash_len=ARGON2_HASH_LEN,
         type=Type.ID,
     )
-    # Convert immutable bytes to mutable bytearray so callers can wipe in-place
+    # Convert immutable bytes to mutable bytearray so callers can wipe in-place.
+    # The immutable bytes object (raw) cannot be reliably zeroed via ctypes because
+    # the offset calculation is CPython-version-dependent and prone to memory
+    # corruption. Relying on CPython's allocator to overwrite it on deallocation
+    # is the least-bad option for this best-effort residue.
     result = bytearray(raw)
-    # Best-effort: zero the immutable bytes copy (CPython only)
-    import ctypes
-    try:
-        ctypes.memset(id(raw) + (len(raw).__sizeof__() - len(raw)), 0, len(raw))
-    except Exception:
-        pass
     return result
 
 
