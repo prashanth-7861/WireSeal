@@ -176,16 +176,11 @@ jobs:
             --install-location / \
             dist/release/wireseal-component.pkg
 
-          # Wrap in a distributable package with a license screen
-          productbuild \
-            --distribution - \
-            --package-path dist/release \
-            "dist/release/wireseal-${VERSION}-macos-arm64.pkg" <<'DISTXML'
+          # Write distribution XML to a temp file (productbuild does not accept stdin)
+          cat > /tmp/distribution.xml <<EOF
           <?xml version="1.0" encoding="utf-8"?>
           <installer-gui-script minSpecVersion="2">
             <title>WireSeal</title>
-            <welcome file="none"/>
-            <license file="none"/>
             <options customize="never" require-scripts="false" hostArchitectures="arm64"/>
             <pkg-ref id="com.wireseal.cli"/>
             <choices-outline>
@@ -194,9 +189,14 @@ jobs:
             <choice id="com.wireseal.cli" visible="false">
               <pkg-ref id="com.wireseal.cli"/>
             </choice>
-            <pkg-ref id="com.wireseal.cli" version="$VERSION" onConclusion="none">wireseal-component.pkg</pkg-ref>
+            <pkg-ref id="com.wireseal.cli" version="${VERSION}" onConclusion="none">wireseal-component.pkg</pkg-ref>
           </installer-gui-script>
-          DISTXML
+          EOF
+
+          productbuild \
+            --distribution /tmp/distribution.xml \
+            --package-path dist/release \
+            "dist/release/wireseal-${VERSION}-macos-arm64.pkg"
 
           rm dist/release/wireseal-component.pkg
 
@@ -232,14 +232,15 @@ jobs:
         run: choco install nsis --yes --no-progress
 
       - name: Build NSIS installer
-        shell: bash
+        shell: powershell
         run: |
-          VERSION="${{ steps.ver.outputs.version }}"
-          mkdir -p dist/release
-          makensis \
-            /DVERSION="$VERSION" \
-            /DSRCBINARY="dist\\release\\wireseal-windows-x86_64.exe" \
-            installer/wireseal.nsi
+          $version = "${{ steps.ver.outputs.version }}"
+          $nsis = "C:\Program Files (x86)\NSIS\makensis.exe"
+          & $nsis `
+            /DVERSION="$version" `
+            "/DSRCBINARY=dist\release\wireseal-windows-x86_64.exe" `
+            installer\wireseal.nsi
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - uses: actions/upload-artifact@v4
         with:
