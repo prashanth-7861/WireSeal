@@ -5,16 +5,16 @@
 See: .planning/PROJECT.md (updated 2026-03-17)
 
 **Core value:** Zero plaintext secrets on disk, ever -- if the vault is compromised without the passphrase, no key material is exposed.
-**Current focus:** Phase 4: CLI and Client Management -- IN PROGRESS (3 of 4 plans done)
+**Current focus:** Phase 5: Tests and Packaging -- IN PROGRESS (1 of 3 plans done)
 
 ## Current Position
 
-Phase: 4 of 5 (CLI and Client Management) -- IN PROGRESS
-Plan: 3 of 4 in current phase (04-01, 04-02, 04-03 complete)
+Phase: 5 of 5 (Tests and Packaging) -- IN PROGRESS
+Plan: 1 of 3 in current phase (05-01 complete)
 Status: In Progress
-Last activity: 2026-03-20 -- Completed plan 04-03 (rotate-keys, rotate-server-keys, audit-log implementations)
+Last activity: 2026-03-21 -- Completed plan 05-01 (146 unit tests across security/ and core/)
 
-Progress: [█████████░] 81% (13/16 plans complete)
+Progress: [█████████░] 88% (14/16 plans complete)
 
 ## Performance Metrics
 
@@ -31,6 +31,7 @@ Progress: [█████████░] 81% (13/16 plans complete)
 | 02-platform-hardening | 4/4 | 12 min | 3 min |
 | 03-dynamic-dns-and-audit | 2/4 | 10 min | 5 min |
 | 04-cli-and-client-management | 3/4 | 9 min | 3 min |
+| 05-tests-and-packaging | 1/3 | 7 min | 7 min |
 
 **Recent Trend:**
 - Last 5 plans: 3 min
@@ -87,6 +88,10 @@ Recent decisions affecting current work:
 - [04-02]: _extract_secret_str() helper unifies SecretBytes and plain str access across all client commands
 - [Phase 04-03]: Generate-before-wipe rotation order: new keypair and PSK generated and configs validated before old SecretBytes.wipe() — old keys exist as fallback until new configs confirmed written to disk
 - [Phase 04-03]: audit-log requires no vault passphrase by design: AUDIT-01 ensures no secrets in log, so reading without authentication is safe
+- [05-01]: Function-scoped vault_path fixture (not module-scoped) prevents state leakage between vault tests
+- [05-01]: Python 3.11+ expanded ipaddress.is_private to include loopback and documentation ranges -- use 8.8.8.0/24 for non-private subnet tests
+- [05-01]: xfail used for duplicate peer key detection gap in validate_server_config
+- [05-01]: Vault tests run with real Argon2id 256 MiB KDF (not mocked) to verify actual security parameters
 
 ### Pending Todos
 
@@ -100,6 +105,6 @@ None.
 
 ## Session Continuity
 
-Last session: 2026-03-20
-Stopped at: Completed 04-02-PLAN.md (add-client, remove-client, list-clients, show-qr, export, update-dns — full client lifecycle, QR generator module, 6 commands implemented)
+Last session: 2026-03-21
+Stopped at: Completed 05-01-PLAN.md (146 unit tests: security suite and core suite, pyproject.toml dev deps)
 Resume file: None
