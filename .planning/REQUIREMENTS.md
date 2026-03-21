@@ -112,10 +112,10 @@
 
 ### Packaging and Distribution
 
-- [ ] **PKG-01**: `pyproject.toml` defines project metadata with pinned dependencies and SHA-256 hashes
-- [ ] **PKG-02**: PyInstaller standalone single-file binaries are built for Linux, macOS, and Windows via platform CI matrix
-- [ ] **PKG-03**: Release artifacts are GPG-signed; checksums published alongside binaries
-- [ ] **PKG-04**: `README.md` documents the security model, threat model, and installation with hash verification
+- [x] **PKG-01**: `pyproject.toml` defines project metadata with pinned dependencies and SHA-256 hashes
+- [x] **PKG-02**: PyInstaller standalone single-file binaries are built for Linux, macOS, and Windows via platform CI matrix
+- [x] **PKG-03**: Release artifacts are GPG-signed; checksums published alongside binaries
+- [x] **PKG-04**: `README.md` documents the security model, threat model, and installation with hash verification
 
 ## v2 Requirements
 

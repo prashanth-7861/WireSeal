@@ -5,16 +5,16 @@
 See: .planning/PROJECT.md (updated 2026-03-17)
 
 **Core value:** Zero plaintext secrets on disk, ever -- if the vault is compromised without the passphrase, no key material is exposed.
-**Current focus:** Phase 5: Tests and Packaging -- IN PROGRESS (1 of 3 plans done)
+**Current focus:** Phase 5: Tests and Packaging -- COMPLETE (3 of 3 plans done)
 
 ## Current Position
 
-Phase: 5 of 5 (Tests and Packaging) -- IN PROGRESS
-Plan: 1 of 3 in current phase (05-01 complete)
-Status: In Progress
-Last activity: 2026-03-21 -- Completed plan 05-01 (146 unit tests across security/ and core/)
+Phase: 5 of 5 (Tests and Packaging) -- COMPLETE
+Plan: 3 of 3 in current phase (05-03 complete)
+Status: Complete
+Last activity: 2026-03-21 -- Completed plan 05-03 (PyInstaller spec, hash-pinned requirements, CI/CD workflows, README)
 
-Progress: [█████████░] 88% (14/16 plans complete)
+Progress: [██████████] 100% (16/16 plans complete)
 
 ## Performance Metrics
 
@@ -31,13 +31,14 @@ Progress: [█████████░] 88% (14/16 plans complete)
 | 02-platform-hardening | 4/4 | 12 min | 3 min |
 | 03-dynamic-dns-and-audit | 2/4 | 10 min | 5 min |
 | 04-cli-and-client-management | 3/4 | 9 min | 3 min |
-| 05-tests-and-packaging | 1/3 | 7 min | 7 min |
+| 05-tests-and-packaging | 3/3 | 13 min | 4 min |
 
 **Recent Trend:**
 - Last 5 plans: 3 min
 - Trend: Stable
 
 *Updated after each plan completion*
+| Phase 05-tests-and-packaging P05-02 | 3 | 2 tasks | 6 files |
 
 ## Accumulated Context
 
@@ -92,6 +93,11 @@ Recent decisions affecting current work:
 - [05-01]: Python 3.11+ expanded ipaddress.is_private to include loopback and documentation ranges -- use 8.8.8.0/24 for non-private subnet tests
 - [05-01]: xfail used for duplicate peer key detection gap in validate_server_config
 - [05-01]: Vault tests run with real Argon2id 256 MiB KDF (not mocked) to verify actual security parameters
+- [Phase 05-03]: Templates directory included in datas: config_builder.py uses FileSystemLoader so .j2 files must be bundled
+- [Phase 05-03]: ast.parse() used for spec syntax verification (not exec()) -- Analysis/PYZ/EXE are PyInstaller builtins unavailable in plain Python
+- [Phase 05-03]: pip-compile generated real SHA-256 hashes on Windows; production runs should use Linux for cross-platform hash consistency
+- [Phase 05-03]: onefile=True for all platforms; Windows AV false positive documented in README Security Limitations
+- [Phase 05-tests-and-packaging]: benchmark.stats guard: --benchmark-disable sets stats to None; None-check added before timing assertion
 
 ### Pending Todos
 
@@ -106,5 +112,5 @@ None.
 ## Session Continuity
 
 Last session: 2026-03-21
-Stopped at: Completed 05-01-PLAN.md (146 unit tests: security suite and core suite, pyproject.toml dev deps)
+Stopped at: Completed 05-03-PLAN.md (PyInstaller spec, hash-pinned requirements, CI/CD workflows, README) -- ALL PLANS COMPLETE
 Resume file: None
