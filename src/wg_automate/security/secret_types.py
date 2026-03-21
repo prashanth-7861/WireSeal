@@ -124,6 +124,12 @@ class SecretBytes:
     def __getstate__(self) -> None:
         raise TypeError("SecretBytes cannot be pickled")
 
+    def __reduce__(self) -> None:
+        raise TypeError("SecretBytes cannot be pickled")
+
+    def __reduce_ex__(self, protocol: int) -> None:
+        raise TypeError("SecretBytes cannot be pickled")
+
     # ------------------------------------------------------------------
     # Utility
     # ------------------------------------------------------------------
