@@ -16,9 +16,34 @@ dependencies = [
     "qrcode>=7.4",
 ]
 
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.3.5,<9",
+    "pytest-benchmark>=5.1,<6",
+    "pytest-mock>=3.14,<4",
+    "pytest-cov>=6,<7",
+    "pyinstaller>=6.19,<7",
+    "pyinstaller-hooks-contrib>=2026.0",
+    "pip-tools>=7.5,<8",
+    "pip-audit>=2.10,<3",
+]
+
 [tool.setuptools.packages.find]
 where = ["src"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = ["--import-mode=importlib", "-ra"]
+addopts = [
+    "--import-mode=importlib",
+    "-ra",
+    "--tb=short",
+    "-m", "not integration",
+]
+markers = [
+    "integration: requires Docker daemon (deselect with '-m not integration')",
+    "slow: marks tests as slow (benchmark etc.)",
+]
+
+[tool.pip-tools]
+generate-hashes = true
+strip-extras = true
