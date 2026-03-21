@@ -144,10 +144,19 @@ class LinuxAdapter(AbstractPlatformAdapter):
 
         if missing:
             missing_str = ", ".join(missing)
-            raise PrerequisiteError(
-                f"Missing: {missing_str}. "
-                "Run: apt install wireguard nftables"
-            )
+            # Pick the right install hint for the detected distro
+            try:
+                import distro as _distro  # type: ignore[import-untyped]
+                _did = _distro.id()
+            except Exception:
+                _did = ""
+            if _did in ("arch", "manjaro", "endeavouros"):
+                _hint = "Run: pacman -S wireguard-tools nftables"
+            elif _did in ("fedora", "rhel", "centos", "rocky", "almalinux"):
+                _hint = "Run: dnf install wireguard-tools nftables"
+            else:
+                _hint = "Run: apt install wireguard-tools nftables"
+            raise PrerequisiteError(f"Missing: {missing_str}. {_hint}")
 
         return []
 
