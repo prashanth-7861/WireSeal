@@ -540,13 +540,26 @@ def change_passphrase() -> None:
 # ===========================================================================
 
 
+def _interface_is_up(interface: str) -> bool:
+    """Return True if the WireGuard interface exists and is active."""
+    try:
+        result = subprocess.run(
+            ["wg", "show", interface],
+            capture_output=True,
+        )
+        return result.returncode == 0
+    except FileNotFoundError:
+        return False
+
+
 def _reload_wireguard(interface: str = "wg0") -> None:
     """Reload WireGuard interface via wg syncconf (preserves active sessions).
 
-    On Linux/macOS uses the shell process-substitution form:
-        wg syncconf wg0 <(wg-quick strip /etc/wireguard/wg0.conf)
-    On Windows falls back to wg-quick down/up since process substitution
-    is not supported.
+    If the interface is not yet running, falls back to wg-quick up so that
+    add-client works even when the tunnel was never started or was terminated.
+
+    On Linux/macOS uses a two-step pipeline (wg-quick strip | wg syncconf)
+    to avoid shell=True (CRIT-01).  On Windows uses wg-quick down/up.
 
     Raises subprocess.CalledProcessError on failure so the vault context
     manager can abort and discard the pending state change.
@@ -554,24 +567,35 @@ def _reload_wireguard(interface: str = "wg0") -> None:
     if sys.platform == "win32":
         subprocess.run(["wg-quick", "down", interface], check=False, capture_output=True)
         subprocess.run(["wg-quick", "up", interface], check=True, capture_output=True)
-    else:
-        from wireseal.platform.detect import get_adapter
-        adapter = get_adapter()
-        config_path = adapter.get_config_path(interface)
-        # Two-step pipeline: avoid shell=True (CRIT-01 fix)
-        strip_result = subprocess.run(
-            ["wg-quick", "strip", str(config_path)],
-            shell=False,
-            check=True,
-            capture_output=True,
-        )
+        return
+
+    # If the interface is not running, bring it up instead of syncconf
+    if not _interface_is_up(interface):
         subprocess.run(
-            ["wg", "syncconf", interface],
+            ["wg-quick", "up", interface],
             shell=False,
             check=True,
-            input=strip_result.stdout,
             capture_output=True,
         )
+        return
+
+    from wireseal.platform.detect import get_adapter
+    adapter = get_adapter()
+    config_path = adapter.get_config_path(interface)
+    # Two-step pipeline: avoid shell=True (CRIT-01 fix)
+    strip_result = subprocess.run(
+        ["wg-quick", "strip", str(config_path)],
+        shell=False,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["wg", "syncconf", interface],
+        shell=False,
+        check=True,
+        input=strip_result.stdout,
+        capture_output=True,
+    )
 
 
 def _not_implemented(name: str) -> None:
