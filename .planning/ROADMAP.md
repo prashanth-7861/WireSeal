@@ -98,12 +98,12 @@ Plans:
   3. Config tampering integration test: modify a deployed config, run verify, confirm detection
   4. Argon2id KDF benchmark confirms >500ms on target hardware
   5. PyInstaller standalone binaries are built for Linux, macOS, and Windows with GPG-signed release artifacts and published checksums
-**Plans**: TBD
+**Plans**: 3 plans
 
 Plans:
-- [ ] 05-01: Security-focused unit test suite (tests/)
-- [ ] 05-02: Docker integration tests and Argon2id benchmark (tests/)
-- [ ] 05-03: PyInstaller packaging, GPG signing, and pyproject.toml (packaging/)
+- [ ] 05-01-PLAN.md — Security-focused unit test suite (tests/security/, tests/core/, conftest.py, pyproject.toml test config)
+- [ ] 05-02-PLAN.md — Docker integration lifecycle test, config tampering test, and Argon2id benchmark (tests/integration/, tests/benchmarks/, Dockerfile.test)
+- [ ] 05-03-PLAN.md — PyInstaller spec, hash-pinned requirements, GitHub Actions workflows, and README (wg-automate.spec, requirements.txt, .github/workflows/, README.md)
 
 ## Progress
 
