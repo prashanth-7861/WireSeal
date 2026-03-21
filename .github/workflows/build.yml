@@ -1,0 +1,60 @@
+name: CI
+
+on:
+  push:
+    branches: ["main", "master"]
+  pull_request:
+    branches: ["main", "master"]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+      - name: Install dependencies with hash verification
+        run: pip install --require-hashes -r requirements-dev.txt
+      - name: Audit dependencies for CVEs
+        run: pip-audit -r requirements.txt
+      - name: Run unit tests
+        run: pytest --tb=short -q -m "not integration"
+      - name: Run integration tests
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: pytest --tb=short -q -m integration
+        env:
+          DOCKER_BUILDKIT: "1"
+
+  build:
+    needs: test
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            artifact_name: wg-automate-linux-x86_64
+          - os: macos-latest
+            artifact_name: wg-automate-macos-arm64
+          - os: windows-latest
+            artifact_name: wg-automate-windows-x86_64.exe
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+      - name: Install dependencies with hash verification
+        run: pip install --require-hashes -r requirements-dev.txt
+      - name: Build binary
+        run: pyinstaller wg-automate.spec
+      - name: Stage binary for upload
+        shell: bash
+        run: |
+          mkdir -p dist/release
+          find dist -maxdepth 1 \( -name "wg-automate" -o -name "wg-automate.exe" \) | \
+            xargs -I{} cp {} dist/release/${{ matrix.artifact_name }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: dist/release/${{ matrix.artifact_name }}

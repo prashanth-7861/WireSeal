@@ -1,0 +1,73 @@
+name: Release
+
+on:
+  release:
+    types: [published]
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            artifact_name: wg-automate-linux-x86_64
+          - os: macos-latest
+            artifact_name: wg-automate-macos-arm64
+          - os: windows-latest
+            artifact_name: wg-automate-windows-x86_64.exe
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+      - name: Install dependencies with hash verification
+        run: pip install --require-hashes -r requirements-dev.txt
+      - name: Run tests before release build
+        run: pytest --tb=short -q -m "not integration"
+      - name: Build binary
+        run: pyinstaller wg-automate.spec
+      - name: Stage binary
+        shell: bash
+        run: |
+          mkdir -p dist/release
+          find dist -maxdepth 1 \( -name "wg-automate" -o -name "wg-automate.exe" \) | \
+            xargs -I{} cp {} dist/release/${{ matrix.artifact_name }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: dist/release/${{ matrix.artifact_name }}
+
+  sign-and-release:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write       # Upload to GitHub Release
+      id-token: write       # Required for Sigstore keyless OIDC signing
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist/release
+          merge-multiple: true
+      - name: Generate SHA-256 checksums
+        run: |
+          cd dist/release
+          sha256sum * > sha256sums.txt
+          echo "=== sha256sums.txt ===" && cat sha256sums.txt
+      - name: Sign with Sigstore (keyless, no stored private key)
+        uses: sigstore/gh-action-sigstore-python@v3
+        with:
+          inputs: >-
+            dist/release/wg-automate-linux-x86_64
+            dist/release/wg-automate-macos-arm64
+            dist/release/wg-automate-windows-x86_64.exe
+      - name: Upload to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/release/wg-automate-linux-x86_64
+            dist/release/wg-automate-macos-arm64
+            dist/release/wg-automate-windows-x86_64.exe
+            dist/release/sha256sums.txt
+            dist/release/*.sigstore.json
