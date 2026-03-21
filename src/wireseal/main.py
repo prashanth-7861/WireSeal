@@ -55,9 +55,12 @@ def cli() -> None:
               help="VPN subnet (RFC 1918)")
 @click.option("--port", default=51820, type=int, show_default=True,
               help="WireGuard listen port")
+@click.option("--endpoint", default=None,
+              help="Public IP or hostname clients use to reach this server. "
+                   "Auto-detected from the internet if not provided.")
 @click.option("--duckdns-domain", default=None,
-              help="DuckDNS subdomain (optional)")
-def init(subnet: str, port: int, duckdns_domain: str | None) -> None:
+              help="DuckDNS subdomain (optional, overrides --endpoint for clients)")
+def init(subnet: str, port: int, endpoint: str | None, duckdns_domain: str | None) -> None:
     """Initialise the vault, generate server keys, and install WireGuard."""
     # Step 1: Collect and confirm passphrase — CLI-02
     passphrase_str: str = click.prompt(
@@ -91,6 +94,25 @@ def init(subnet: str, port: int, duckdns_domain: str | None) -> None:
         adapter = get_adapter()
         adapter.check_privileges()
 
+        # Step 3b: Resolve public endpoint (IP clients outside LAN connect to)
+        if endpoint:
+            public_endpoint = endpoint
+            click.echo(f"Using provided endpoint: {public_endpoint}")
+        else:
+            click.echo("Auto-detecting public IP...")
+            try:
+                from wireseal.dns.ip_resolver import resolve_public_ip
+                public_endpoint = str(resolve_public_ip())
+                click.echo(f"Detected public IP: {public_endpoint}")
+            except Exception:
+                public_endpoint = None
+                click.echo(
+                    "Warning: Could not auto-detect public IP. "
+                    "Client configs will use VPN IP (10.x.x.x) as endpoint — "
+                    "only usable on the local network. "
+                    "Run 'wireseal update-endpoint <IP>' after init to fix."
+                )
+
         # Step 4: Generate server keypair
         from wireseal.core.keygen import generate_keypair
 
@@ -112,6 +134,7 @@ def init(subnet: str, port: int, duckdns_domain: str | None) -> None:
                 "ip": server_ip,
                 "subnet": pool.subnet_str,
                 "port": port,
+                "endpoint": public_endpoint,  # public IP/hostname for client configs
             },
             "clients": {},
             "ip_pool": {
@@ -187,6 +210,7 @@ def init(subnet: str, port: int, duckdns_domain: str | None) -> None:
         click.echo(f"  Server IP:   {server_ip}")
         click.echo(f"  Public key:  {public_key_str}")
         click.echo(f"  Port:        {port}")
+        click.echo(f"  Endpoint:    {public_endpoint or 'not set (run update-endpoint <your-public-ip>)'}")
         if duckdns_domain:
             click.echo(f"  DuckDNS:     {duckdns_domain}.duckdns.org")
 
@@ -617,6 +641,25 @@ def _not_implemented(name: str) -> None:
     raise click.ClickException(f"Not yet implemented: {name}")
 
 
+def _resolve_client_endpoint(server_state: dict) -> str:
+    """Return the endpoint string clients use to reach the server.
+
+    Priority order:
+      1. DuckDNS domain (if configured)
+      2. Stored public endpoint/IP (set during init or update-endpoint)
+      3. VPN server IP (fallback — only works on local network)
+    """
+    port = server_state["port"]
+    duckdns_domain = server_state.get("duckdns_domain")
+    if duckdns_domain:
+        return f"{duckdns_domain}.duckdns.org:{port}"
+    stored_endpoint = server_state.get("endpoint")
+    if stored_endpoint:
+        return f"{stored_endpoint}:{port}"
+    # Last resort: VPN IP — only reachable from inside the VPN
+    return f"{server_state['ip']}:{port}"
+
+
 def _extract_secret_str(value: object) -> str:
     """Extract a plain string from either a str or SecretBytes value."""
     from wireseal.security.secret_types import SecretBytes
@@ -684,12 +727,7 @@ def add_client(name: str) -> None:
             server_port = state.server["port"]
             server_ip = state.server["ip"]
 
-            # Prefer DuckDNS domain if configured, else server VPN IP
-            duckdns_domain = state.server.get("duckdns_domain")
-            if duckdns_domain:
-                server_endpoint = f"{duckdns_domain}.duckdns.org:{server_port}"
-            else:
-                server_endpoint = f"{server_ip}:{server_port}"
+            server_endpoint = _resolve_client_endpoint(state.server)
 
             builder = ConfigBuilder()
             # Validation is performed inside render_client_config (CONFIG-02)
@@ -994,11 +1032,7 @@ def show_qr(name: str, save_path: str | None, auto_delete: bool) -> None:
             server_port = state.server["port"]
             server_ip = state.server["ip"]
 
-            duckdns_domain = state.server.get("duckdns_domain")
-            if duckdns_domain:
-                server_endpoint = f"{duckdns_domain}.duckdns.org:{server_port}"
-            else:
-                server_endpoint = f"{server_ip}:{server_port}"
+            server_endpoint = _resolve_client_endpoint(state.server)
 
             # Step 3: Reconstruct client config from vault state (in memory only)
             builder = ConfigBuilder()
@@ -1565,11 +1599,7 @@ def export(name: str, path: str) -> None:
             server_port = state.server["port"]
             server_ip = state.server["ip"]
 
-            duckdns_domain = state.server.get("duckdns_domain")
-            if duckdns_domain:
-                server_endpoint = f"{duckdns_domain}.duckdns.org:{server_port}"
-            else:
-                server_endpoint = f"{server_ip}:{server_port}"
+            server_endpoint = _resolve_client_endpoint(state.server)
 
             # Step 3: Reconstruct full client config from vault state
             builder = ConfigBuilder()
@@ -1830,6 +1860,69 @@ def fresh_start(interface: str, reinit: bool, subnet: str, port: int) -> None:
         # Invoke init directly via the CLI group (inherits passphrase prompt)
         ctx = click.get_current_context()
         ctx.invoke(init, subnet=subnet, port=port, duckdns_domain=None)
+
+
+# ===========================================================================
+# update-endpoint
+# ===========================================================================
+
+
+@cli.command("update-endpoint")
+@click.argument("ip_or_host", required=False, default=None,
+                metavar="[IP_OR_HOSTNAME]")
+def update_endpoint(ip_or_host: str | None) -> None:
+    """Update the public IP/hostname stored in the vault for client configs.
+
+    \b
+    If IP_OR_HOSTNAME is not given, auto-detects your current public IP.
+    After updating, re-run 'show-qr' or 'export' for each client and
+    re-import the new config on their devices.
+
+    \b
+    Examples:
+      wireseal update-endpoint                  # auto-detect
+      wireseal update-endpoint 203.0.113.45     # set manually
+      wireseal update-endpoint myhome.duckdns.org
+    """
+    passphrase_str: str = click.prompt("Vault passphrase", hide_input=True)
+
+    from wireseal.security.secret_types import SecretBytes
+    from wireseal.security.secrets_wipe import wipe_string
+    from wireseal.security.audit import AuditLog
+    from wireseal.security.vault import Vault
+
+    passphrase = SecretBytes(bytearray(passphrase_str.encode("utf-8")))
+
+    try:
+        if ip_or_host:
+            new_endpoint = ip_or_host
+        else:
+            click.echo("Auto-detecting public IP...")
+            from wireseal.dns.ip_resolver import resolve_public_ip
+            new_endpoint = str(resolve_public_ip())
+
+        vault = Vault(DEFAULT_VAULT_PATH)
+        with vault.open(passphrase) as state:
+            old_endpoint = state.server.get("endpoint", "not set")
+            state.server["endpoint"] = new_endpoint
+            vault.save(state, passphrase)
+
+        click.echo(f"Endpoint updated: {old_endpoint}  →  {new_endpoint}")
+        click.echo("")
+        click.echo("IMPORTANT: Re-generate client configs so devices use the new endpoint:")
+        click.echo("  sudo wireseal show-qr <client>   — re-scan on each device")
+        click.echo("  sudo wireseal export <client>    — for file-based import")
+
+        audit = AuditLog(DEFAULT_AUDIT_LOG_PATH)
+        audit.log(action="update-endpoint", metadata={"endpoint": new_endpoint})
+
+    except click.ClickException:
+        raise
+    except Exception as exc:
+        raise click.ClickException(str(exc)) from exc
+    finally:
+        passphrase.wipe()
+        wipe_string(passphrase_str)
 
 
 # ===========================================================================
