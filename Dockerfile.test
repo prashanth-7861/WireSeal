@@ -1,0 +1,26 @@
+FROM ubuntu:24.04
+
+# Prevent interactive prompts during apt install
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3 \
+    python3-pip \
+    python3-venv \
+    wireguard-go \
+    wireguard-tools \
+    iproute2 \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+COPY . /app
+
+# Install wg-automate from source with dev extras; fall back to base install if
+# [dev] extras are not yet present in pyproject.toml on the target branch.
+RUN pip3 install --no-cache-dir --break-system-packages -e ".[dev]" 2>/dev/null || \
+    pip3 install --no-cache-dir --break-system-packages -e . && \
+    pip3 install --no-cache-dir --break-system-packages pytest pytest-mock pytest-cov
+
+# Integration tests require NET_ADMIN capability:
+#   docker run --cap-add NET_ADMIN <image>
+ENTRYPOINT ["python3", "-m", "pytest", "tests/integration/", "-m", "integration", "-v", "--tb=short"]
