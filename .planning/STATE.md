@@ -98,6 +98,8 @@ Recent decisions affecting current work:
 - [Phase 05-03]: pip-compile generated real SHA-256 hashes on Windows; production runs should use Linux for cross-platform hash consistency
 - [Phase 05-03]: onefile=True for all platforms; Windows AV false positive documented in README Security Limitations
 - [Phase 05-tests-and-packaging]: benchmark.stats guard: --benchmark-disable sets stats to None; None-check added before timing assertion
+- [Phase 05-tests-and-packaging]: WG_ENFORCE_TIMING=1 env var: timing assertion skips locally (190ms machine), fails hard in CI release gate
+- [Phase 05-tests-and-packaging]: Lifecycle test uses CliRunner HOME override (not --vault-dir); init has no --vault-dir option in main.py
 
 ### Pending Todos
 

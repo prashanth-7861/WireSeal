@@ -105,9 +105,9 @@
 ### Test Suite
 
 - [x] **TEST-01**: Unit tests cover all security-critical components: vault encrypt/decrypt round-trip, wrong-passphrase rejection, tampered ciphertext rejection, atomic write on crash, key validity (Curve25519 + base64), validator rejection of malformed/injected configs, permission enforcement, memory wipe (best-effort), IP pool collision prevention, config builder completeness
-- [ ] **TEST-02**: Integration tests run in Docker (Linux): full `init` -> `add-client` -> verify WireGuard interface up -> `remove-client` -> verify peer gone
-- [ ] **TEST-03**: Config tampering integration test: modify deployed config, run `verify`, confirm detection
-- [ ] **TEST-04**: Argon2id parameter benchmark test: KDF time must exceed 500ms on target hardware
+- [x] **TEST-02**: Integration tests run in Docker (Linux): full `init` -> `add-client` -> verify WireGuard interface up -> `remove-client` -> verify peer gone
+- [x] **TEST-03**: Config tampering integration test: modify deployed config, run `verify`, confirm detection
+- [x] **TEST-04**: Argon2id parameter benchmark test: KDF time must exceed 500ms on target hardware
 - [x] **TEST-05**: All tests pass with zero failures before any release
 
 ### Packaging and Distribution
