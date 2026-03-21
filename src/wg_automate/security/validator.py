@@ -283,13 +283,32 @@ def validate_server_config(config: dict[str, Any]) -> None:
     subnet = config["subnet"]
     validate_subnet(subnet, "server_subnet")
 
-    # Client records
+    # Client records — also check for duplicate public keys and IPs across clients
+    seen_public_keys: dict[str, str] = {}  # public_key -> client name
+    seen_ips: dict[str, str] = {}          # ip -> client name
     for client in config.get("clients", []):
         validate_client_name(client["name"])
         validate_no_injection(client["name"], f"client[{client['name']}].name")
         validate_wg_key(client["public_key"], f"client[{client['name']}].public_key")
         validate_wg_key(client["psk"], f"client[{client['name']}].psk")
         validate_ip(client["ip"], subnet, f"client[{client['name']}].ip")
+
+        pub = client["public_key"]
+        if pub in seen_public_keys:
+            raise ValueError(
+                f"Duplicate public key detected: client '{client['name']}' shares "
+                f"the same public key as client '{seen_public_keys[pub]}' — "
+                f"this would cause silent routing ambiguity in WireGuard"
+            )
+        seen_public_keys[pub] = client["name"]
+
+        ip = client["ip"]
+        if ip in seen_ips:
+            raise ValueError(
+                f"Duplicate IP detected: client '{client['name']}' shares "
+                f"the same IP '{ip}' as client '{seen_ips[ip]}'"
+            )
+        seen_ips[ip] = client["name"]
 
 
 def validate_client_config(config: dict[str, Any]) -> None:

@@ -270,26 +270,26 @@ class TestValidateServerConfig:
         validate_server_config(cfg)  # Must not raise
 
     def test_rejects_duplicate_peer_public_keys(self):
-        """Two clients with the same public key -- this should be rejected.
-
-        Note: validate_server_config validates each client individually but does not
-        currently check for duplicate public keys across clients. This test verifies
-        that at least individual client validation works. If duplicate key detection
-        is not implemented, this test is marked xfail.
-        """
+        """Two clients with the same public key must be rejected."""
         key = _valid_key()
         client1 = {"name": "alice", "public_key": key, "psk": _valid_key(), "ip": "10.0.0.2"}
         client2 = {"name": "bob", "public_key": key, "psk": _valid_key(), "ip": "10.0.0.3"}
         cfg = _valid_server_config(clients=[client1, client2])
-        # Current implementation may not detect duplicates -- mark as xfail if so
-        try:
+        with pytest.raises(ValueError, match="Duplicate public key"):
             validate_server_config(cfg)
-            # If it doesn't raise, duplicates are not checked -- document as limitation
-            pytest.xfail(
-                "validate_server_config does not currently check for duplicate peer public keys"
-            )
-        except ValueError:
-            pass  # Good -- duplicates are rejected
+
+    def test_rejects_duplicate_peer_ips(self):
+        """Two clients with the same IP must be rejected (distinct public keys)."""
+        from wg_automate.core.keygen import generate_keypair
+        from wg_automate.security.secrets_wipe import wipe_bytes
+        priv1, pub1 = generate_keypair()
+        priv2, pub2 = generate_keypair()
+        wipe_bytes(priv1._data); wipe_bytes(priv2._data)
+        client1 = {"name": "alice", "public_key": pub1.decode(), "psk": _valid_key(), "ip": "10.0.0.2"}
+        client2 = {"name": "bob",   "public_key": pub2.decode(), "psk": _valid_key(), "ip": "10.0.0.2"}
+        cfg = _valid_server_config(clients=[client1, client2])
+        with pytest.raises(ValueError, match="Duplicate IP"):
+            validate_server_config(cfg)
 
     def test_rejects_bad_client_port_range_via_server_port(self):
         """Server port below 1024 raises ValueError."""
