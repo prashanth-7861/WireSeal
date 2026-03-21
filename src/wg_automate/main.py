@@ -558,11 +558,18 @@ def _reload_wireguard(interface: str = "wg0") -> None:
         from wg_automate.platform.detect import get_adapter
         adapter = get_adapter()
         config_path = adapter.get_config_path(interface)
-        subprocess.run(
-            f"wg syncconf {interface} <(wg-quick strip {config_path})",
-            shell=True,
-            executable="/bin/bash",
+        # Two-step pipeline: avoid shell=True (CRIT-01 fix)
+        strip_result = subprocess.run(
+            ["wg-quick", "strip", str(config_path)],
+            shell=False,
             check=True,
+            capture_output=True,
+        )
+        subprocess.run(
+            ["wg", "syncconf", interface],
+            shell=False,
+            check=True,
+            input=strip_result.stdout,
             capture_output=True,
         )
 
@@ -1130,14 +1137,20 @@ def rotate_keys(name: str) -> None:
             atomic_write(server_conf_path, server_encoded, mode=0o600)
             new_server_hash = hashlib.sha256(server_encoded).hexdigest()
 
-            # Step 7: Reload WireGuard
+            # Step 7: Reload WireGuard (no shell=True — CRIT-01 fix)
             try:
-                subprocess.run(
-                    ["wg", "syncconf", "wg0",
-                     f"<(wg-quick strip {server_conf_path})"],
-                    shell=True,
-                    capture_output=True,
+                strip_result = subprocess.run(
+                    ["wg-quick", "strip", str(server_conf_path)],
+                    shell=False,
                     check=True,
+                    capture_output=True,
+                )
+                subprocess.run(
+                    ["wg", "syncconf", "wg0"],
+                    shell=False,
+                    check=True,
+                    input=strip_result.stdout,
+                    capture_output=True,
                 )
             except subprocess.CalledProcessError:
                 click.echo(
@@ -1334,14 +1347,20 @@ def rotate_server_keys() -> None:
             atomic_write(server_conf_path, server_encoded, mode=0o600)
             new_server_hash = hashlib.sha256(server_encoded).hexdigest()
 
-            # Step 7: Reload WireGuard
+            # Step 7: Reload WireGuard (no shell=True — CRIT-01 fix)
             try:
-                subprocess.run(
-                    ["wg", "syncconf", "wg0",
-                     f"<(wg-quick strip {server_conf_path})"],
-                    shell=True,
-                    capture_output=True,
+                strip_result = subprocess.run(
+                    ["wg-quick", "strip", str(server_conf_path)],
+                    shell=False,
                     check=True,
+                    capture_output=True,
+                )
+                subprocess.run(
+                    ["wg", "syncconf", "wg0"],
+                    shell=False,
+                    check=True,
+                    input=strip_result.stdout,
+                    capture_output=True,
                 )
             except subprocess.CalledProcessError:
                 click.echo(
