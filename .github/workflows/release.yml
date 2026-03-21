@@ -273,7 +273,7 @@ jobs:
           echo "=== sha256sums.txt ===" && cat sha256sums.txt
 
       - name: Sign with Sigstore (keyless — no stored private key)
-        uses: sigstore/gh-action-sigstore-python@v3
+        uses: sigstore/gh-action-sigstore-python@v2.1.1
         with:
           inputs: >-
             dist/release/wireseal-linux-x86_64
