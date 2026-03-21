@@ -75,7 +75,7 @@ assert _HEADER_STRUCT.size == _HEADER_SIZE, "Header struct size mismatch"
 
 
 def _derive_key(passphrase: bytearray, salt: bytes, *, memory_cost: int = ARGON2_MEMORY_COST_KIB,
-                time_cost: int = ARGON2_TIME_COST, parallelism: int = ARGON2_PARALLELISM) -> bytes:
+                time_cost: int = ARGON2_TIME_COST, parallelism: int = ARGON2_PARALLELISM) -> bytearray:
     """Derive a 256-bit AES key from passphrase and salt using Argon2id.
 
     Args:
@@ -86,9 +86,9 @@ def _derive_key(passphrase: bytearray, salt: bytes, *, memory_cost: int = ARGON2
         parallelism: Argon2 parallelism (default: 4).
 
     Returns:
-        32-byte derived key (caller must wipe after use).
+        32-byte derived key as mutable bytearray (caller must wipe after use).
     """
-    return hash_secret_raw(
+    raw = hash_secret_raw(
         secret=bytes(passphrase),
         salt=salt,
         time_cost=time_cost,
@@ -97,6 +97,15 @@ def _derive_key(passphrase: bytearray, salt: bytes, *, memory_cost: int = ARGON2
         hash_len=ARGON2_HASH_LEN,
         type=Type.ID,
     )
+    # Convert immutable bytes to mutable bytearray so callers can wipe in-place
+    result = bytearray(raw)
+    # Best-effort: zero the immutable bytes copy (CPython only)
+    import ctypes
+    try:
+        ctypes.memset(id(raw) + (len(raw).__sizeof__() - len(raw)), 0, len(raw))
+    except Exception:
+        pass
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -176,12 +185,10 @@ def _encrypt_vault(plaintext_dict: dict[str, Any], passphrase: bytearray) -> byt
         )
 
         plaintext_json = json.dumps(plaintext_dict, separators=(",", ":")).encode("utf-8")
-        ciphertext = AESGCM(key).encrypt(nonce, plaintext_json, header)
+        ciphertext = AESGCM(bytes(key)).encrypt(nonce, plaintext_json, header)
     finally:
-        # Wipe derived key immediately after use
-        key_arr = bytearray(key)
-        wipe_bytes(key_arr)
-        del key_arr
+        # Wipe derived key in-place (key is a mutable bytearray)
+        wipe_bytes(key)
 
     ct_len_field = struct.pack(">I", len(ciphertext))
     return header + ct_len_field + ciphertext
@@ -234,13 +241,12 @@ def _decrypt_vault(blob: bytes, passphrase: bytearray) -> dict[str, Any]:
     key = _derive_key(passphrase, salt, memory_cost=memory_cost,
                       time_cost=time_cost, parallelism=parallelism)
     try:
-        plaintext = AESGCM(key).decrypt(nonce, ciphertext, header)
+        plaintext = AESGCM(bytes(key)).decrypt(nonce, ciphertext, header)
     except InvalidTag:
         raise VaultUnlockError("Vault unlock failed") from None
     finally:
-        key_arr = bytearray(key)
-        wipe_bytes(key_arr)
-        del key_arr
+        # Wipe derived key in-place (key is a mutable bytearray)
+        wipe_bytes(key)
 
     return json.loads(plaintext.decode("utf-8"))
 
@@ -431,7 +437,7 @@ class Vault:
             print(
                 "WARNING: The passphrase hint is stored as plain text and is not protected."
             )
-            hint_path.write_text(hint, encoding="utf-8")
+            atomic_write(hint_path, hint.encode("utf-8"), mode=0o600)
 
         return cls(vault_path)
 
