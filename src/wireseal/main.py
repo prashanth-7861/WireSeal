@@ -1630,6 +1630,170 @@ def audit_log(lines: int) -> None:
 
 
 # ===========================================================================
+# terminate
+# ===========================================================================
+
+
+@cli.command("terminate")
+@click.option("--interface", default="wg0", show_default=True,
+              help="WireGuard interface to bring down")
+def terminate(interface: str) -> None:
+    """Bring down the WireGuard interface and disconnect all peers.
+
+    Does NOT delete the vault or any config files. Run 'init' or
+    'wg-quick up <interface>' to restart the tunnel.
+    No vault passphrase is required.
+    """
+    from wireseal.security.audit import AuditLog
+
+    click.echo(f"Bringing down WireGuard interface '{interface}'...")
+
+    try:
+        result = subprocess.run(
+            ["wg-quick", "down", interface],
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode == 0:
+            click.echo(f"Interface '{interface}' is down. All peers disconnected.")
+        else:
+            stderr = result.stderr.strip()
+            # wg-quick returns non-zero if the interface was already down
+            if "does not exist" in stderr or "is not a WireGuard interface" in stderr:
+                click.echo(f"Interface '{interface}' was already down.")
+            else:
+                raise click.ClickException(
+                    f"wg-quick down failed: {stderr or result.stdout.strip()}"
+                )
+    except FileNotFoundError:
+        raise click.ClickException(
+            "wg-quick not found. Install wireguard-tools and try again."
+        )
+
+    try:
+        audit = AuditLog(DEFAULT_AUDIT_LOG_PATH)
+        audit.log(action="terminate", metadata={"interface": interface})
+    except Exception:
+        pass  # Audit failure must not prevent terminate
+
+
+# ===========================================================================
+# fresh-start
+# ===========================================================================
+
+
+@cli.command("fresh-start")
+@click.option("--interface", default="wg0", show_default=True,
+              help="WireGuard interface to tear down")
+@click.option("--reinit", is_flag=True, default=False,
+              help="Immediately re-initialise after wiping (prompts for new passphrase)")
+@click.option("--subnet", default="10.0.0.0/24", show_default=True,
+              help="Subnet to use when --reinit is set")
+@click.option("--port", default=51820, type=int, show_default=True,
+              help="Listen port to use when --reinit is set")
+def fresh_start(interface: str, reinit: bool, subnet: str, port: int) -> None:
+    """Wipe all WireSeal data and start from scratch.
+
+    \b
+    This command:
+      1. Brings down the WireGuard interface (disconnects all peers)
+      2. Deletes the vault and audit log (~/.wireseal/ or /root/.wireseal/)
+      3. Removes /etc/wireguard/<interface>.conf and all client configs
+      4. Optionally re-initialises immediately (--reinit)
+
+    ALL KEYS AND CLIENT CONFIGURATIONS ARE PERMANENTLY DESTROYED.
+    There is no undo. Type CONFIRM when prompted.
+    """
+    click.echo("")
+    click.secho("  WARNING: DESTRUCTIVE OPERATION", fg="red", bold=True)
+    click.echo("  This will permanently destroy:")
+    click.echo(f"    - Vault and all encrypted key material  ({DEFAULT_VAULT_DIR})")
+    click.echo(f"    - WireGuard server config               (/etc/wireguard/{interface}.conf)")
+    click.echo(f"    - All client configs                    (/etc/wireguard/clients/)")
+    click.echo(f"    - Audit log")
+    click.echo("")
+
+    confirm = click.prompt('Type CONFIRM to proceed (anything else aborts)')
+    if confirm != "CONFIRM":
+        click.echo("Aborted. Nothing was changed.")
+        return
+
+    errors: list[str] = []
+
+    # Step 1: Bring down the interface
+    click.echo(f"\nStep 1/3  Bringing down '{interface}'...")
+    try:
+        subprocess.run(
+            ["wg-quick", "down", interface],
+            capture_output=True,
+            text=True,
+        )
+        click.echo(f"          Interface '{interface}' down.")
+    except FileNotFoundError:
+        click.echo("          wg-quick not found — skipping interface teardown.")
+    except Exception as exc:
+        errors.append(f"Interface teardown: {exc}")
+        click.echo(f"          Warning: {exc}")
+
+    # Step 2: Delete vault directory
+    click.echo(f"Step 2/3  Removing vault directory {DEFAULT_VAULT_DIR} ...")
+    import shutil
+    try:
+        if DEFAULT_VAULT_DIR.exists():
+            shutil.rmtree(DEFAULT_VAULT_DIR)
+            click.echo(f"          Removed {DEFAULT_VAULT_DIR}")
+        else:
+            click.echo(f"          {DEFAULT_VAULT_DIR} does not exist — skipping.")
+    except Exception as exc:
+        errors.append(f"Vault removal: {exc}")
+        click.echo(f"          Warning: {exc}")
+
+    # Step 3: Remove WireGuard config files
+    click.echo(f"Step 3/3  Removing WireGuard config files...")
+    wg_conf_dirs = [
+        Path("/etc/wireguard"),
+        Path(f"C:/Program Files/WireGuard") if sys.platform == "win32" else None,
+    ]
+    for wg_dir in wg_conf_dirs:
+        if wg_dir is None or not wg_dir.exists():
+            continue
+        server_conf = wg_dir / f"{interface}.conf"
+        clients_dir = wg_dir / "clients"
+        for target in [server_conf, clients_dir]:
+            try:
+                if target.is_file():
+                    target.unlink()
+                    click.echo(f"          Removed {target}")
+                elif target.is_dir():
+                    shutil.rmtree(target)
+                    click.echo(f"          Removed {target}/")
+            except PermissionError:
+                msg = f"Permission denied removing {target} — run with sudo"
+                errors.append(msg)
+                click.echo(f"          Warning: {msg}")
+            except Exception as exc:
+                errors.append(str(exc))
+                click.echo(f"          Warning: {exc}")
+
+    click.echo("")
+    if errors:
+        click.secho("Fresh start completed with warnings:", fg="yellow")
+        for e in errors:
+            click.echo(f"  - {e}")
+    else:
+        click.secho("Fresh start complete. All data wiped.", fg="green")
+
+    # Step 4: Optional re-init
+    if reinit:
+        click.echo("")
+        click.echo("Re-initialising server...")
+        from click.testing import CliRunner
+        # Invoke init directly via the CLI group (inherits passphrase prompt)
+        ctx = click.get_current_context()
+        ctx.invoke(init, subnet=subnet, port=port, duckdns_domain=None)
+
+
+# ===========================================================================
 # Entry point
 # ===========================================================================
 

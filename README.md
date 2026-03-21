@@ -215,7 +215,9 @@ rm /tmp/my-iphone.conf
 | `status` | Show connected peers, transfer stats, and interface state |
 | `verify` | Check SHA-256 of deployed config files against vault (tamper detection) |
 | `lock` | Wipe in-memory vault state and end the session |
-| `change-passphrase` | Re-encrypt the vault under a new passphrase (new salt + nonce) |
+| `change-passphrase` | Re-encrypt the vault under a new passphrase (requires current passphrase) |
+| `terminate` | Bring down the WireGuard interface and disconnect all peers (no passphrase needed) |
+| `fresh-start` | **Destructive.** Wipe all data (vault, keys, configs) and optionally re-init |
 | `add-client` | Generate client keypair + PSK, assign IP from pool, write peer config |
 | `remove-client` | Revoke client keys, remove peer, reload WireGuard live |
 | `list-clients` | Print all client names and their assigned IPs |
@@ -225,6 +227,34 @@ rm /tmp/my-iphone.conf
 | `rotate-keys` | Rotate keypair + PSK for a specific client |
 | `rotate-server-keys` | Rotate the server keypair and update all client configs |
 | `audit-log` | Display recent audit log entries (no passphrase required) |
+
+---
+
+## Session Management
+
+```bash
+# Stop WireGuard — disconnects all peers, keeps vault and configs intact
+sudo wireseal terminate
+
+# Stop a specific interface (default: wg0)
+sudo wireseal terminate --interface wg1
+
+# Change the vault passphrase (requires knowing the current passphrase)
+sudo wireseal change-passphrase
+
+# Wipe everything and start fresh — DESTROYS ALL KEYS AND CLIENT CONFIGS
+sudo wireseal fresh-start                          # prompts "Type CONFIRM"
+
+# Wipe and immediately re-initialise with a new vault
+sudo wireseal fresh-start --reinit --subnet 10.0.0.1/24 --port 51820
+
+# Restart the tunnel after terminate (standard WireGuard command)
+sudo wg-quick up wg0
+```
+
+> **Forgot your passphrase?** There is no recovery — the vault is encrypted
+> with AES-256-GCM and the key is derived solely from your passphrase. If you
+> lose it, run `sudo wireseal fresh-start` to wipe everything and re-initialise.
 
 ---
 
