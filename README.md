@@ -15,6 +15,7 @@ is exposed.
 
 - [Features](#features)
 - [Installation](#installation)
+  - [Pre-built packages (recommended)](#pre-built-packages-recommended)
   - [Linux (Arch / Fedora / Debian-Ubuntu)](#linux)
   - [macOS](#macos)
   - [Windows](#windows)
@@ -91,9 +92,34 @@ configured **automatically** by `wireseal init` — no manual `iptables` or
 
 ## Installation
 
+### Pre-built packages (recommended)
+
+Download the latest release from the
+[Releases page](https://github.com/prashanth-7861/WireSeal/releases/latest).
+
+| Platform | Package | Install command |
+|---|---|---|
+| **Debian / Ubuntu** | `wireseal_<ver>_amd64.deb` | `sudo apt install ./wireseal_<ver>_amd64.deb` |
+| **Fedora / RHEL / Rocky / Alma** | `wireseal-<ver>-1.x86_64.rpm` | `sudo dnf install ./wireseal-<ver>-1.x86_64.rpm` |
+| **Arch / Manjaro** | `wireseal-linux-x86_64` (raw binary) | See [Linux from script](#linux) below |
+| **macOS arm64** | `wireseal-<ver>-macos-arm64.pkg` | Double-click or `sudo installer -pkg wireseal-<ver>-macos-arm64.pkg -target /` |
+| **Windows 10/11 x64** | `wireseal-<ver>-windows-x86_64-setup.exe` | Run as Administrator; adds `wireseal` to system `PATH` |
+
+Every release asset is accompanied by a `sha256sums.txt` checksum file and a
+Sigstore keyless signature (`.sigstore.json`). See [Verifying a Release](#verifying-a-release).
+
+---
+
 ### Linux
 
 Supports Arch / Manjaro, Fedora / RHEL / Rocky / AlmaLinux, Debian / Ubuntu.
+
+**Option A — native package (Debian/Ubuntu and Fedora/RHEL):** download from the
+[Releases page](https://github.com/prashanth-7861/WireSeal/releases/latest).
+The package installs the binary to `/usr/local/bin/wireseal` and declares
+`wireguard-tools` as a dependency.
+
+**Option B — installer script (all distros, including Arch):**
 
 ```bash
 git clone https://github.com/prashanth-7861/WireSeal.git
@@ -113,7 +139,11 @@ The script:
 
 ### macOS
 
-Requires [Homebrew](https://brew.sh) and macOS 12+.
+**Option A — .pkg installer:** download `wireseal-<ver>-macos-arm64.pkg` from the
+[Releases page](https://github.com/prashanth-7861/WireSeal/releases/latest) and
+double-click it. The wizard installs `wireseal` to `/usr/local/bin`.
+
+**Option B — installer script** (requires [Homebrew](https://brew.sh) and macOS 12+):
 
 ```bash
 git clone https://github.com/prashanth-7861/WireSeal.git
@@ -135,7 +165,14 @@ The script:
 
 ### Windows
 
-Run from an **Administrator** PowerShell prompt (Windows 10 1903+ or Windows 11).
+**Option A — NSIS installer (recommended):** download
+`wireseal-<ver>-windows-x86_64-setup.exe` from the
+[Releases page](https://github.com/prashanth-7861/WireSeal/releases/latest).
+Run it as Administrator — it installs `wireseal.exe` to
+`C:\Program Files\WireSeal` and adds that directory to the system `PATH`
+automatically.
+
+**Option B — installer script** (run from an **Administrator** PowerShell prompt):
 
 ```powershell
 git clone https://github.com/prashanth-7861/WireSeal.git
