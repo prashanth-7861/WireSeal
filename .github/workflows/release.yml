@@ -235,11 +235,10 @@ jobs:
         shell: powershell
         run: |
           $version = "${{ steps.ver.outputs.version }}"
-          $nsis = "C:\Program Files (x86)\NSIS\makensis.exe"
-          & $nsis `
-            /DVERSION="$version" `
-            "/DSRCBINARY=dist\release\wireseal-windows-x86_64.exe" `
-            installer\wireseal.nsi
+          $nsis    = "C:\Program Files (x86)\NSIS\makensis.exe"
+          # Resolve absolute path — NSIS File directive is relative to the .nsi file location
+          $src     = (Resolve-Path "dist\release\wireseal-windows-x86_64.exe").Path
+          & $nsis /DVERSION="$version" "/DSRCBINARY=$src" installer\wireseal.nsi
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - uses: actions/upload-artifact@v4
