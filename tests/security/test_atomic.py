@@ -10,7 +10,7 @@ Tests verify:
 
 import pytest
 
-from wg_automate.security.atomic import atomic_write
+from wireseal.security.atomic import atomic_write
 
 
 class TestAtomicWriteSuccess:

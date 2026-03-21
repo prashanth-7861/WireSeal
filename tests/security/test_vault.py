@@ -19,9 +19,9 @@ Tests are functional correctness tests, not performance benchmarks.
 import os
 import pytest
 
-from wg_automate.security.exceptions import VaultTamperedError, VaultUnlockError
-from wg_automate.security.secret_types import SecretBytes
-from wg_automate.security.vault import Vault, _HEADER_SIZE
+from wireseal.security.exceptions import VaultTamperedError, VaultUnlockError
+from wireseal.security.secret_types import SecretBytes
+from wireseal.security.vault import Vault, _HEADER_SIZE
 
 
 class TestVaultRoundTrip:

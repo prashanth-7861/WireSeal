@@ -1,4 +1,4 @@
-"""Shared pytest fixtures for wg-automate unit tests.
+"""Shared pytest fixtures for WireSeal unit tests.
 
 All fixtures use function scope (default) to prevent state leaking between tests.
 No passphrases are sourced from os.environ -- they are constructed directly
@@ -8,7 +8,7 @@ as SecretBytes to avoid credential exposure via environment variables.
 import sys
 import pytest
 
-from wg_automate.security.secret_types import SecretBytes
+from wireseal.security.secret_types import SecretBytes
 
 
 @pytest.fixture()

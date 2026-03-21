@@ -12,7 +12,7 @@ import hashlib
 
 import pytest
 
-from wg_automate.security.integrity import compute_config_hash, verify_config_integrity
+from wireseal.security.integrity import compute_config_hash, verify_config_integrity
 
 
 class TestComputeConfigHash:

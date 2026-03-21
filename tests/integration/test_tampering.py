@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from wg_automate.security.integrity import compute_config_hash, verify_config_integrity
+from wireseal.security.integrity import compute_config_hash, verify_config_integrity
 
 
 def test_config_tampering_detected(tmp_path):

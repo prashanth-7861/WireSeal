@@ -18,7 +18,7 @@ import hashlib
 import jinja2
 import pytest
 
-from wg_automate.core.config_builder import ConfigBuilder
+from wireseal.core.config_builder import ConfigBuilder
 
 
 # ---------------------------------------------------------------------------

@@ -13,9 +13,9 @@ import base64
 
 import pytest
 
-from wg_automate.core.keygen import generate_keypair
-from wg_automate.core.psk import generate_psk
-from wg_automate.security.secret_types import SecretBytes
+from wireseal.core.keygen import generate_keypair
+from wireseal.core.psk import generate_psk
+from wireseal.security.secret_types import SecretBytes
 
 
 class TestKeypairGeneration:

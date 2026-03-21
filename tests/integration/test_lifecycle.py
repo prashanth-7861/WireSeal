@@ -13,11 +13,11 @@ import subprocess
 import pytest
 from click.testing import CliRunner
 
-from wg_automate.main import cli
+from wireseal.main import cli
 
 pytestmark = pytest.mark.integration
 
-# Default vault path used by wg-automate (matches DEFAULT_VAULT_DIR in main.py)
+# Default vault path used by wireseal (matches DEFAULT_VAULT_DIR in main.py)
 _DEFAULT_VAULT_DIR = None  # resolved per-fixture using tmp env override
 
 
@@ -47,10 +47,10 @@ def wg_environment():
 @pytest.fixture(scope="module")
 def vault_env(tmp_path_factory, wg_environment):
     """
-    Provides a temporary vault directory and environment override so wg-automate
-    writes its vault and config into an isolated tmp path rather than ~/.wg-automate.
+    Provides a temporary vault directory and environment override so wireseal
+    writes its vault and config into an isolated tmp path rather than ~/.wireseal.
 
-    Note: wg-automate uses DEFAULT_VAULT_DIR = Path.home() / ".wg-automate".
+    Note: wireseal uses DEFAULT_VAULT_DIR = Path.home() / ".wireseal".
     The CliRunner env override patches HOME so Path.home() resolves to tmp_path.
     """
     tmp_home = tmp_path_factory.mktemp("integration_home")
@@ -65,7 +65,7 @@ def test_full_lifecycle(vault_env):
     TEST-02: Full init -> add-client -> verify peer in config
     -> remove-client -> verify peer gone.
 
-    Drives wg-automate CLI end-to-end inside a controlled environment.
+    Drives wireseal CLI end-to-end inside a controlled environment.
     Requires wireguard-go and root/NET_ADMIN capability. Skips gracefully
     if wireguard-go is not available.
     """
@@ -96,7 +96,7 @@ def test_full_lifecycle(vault_env):
     # Step 3: verify peer appears in deployed config
     # The adapter deploys to /etc/wireguard/wg0.conf inside the container
     config_path_candidates = [
-        vault_env["home"] / ".wg-automate" / "wg0.conf",
+        vault_env["home"] / ".wireseal" / "wg0.conf",
         vault_env["home"] / "wg0.conf",
     ]
     import os

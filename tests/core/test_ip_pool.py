@@ -11,7 +11,7 @@ Tests verify:
 
 import pytest
 
-from wg_automate.core.ip_pool import IPPool
+from wireseal.core.ip_pool import IPPool
 
 
 class TestIPPoolInitialization:

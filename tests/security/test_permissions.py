@@ -14,8 +14,8 @@ from unittest.mock import call
 
 import pytest
 
-from wg_automate.security import permissions as perm_module
-from wg_automate.security.permissions import (
+from wireseal.security import permissions as perm_module
+from wireseal.security.permissions import (
     check_file_permissions,
     set_dir_permissions,
     set_file_permissions,
@@ -28,7 +28,7 @@ class TestUnixFilePermissions:
     def test_unix_permissions_calls_chmod_600(self, tmp_path, mocker):
         """On non-win32 platform, os.chmod is called with 0o600."""
         mocker.patch.object(perm_module.sys, "platform", "linux")
-        mock_chmod = mocker.patch("wg_automate.security.permissions.os.chmod")
+        mock_chmod = mocker.patch("wireseal.security.permissions.os.chmod")
 
         test_file = tmp_path / "test.conf"
         test_file.write_bytes(b"config")
@@ -39,7 +39,7 @@ class TestUnixFilePermissions:
     def test_unix_permissions_respects_custom_mode(self, tmp_path, mocker):
         """Custom mode is passed through to os.chmod."""
         mocker.patch.object(perm_module.sys, "platform", "linux")
-        mock_chmod = mocker.patch("wg_automate.security.permissions.os.chmod")
+        mock_chmod = mocker.patch("wireseal.security.permissions.os.chmod")
 
         test_file = tmp_path / "test.conf"
         test_file.write_bytes(b"config")
@@ -50,8 +50,8 @@ class TestUnixFilePermissions:
     def test_unix_does_not_call_icacls_on_linux(self, tmp_path, mocker):
         """On linux, subprocess.run must NOT be called for set_file_permissions."""
         mocker.patch.object(perm_module.sys, "platform", "linux")
-        mocker.patch("wg_automate.security.permissions.os.chmod")
-        mock_subprocess = mocker.patch("wg_automate.security.permissions.subprocess.run")
+        mocker.patch("wireseal.security.permissions.os.chmod")
+        mock_subprocess = mocker.patch("wireseal.security.permissions.subprocess.run")
 
         test_file = tmp_path / "test.conf"
         test_file.write_bytes(b"config")
@@ -62,8 +62,8 @@ class TestUnixFilePermissions:
     def test_unix_does_not_call_icacls_on_darwin(self, tmp_path, mocker):
         """On darwin, subprocess.run must NOT be called for set_file_permissions."""
         mocker.patch.object(perm_module.sys, "platform", "darwin")
-        mocker.patch("wg_automate.security.permissions.os.chmod")
-        mock_subprocess = mocker.patch("wg_automate.security.permissions.subprocess.run")
+        mocker.patch("wireseal.security.permissions.os.chmod")
+        mock_subprocess = mocker.patch("wireseal.security.permissions.subprocess.run")
 
         test_file = tmp_path / "test.conf"
         test_file.write_bytes(b"config")
@@ -78,7 +78,7 @@ class TestUnixDirPermissions:
     def test_unix_dir_permissions_calls_chmod_700(self, tmp_path, mocker):
         """On non-win32 platform, os.chmod is called with 0o700 for directories."""
         mocker.patch.object(perm_module.sys, "platform", "linux")
-        mock_chmod = mocker.patch("wg_automate.security.permissions.os.chmod")
+        mock_chmod = mocker.patch("wireseal.security.permissions.os.chmod")
 
         set_dir_permissions(tmp_path)
 
@@ -91,7 +91,7 @@ class TestWindowsFilePermissions:
     def test_windows_delegates_to_icacls(self, tmp_path, mocker):
         """On win32, subprocess.run is called with icacls arguments."""
         mocker.patch.object(perm_module.sys, "platform", "win32")
-        mock_subprocess = mocker.patch("wg_automate.security.permissions.subprocess.run")
+        mock_subprocess = mocker.patch("wireseal.security.permissions.subprocess.run")
 
         test_file = tmp_path / "test.conf"
         test_file.write_bytes(b"config")
@@ -106,7 +106,7 @@ class TestWindowsFilePermissions:
     def test_windows_icacls_includes_path(self, tmp_path, mocker):
         """On win32, icacls command includes the file path."""
         mocker.patch.object(perm_module.sys, "platform", "win32")
-        mock_subprocess = mocker.patch("wg_automate.security.permissions.subprocess.run")
+        mock_subprocess = mocker.patch("wireseal.security.permissions.subprocess.run")
 
         test_file = tmp_path / "secret.conf"
         test_file.write_bytes(b"config")
@@ -118,7 +118,7 @@ class TestWindowsFilePermissions:
     def test_windows_icacls_restricts_to_system_and_admins(self, tmp_path, mocker):
         """On win32, icacls grants SYSTEM and Administrators permissions."""
         mocker.patch.object(perm_module.sys, "platform", "win32")
-        mock_subprocess = mocker.patch("wg_automate.security.permissions.subprocess.run")
+        mock_subprocess = mocker.patch("wireseal.security.permissions.subprocess.run")
 
         test_file = tmp_path / "secret.conf"
         test_file.write_bytes(b"config")
@@ -132,8 +132,8 @@ class TestWindowsFilePermissions:
     def test_windows_does_not_call_chmod(self, tmp_path, mocker):
         """On win32, os.chmod must NOT be called."""
         mocker.patch.object(perm_module.sys, "platform", "win32")
-        mocker.patch("wg_automate.security.permissions.subprocess.run")
-        mock_chmod = mocker.patch("wg_automate.security.permissions.os.chmod")
+        mocker.patch("wireseal.security.permissions.subprocess.run")
+        mock_chmod = mocker.patch("wireseal.security.permissions.os.chmod")
 
         test_file = tmp_path / "test.conf"
         test_file.write_bytes(b"config")

@@ -13,8 +13,8 @@ import pickle
 
 import pytest
 
-from wg_automate.security.secret_types import SecretBytes
-from wg_automate.security.secrets_wipe import wipe_bytes
+from wireseal.security.secret_types import SecretBytes
+from wireseal.security.secrets_wipe import wipe_bytes
 
 
 class TestSecretBytesRepr:

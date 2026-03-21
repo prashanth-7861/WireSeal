@@ -12,7 +12,7 @@ import base64
 
 import pytest
 
-from wg_automate.security.validator import (
+from wireseal.security.validator import (
     validate_allowed_ips,
     validate_client_config,
     validate_client_name,
@@ -280,8 +280,8 @@ class TestValidateServerConfig:
 
     def test_rejects_duplicate_peer_ips(self):
         """Two clients with the same IP must be rejected (distinct public keys)."""
-        from wg_automate.core.keygen import generate_keypair
-        from wg_automate.security.secrets_wipe import wipe_bytes
+        from wireseal.core.keygen import generate_keypair
+        from wireseal.security.secrets_wipe import wipe_bytes
         priv1, pub1 = generate_keypair()
         priv2, pub2 = generate_keypair()
         wipe_bytes(priv1._data); wipe_bytes(priv2._data)

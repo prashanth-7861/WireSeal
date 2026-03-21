@@ -2,7 +2,7 @@
 
 **Date:** 2026-03-21
 **Auditor:** Expert Security Review (20yr vulnerability research, cryptography)
-**Scope:** Full codebase audit of wg-automate WireGuard automation CLI
+**Scope:** Full codebase audit of WireSeal WireGuard automation CLI
 **Core invariant under test:** Zero plaintext secrets on disk, ever.
 
 ---
@@ -24,7 +24,7 @@ The codebase demonstrates strong security fundamentals: proper AES-256-GCM usage
 
 ### CRIT-01: `shell=True` with user-influenced path in `_reload_wireguard` and rotation commands
 
-**File:** `src/wg_automate/main.py:562-567, 1135-1141, 1339-1345`
+**File:** `src/wireseal/main.py:562-567, 1135-1141, 1339-1345`
 
 **Vulnerable code:**
 ```python
@@ -45,7 +45,7 @@ subprocess.run(
 
 ### CRIT-02: `SecretBytes.__reduce__` not blocked — pickle bypass via `__reduce__`
 
-**File:** `src/wg_automate/security/secret_types.py`
+**File:** `src/wireseal/security/secret_types.py`
 
 **Vulnerable code:** `__getstate__` raises TypeError, but `__reduce__` is not overridden. Python's pickle protocol can use `__reduce__` (which by default returns enough information to reconstruct the object, including the internal `_data` bytearray) to exfiltrate secrets even when `__getstate__` blocks.
 
@@ -57,7 +57,7 @@ subprocess.run(
 
 ### CRIT-03: Derived key from Argon2id stored in immutable `bytes` — never wiped
 
-**File:** `src/wg_automate/security/vault.py:91-99, 180-184, 241-243`
+**File:** `src/wireseal/security/vault.py:91-99, 180-184, 241-243`
 
 **Vulnerable code:**
 ```python
@@ -84,7 +84,7 @@ finally:
 
 ### HIGH-01: `validate_subnet` uses `is_private` which includes link-local and loopback
 
-**File:** `src/wg_automate/security/validator.py:124, 146, 269`
+**File:** `src/wireseal/security/validator.py:124, 146, 269`
 
 **Vulnerable code:**
 ```python
@@ -100,7 +100,7 @@ if not net.is_private:
 
 ### HIGH-02: Hint file written without restrictive permissions
 
-**File:** `src/wg_automate/security/vault.py:434`
+**File:** `src/wireseal/security/vault.py:434`
 
 **Vulnerable code:**
 ```python
@@ -115,7 +115,7 @@ hint_path.write_text(hint, encoding="utf-8")
 
 ### HIGH-03: Audit log injection via newlines in metadata values
 
-**File:** `src/wg_automate/security/audit.py:243-244`
+**File:** `src/wireseal/security/audit.py:243-244`
 
 **Vulnerable code:**
 ```python
@@ -130,7 +130,7 @@ fh.write(json.dumps(entry.to_dict()) + "\n")
 
 ### HIGH-04: Interface name not validated before use in subprocess commands and firewall rules
 
-**File:** `src/wg_automate/platform/linux.py:362, 473` and `src/wg_automate/platform/windows.py:264-290` and `src/wg_automate/main.py:562`
+**File:** `src/wireseal/platform/linux.py:362, 473` and `src/wireseal/platform/windows.py:264-290` and `src/wireseal/main.py:562`
 
 **Vulnerable code:**
 ```python
@@ -150,7 +150,7 @@ path = _WIREGUARD_DIR / f"{interface}.conf"
 
 ### MED-01: `keygen.py` creates intermediate immutable `bytes` for base64-encoded private key
 
-**File:** `src/wg_automate/core/keygen.py:38`
+**File:** `src/wireseal/core/keygen.py:38`
 
 ```python
 private_b64 = base64.b64encode(bytes(raw_private))  # immutable bytes
@@ -160,13 +160,13 @@ The `base64.b64encode` call returns immutable `bytes`. This is immediately copie
 
 ### MED-02: `psk.py` same issue — immutable `bytes` from `base64.b64encode`
 
-**File:** `src/wg_automate/core/psk.py:28`
+**File:** `src/wireseal/core/psk.py:28`
 
 Same pattern as MED-01.
 
 ### MED-03: `duckdns.py` token string lives in Python `str` (immutable) during request
 
-**File:** `src/wg_automate/dns/duckdns.py:86`
+**File:** `src/wireseal/dns/duckdns.py:86`
 
 ```python
 token_str = bytes(token.expose_secret()).decode("ascii")
@@ -176,7 +176,7 @@ The token is decoded to an immutable `str` which Python may intern. The `del` on
 
 ### MED-04: `_derive_key` accepts `passphrase: bytearray` but calls `bytes(passphrase)` — creates immutable copy
 
-**File:** `src/wg_automate/security/vault.py:92`
+**File:** `src/wireseal/security/vault.py:92`
 
 ```python
 return hash_secret_raw(secret=bytes(passphrase), ...)
@@ -186,7 +186,7 @@ The `bytes()` call creates an immutable copy of the passphrase that Argon2 retai
 
 ### MED-05: `qr_generator.save_qr` writes QR to disk with permissions set AFTER write (TOCTOU)
 
-**File:** `src/wg_automate/core/qr_generator.py:91-94`
+**File:** `src/wireseal/core/qr_generator.py:91-94`
 
 ```python
 path.write_text(qr_ascii, encoding="utf-8")
@@ -213,13 +213,13 @@ CI installs from `requirements-dev.txt` with `--require-hashes`, which is correc
 
 ### LOW-03: `wipe_string` relies on CPython internals
 
-**File:** `src/wg_automate/security/secrets_wipe.py:39-59`
+**File:** `src/wireseal/security/secrets_wipe.py:39-59`
 
 The `wipe_string` function uses `ctypes.memset(id(s) + header_size, 0, length)` to zero a string's internal buffer. This is fragile and CPython-specific. On PyPy, GraalPy, or future CPython versions with different string layouts, this silently does nothing. Documented as best-effort, which is acceptable.
 
 ### LOW-04: `validate_subnet` uses `strict=False` allowing host-bit confusion
 
-**File:** `src/wg_automate/security/validator.py:120`
+**File:** `src/wireseal/security/validator.py:120`
 
 ```python
 net = ipaddress.ip_network(subnet, strict=False)
@@ -229,7 +229,7 @@ This silently masks host bits: `10.0.0.5/24` becomes `10.0.0.0/24`. Users may no
 
 ### LOW-05: `assert` used for security check in `status` command
 
-**File:** `src/wg_automate/main.py:243-245`
+**File:** `src/wireseal/main.py:243-245`
 
 ```python
 assert "PrivateKey" not in output, (...)
@@ -239,7 +239,7 @@ In production, Python can be run with `-O` which disables assertions. This secur
 
 ### INFO-01: Audit log scrub pattern may miss non-standard key formats
 
-**File:** `src/wg_automate/security/audit.py:30`
+**File:** `src/wireseal/security/audit.py:30`
 
 ```python
 _KEY_PATTERN = re.compile(r'^[A-Za-z0-9+/]{42,43}=$')

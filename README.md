@@ -1,6 +1,6 @@
-# wg-automate
+# WireSeal
 
-WireGuard server automation CLI with zero plaintext secrets on disk. The tool manages key
+WireGuard server automation with zero plaintext secrets on disk. The tool manages key
 generation, client lifecycle, firewall rules, and optional dynamic DNS -- all behind an
 encrypted vault that never writes raw key material to disk. If the vault file is stolen
 without the passphrase, no cryptographic material is exposed.
@@ -20,7 +20,7 @@ environment variables or command-line flags (CLI-02).
 **Protected:** Vault file at rest (full disk encryption not assumed), WireGuard private keys,
 pre-shared keys, dynamic DNS tokens stored in vault.
 
-**Out of scope:** Memory forensics after wg-automate exits, kernel keyring attacks, a root
+**Out of scope:** Memory forensics after wireseal exits, kernel keyring attacks, a root
 attacker who can ptrace the running process.
 
 **Trust boundaries:** The user passphrase is the only secret that never touches disk. The vault
@@ -48,8 +48,8 @@ running (see Verifying a Release below).
 
 ```bash
 # 1. Download the binary and checksum file
-curl -LO https://github.com/YOUR_ORG/wg-automate/releases/latest/download/wg-automate-linux-x86_64
-curl -LO https://github.com/YOUR_ORG/wg-automate/releases/latest/download/sha256sums.txt
+curl -LO https://github.com/YOUR_ORG/wireseal/releases/latest/download/wireseal-linux-x86_64
+curl -LO https://github.com/YOUR_ORG/wireseal/releases/latest/download/sha256sums.txt
 
 # 2. Verify the SHA-256 checksum
 sha256sum -c sha256sums.txt --ignore-missing
@@ -57,30 +57,30 @@ sha256sum -c sha256sums.txt --ignore-missing
 # 3. Verify the Sigstore signature (keyless -- no stored private key)
 # Install cosign: https://docs.sigstore.dev/cosign/installation/
 cosign verify-blob \
-  --certificate wg-automate-linux-x86_64.sigstore.json \
-  --certificate-identity-regexp "https://github.com/YOUR_ORG/wg-automate" \
+  --certificate wireseal-linux-x86_64.sigstore.json \
+  --certificate-identity-regexp "https://github.com/YOUR_ORG/wireseal" \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
-  wg-automate-linux-x86_64
+  wireseal-linux-x86_64
 
 # 4. Make executable and move to PATH
-chmod +x wg-automate-linux-x86_64
-sudo mv wg-automate-linux-x86_64 /usr/local/bin/wg-automate
+chmod +x wireseal-linux-x86_64
+sudo mv wireseal-linux-x86_64 /usr/local/bin/wireseal
 ```
 
 ## Quick Start
 
 ```bash
-# Initialize the vault (creates ~/.wg-automate/vault.enc)
-sudo wg-automate init --subnet 10.0.0.1/24 --port 51820 --interface wg0
+# Initialize the vault (creates ~/.wireseal/vault.enc)
+sudo wireseal init --subnet 10.0.0.1/24 --port 51820 --interface wg0
 
 # Add a client (generates keys, issues IP, writes peer config)
-sudo wg-automate add-client alice
+sudo wireseal add-client alice
 
 # Display the client config as a QR code for mobile import
-sudo wg-automate show-qr alice
+sudo wireseal show-qr alice
 
 # Remove a client (revokes keys, removes peer, reloads WireGuard)
-sudo wg-automate remove-client alice
+sudo wireseal remove-client alice
 ```
 
 ## Commands Reference
@@ -118,7 +118,7 @@ written to swap.
 **Python memory management:** Python's garbage collector does not guarantee immediate memory
 reclamation. `SecretBytes.wipe()` zeroes the underlying bytearray before releasing the
 reference, but Python may retain object headers or cached representations in memory briefly
-after wipe. This is inherent to CPython and not specific to wg-automate.
+after wipe. This is inherent to CPython and not specific to WireSeal.
 
 ## Contributing
 
