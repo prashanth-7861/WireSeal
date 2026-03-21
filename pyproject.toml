@@ -28,6 +28,9 @@ dev = [
     "pip-audit>=2.10,<3",
 ]
 
+[project.scripts]
+wireseal = "wireseal.main:cli"
+
 [tool.setuptools.packages.find]
 where = ["src"]
 
