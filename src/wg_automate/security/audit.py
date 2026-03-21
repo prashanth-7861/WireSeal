@@ -229,12 +229,15 @@ class AuditLog:
         import datetime  # deferred: no side effects at module import
 
         scrubbed = _scrub_secrets(metadata)
+        # Sanitize action and error fields to prevent NDJSON log injection (HIGH-03)
+        safe_action = action.replace("\n", " ").replace("\r", " ") if action else action
+        safe_error = error.replace("\n", " ").replace("\r", " ") if error else error
         entry = AuditEntry(
             timestamp=datetime.datetime.now(datetime.timezone.utc).isoformat(),
-            action=action,
+            action=safe_action,
             metadata=scrubbed,  # type: ignore[arg-type]
             success=success,
-            error=error,
+            error=safe_error,
         )
 
         try:
