@@ -470,6 +470,8 @@ class LinuxAdapter(AbstractPlatformAdapter):
         Returns:
             Path /etc/wireguard/{interface}.conf
         """
+        from ..security.validator import validate_interface_name
+        validate_interface_name(interface)
         return _WIREGUARD_DIR / f"{interface}.conf"
 
     # ------------------------------------------------------------------

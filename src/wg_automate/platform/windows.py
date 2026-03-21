@@ -172,6 +172,8 @@ class WindowsAdapter(AbstractPlatformAdapter):
         Returns:
             Absolute path to the WireGuard config file.
         """
+        from ..security.validator import validate_interface_name
+        validate_interface_name(interface)
         return WG_CONFIG_DIR / f"{interface}.conf"
 
     def deploy_config(self, config_content: str, interface: str = "wg0") -> Path:

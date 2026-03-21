@@ -24,6 +24,51 @@ from typing import Any
 
 _CLIENT_NAME_PATTERN = re.compile(r"^[a-zA-Z0-9-]{1,32}$")
 _INI_INJECTION_PATTERN = re.compile(r"[\[\]=\n\r]")
+_INTERFACE_NAME_PATTERN = re.compile(r"^[a-zA-Z0-9_-]{1,15}$")
+
+# RFC 1918 private address ranges (strict — excludes loopback, link-local, CGNAT)
+_RFC1918_RANGES = (
+    ipaddress.ip_network("10.0.0.0/8"),
+    ipaddress.ip_network("172.16.0.0/12"),
+    ipaddress.ip_network("192.168.0.0/16"),
+)
+
+
+def _is_rfc1918(addr_or_net: ipaddress.IPv4Address | ipaddress.IPv4Network) -> bool:
+    """Return True iff addr_or_net falls within an RFC 1918 private range.
+
+    Does NOT accept loopback (127/8), link-local (169.254/16), CGNAT (100.64/10),
+    or multicast ranges — only the three RFC 1918 blocks.
+    """
+    if isinstance(addr_or_net, ipaddress.IPv4Network):
+        return any(
+            addr_or_net.network_address in rfc and addr_or_net.broadcast_address in rfc
+            for rfc in _RFC1918_RANGES
+        )
+    return any(addr_or_net in rfc for rfc in _RFC1918_RANGES)
+
+
+def validate_interface_name(name: str) -> None:
+    """Validate a WireGuard interface name.
+
+    Rules:
+      - Alphanumeric characters, hyphens, and underscores only: [a-zA-Z0-9_-]
+      - Between 1 and 15 characters inclusive (Linux IFNAMSIZ limit)
+      - No path separators, shell metacharacters, or whitespace
+
+    Args:
+        name: Interface name to validate.
+
+    Raises:
+        ValueError: If the interface name is invalid.
+    """
+    if not name:
+        raise ValueError("Interface name cannot be empty")
+    if not _INTERFACE_NAME_PATTERN.match(name):
+        raise ValueError(
+            f"Interface name '{name}' is invalid. "
+            "Must be 1-15 characters, alphanumeric with hyphens/underscores only."
+        )
 
 
 def validate_client_name(name: str) -> None:
@@ -121,9 +166,10 @@ def validate_subnet(subnet: str, field_name: str = "subnet") -> None:
     except ValueError as e:
         raise ValueError(f"Field '{field_name}': invalid subnet '{subnet}' -- {e}") from None
 
-    if not net.is_private:
+    if not isinstance(net, ipaddress.IPv4Network) or not _is_rfc1918(net):
         raise ValueError(
-            f"Field '{field_name}': subnet '{subnet}' is not an RFC 1918 private range"
+            f"Field '{field_name}': subnet '{subnet}' is not an RFC 1918 private range "
+            "(must be within 10.0.0.0/8, 172.16.0.0/12, or 192.168.0.0/16)"
         )
 
 
@@ -143,9 +189,10 @@ def validate_ip(ip: str, subnet: str, field_name: str = "ip") -> None:
     except ValueError as e:
         raise ValueError(f"Field '{field_name}': invalid IP address '{ip}' -- {e}") from None
 
-    if not addr.is_private:
+    if not isinstance(addr, ipaddress.IPv4Address) or not _is_rfc1918(addr):
         raise ValueError(
-            f"Field '{field_name}': IP address '{ip}' is not an RFC 1918 private address"
+            f"Field '{field_name}': IP address '{ip}' is not an RFC 1918 private address "
+            "(must be within 10.0.0.0/8, 172.16.0.0/12, or 192.168.0.0/16)"
         )
 
     try:
@@ -266,7 +313,7 @@ def validate_client_config(config: dict[str, Any]) -> None:
         addr = ipaddress.ip_address(config["ip"])
     except ValueError as e:
         raise ValueError(f"Field 'client_ip': invalid IP address '{config['ip']}' -- {e}") from None
-    if not addr.is_private:
+    if not isinstance(addr, ipaddress.IPv4Address) or not _is_rfc1918(addr):
         raise ValueError(f"Field 'client_ip': '{config['ip']}' is not an RFC 1918 private address")
 
     # DNS server (must be a valid IP)

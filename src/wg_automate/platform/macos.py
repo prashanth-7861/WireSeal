@@ -484,6 +484,8 @@ class MacOSAdapter(AbstractPlatformAdapter):
         Returns:
             Absolute path to the config file.
         """
+        from ..security.validator import validate_interface_name
+        validate_interface_name(interface)
         prefix = self._get_brew_prefix()
         return Path(prefix) / "etc" / "wireguard" / f"{interface}.conf"
 
