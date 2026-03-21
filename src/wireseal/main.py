@@ -580,22 +580,37 @@ def _reload_wireguard(interface: str = "wg0") -> None:
         return
 
     from wireseal.platform.detect import get_adapter
+    import tempfile
     adapter = get_adapter()
     config_path = adapter.get_config_path(interface)
-    # Two-step pipeline: avoid shell=True (CRIT-01 fix)
+    # Strip PostUp/PostDown lines that wg syncconf rejects
     strip_result = subprocess.run(
         ["wg-quick", "strip", str(config_path)],
         shell=False,
         check=True,
         capture_output=True,
     )
-    subprocess.run(
-        ["wg", "syncconf", interface],
-        shell=False,
-        check=True,
-        input=strip_result.stdout,
-        capture_output=True,
-    )
+    # wg syncconf requires a filename argument — write stripped config to a
+    # temp file (mode 600) then pass its path.  Using /dev/stdin is unreliable
+    # when capture_output=True closes the fd before wg reads it.
+    with tempfile.NamedTemporaryFile(
+        suffix=".conf", mode="wb", delete=False
+    ) as tmp:
+        tmp.write(strip_result.stdout)
+        tmp_path = tmp.name
+    try:
+        os.chmod(tmp_path, 0o600)
+        subprocess.run(
+            ["wg", "syncconf", interface, tmp_path],
+            shell=False,
+            check=True,
+            capture_output=True,
+        )
+    finally:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
 
 
 def _not_implemented(name: str) -> None:
