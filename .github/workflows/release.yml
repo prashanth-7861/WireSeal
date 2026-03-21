@@ -272,28 +272,21 @@ jobs:
           sha256sum * > sha256sums.txt
           echo "=== sha256sums.txt ===" && cat sha256sums.txt
 
-      - name: Sign with Sigstore (keyless — no stored private key)
-        uses: sigstore/gh-action-sigstore-python@v2.1.1
-        with:
-          inputs: >-
-            dist/release/wireseal-linux-x86_64
-            dist/release/wireseal-macos-arm64
-            dist/release/wireseal-windows-x86_64.exe
-            dist/release/wireseal_*_amd64.deb
-            dist/release/wireseal-*-1.x86_64.rpm
-            dist/release/wireseal-*-macos-arm64.pkg
-            dist/release/wireseal-*-windows-x86_64-setup.exe
+      - name: Sign with Sigstore CLI (keyless — no stored private key)
+        run: |
+          pip install --quiet sigstore
+          cd dist/release
+          sigstore sign \
+            wireseal-linux-x86_64 \
+            wireseal-macos-arm64 \
+            wireseal-windows-x86_64.exe \
+            wireseal_*_amd64.deb \
+            wireseal-*-1.x86_64.rpm \
+            wireseal-*-macos-arm64.pkg \
+            wireseal-*-windows-x86_64-setup.exe
 
       - name: Upload all files to GitHub Release
-        uses: softprops/action-gh-release@v2
-        with:
-          files: |
-            dist/release/wireseal-linux-x86_64
-            dist/release/wireseal-macos-arm64
-            dist/release/wireseal-windows-x86_64.exe
-            dist/release/wireseal_*_amd64.deb
-            dist/release/wireseal-*-1.x86_64.rpm
-            dist/release/wireseal-*-macos-arm64.pkg
-            dist/release/wireseal-*-windows-x86_64-setup.exe
-            dist/release/sha256sums.txt
-            dist/release/*.sigstore.json
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release upload "${{ github.ref_name }}" dist/release/* --clobber
