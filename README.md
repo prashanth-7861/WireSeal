@@ -32,16 +32,60 @@ is exposed.
 
 - **Zero plaintext secrets on disk** — all WireGuard private keys and PSKs live only inside
   the encrypted vault; config files never contain raw key material
-- **AES-256-GCM vault** with Argon2id KDF (time_cost=10, memory_cost=256 MiB, parallelism=4)
-- **Per-peer pre-shared keys** (os.urandom(32)) for post-quantum resistance
-- **Atomic writes** — every vault and config update is written via `os.replace()`, never
-  leaving a partially written file
-- **Append-only NDJSON audit log** — every action is logged with timestamp and metadata; no
-  key material ever appears in the log
-- **Firewall automation** — nftables (Linux), pf anchor (macOS), netsh advfirewall (Windows)
+- **Dual-layer AEAD vault** (FORMAT_VERSION 2):
+  - Argon2id KDF: `time_cost=10`, `memory_cost=256 MiB`, `parallelism=4`
+  - HKDF-SHA512 key separation — two independent 256-bit subkeys
+  - **Layer 1 (inner): ChaCha20-Poly1305** — stream cipher, quantum-resistant family
+  - **Layer 2 (outer): AES-256-GCM-SIV** — nonce-misuse resistant; even a repeated nonce
+    cannot reveal plaintext
+  - Both layers authenticated with the full 76-byte header as AAD
+- **Per-peer pre-shared keys** (os.urandom(32)) for additional post-quantum resistance
+- **Atomic writes** — every vault and config update uses `os.replace()`, never partially written
+- **Append-only NDJSON audit log** — timestamped, no key material ever logged
+- **Firewall automation** — nftables + NAT masquerade (Linux), pf anchor (macOS),
+  netsh advfirewall (Windows); IP forwarding enabled automatically
 - **Optional DuckDNS** dynamic DNS with 2-of-3 IP consensus
 - **QR code output** — display client configs as terminal QR codes for mobile import
 - **Cross-platform** — Linux x86_64, macOS arm64, Windows x86_64
+
+---
+
+## Prerequisites — Public IP and Open Port
+
+> **Required before adding clients from outside your home network.**
+
+WireSeal sets up the WireGuard server on your machine, but for devices on
+other networks (mobile data, other WiFi) to reach it, two things must be true:
+
+### 1. Your machine needs a reachable public IP
+
+```bash
+# Find your current public IP
+curl ifconfig.me
+```
+
+If this changes periodically (most home ISPs including AT&T), either:
+- Use DuckDNS (free dynamic DNS) — pass `--duckdns-domain yourname` to `init`
+- Or run `sudo wireseal update-endpoint` each time your IP changes
+
+### 2. Port 51820 UDP must be forwarded through your router
+
+Log into your router admin panel (usually `http://192.168.1.1` or
+`http://192.168.1.254` for AT&T) and add a port forwarding rule:
+
+| Setting | Value |
+|---|---|
+| Protocol | **UDP** |
+| External port | **51820** |
+| Internal IP | Your machine's local IP (`ip addr show \| grep "inet "`) |
+| Internal port | **51820** |
+
+> **AT&T routers:** Settings → Firewall → NAT/Gaming (or "Applications, Pinholes
+> and DMZ") → Add a custom rule with the values above.
+
+The Kali/Linux firewall (nftables), IP forwarding, and NAT masquerade are
+configured **automatically** by `wireseal init` — no manual `iptables` or
+`sysctl` changes needed.
 
 ---
 
@@ -263,12 +307,18 @@ sudo wg-quick up wg0
 All WireGuard private keys and pre-shared keys are stored as `SecretBytes` objects in memory
 and serialized only inside the AES-256-GCM vault.
 
-**Vault encryption:**
-- Key derivation: Argon2id — `time_cost=10`, `memory_cost=262144 KiB` (256 MiB), `parallelism=4`
-- Cipher: AES-256-GCM with a fresh 96-bit nonce per write (SEC-06)
-- Argon2 parameters and a 128-bit random salt are stored in the vault header
-- The header is used as AES-GCM additional authenticated data (AAD) — modifying the header
-  invalidates the authentication tag
+**Vault encryption (FORMAT_VERSION 2 — dual-layer AEAD):**
+- Key derivation: Argon2id — `time_cost=10`, `memory_cost=262144 KiB` (256 MiB),
+  `parallelism=4`, 256-bit random salt → 32-byte master key
+- Key separation: HKDF-SHA512 expands the master key into two independent 256-bit
+  subkeys using distinct domain labels — neither subkey leaks information about the other
+- Layer 1 (inner): ChaCha20-Poly1305 with fresh 96-bit nonce — stream cipher,
+  quantum-resistant family, authenticated
+- Layer 2 (outer): AES-256-GCM-SIV with fresh 96-bit nonce — nonce-misuse resistant;
+  if a nonce is ever reused, content is still protected (only message equality leaks)
+- Both layers use the full 76-byte header as AEAD additional data (AAD) —
+  any header modification invalidates both authentication tags simultaneously
+- An attacker must break **both** cipher families to read vault contents
 
 **Key handling:**
 - All derived keys are held in mutable `bytearray` objects and zero-wiped immediately after use

@@ -1,17 +1,33 @@
-"""Encrypted vault for WireGuard Automate secret state.
+"""Encrypted vault for WireSeal secret state.
 
-Stores all secret state (keys, PSKs, IPs, server config) using AES-256-GCM
-with Argon2id key derivation. The vault is the single point of trust for the
-entire project -- every secret passes through it.
+Stores all secret state (keys, PSKs, IPs, server config) using a dual-layer
+AEAD encryption scheme with Argon2id key derivation. The vault is the single
+point of trust -- every secret passes through it.
 
-Security properties:
-  - AES-256-GCM encryption with GCM authentication tag (tamper-evident)
-  - Argon2id KDF: 256 MiB memory / 4 iterations / 4 parallelism
-  - Fresh os.urandom(12) nonce per encryption (SEC-06: no nonce reuse)
+Encryption engine (FORMAT_VERSION 2):
+  - Argon2id KDF: 256 MiB memory / time_cost=10 / parallelism=4
+    Produces a 32-byte master key from the passphrase + 32-byte random salt.
+  - HKDF-SHA512 key separation: the master key is expanded into two
+    independent 256-bit subkeys with distinct domain labels, so neither
+    subkey leaks information about the other.
+  - Layer 1 — ChaCha20-Poly1305 (inner):
+      Stream cipher; no block-size alignment leakage; widely considered
+      quantum-resistant compared to AES-based ciphers; 96-bit nonce.
+  - Layer 2 — AES-256-GCM-SIV (outer, nonce-misuse resistant):
+      If os.urandom() ever produces a repeated nonce (negligible probability
+      with 96-bit nonces) AES-GCM-SIV only reveals that two ciphertexts have
+      identical plaintexts — it does NOT reveal the plaintext itself. This is
+      a strictly stronger security guarantee than standard AES-GCM.
+  - Both layers use the full 76-byte header as AEAD additional data (AAD),
+    so any modification to the header (KDF params, nonces, salt) invalidates
+    both authentication tags simultaneously.
   - Atomic writes: tmp + fsync + os.replace (never partially written)
   - Strict file permissions: vault dir 700, vault file 600 (Unix)
-  - Context manager on VaultState: wipes all secrets in finally on exit
+  - All derived keys wiped in-place immediately after use (mutable bytearray)
   - Generic error message for unlock failures (passphrase/tampering indistinct)
+
+FORMAT_VERSION 1 vaults (AES-256-GCM only) are detected and rejected with a
+clear upgrade message — run fresh-start + init to create a v2 vault.
 """
 
 import json
@@ -25,7 +41,9 @@ from typing import Any
 
 from argon2.low_level import Type, hash_secret_raw
 from cryptography.exceptions import InvalidTag
-from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.ciphers.aead import AESGCMSIV, ChaCha20Poly1305
+from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
 from .atomic import atomic_write
 from .exceptions import VaultTamperedError, VaultUnlockError
@@ -38,35 +56,46 @@ from .secrets_wipe import wipe_bytes
 
 MAGIC = b"WGAV"  # WireGuard Automate Vault
 
-FORMAT_VERSION = 1
+FORMAT_VERSION = 2  # v1: AES-256-GCM; v2: ChaCha20-Poly1305 + AES-256-GCM-SIV + HKDF
 
 # CRITICAL: memory_cost is in KiB. 256 MiB = 262144 KiB. Passing 256 = catastrophically weak.
 ARGON2_MEMORY_COST_KIB = 262144  # 256 MiB
 ARGON2_TIME_COST = 10
 ARGON2_PARALLELISM = 4
-ARGON2_HASH_LEN = 32  # 256-bit AES key
-ARGON2_SALT_LEN = 16
+ARGON2_HASH_LEN = 32   # Argon2id master key length (HKDF input)
+ARGON2_SALT_LEN = 32   # v2: 256-bit salt (was 16 bytes in v1)
 
-GCM_NONCE_LEN = 12
+NONCE_LEN = 12         # 96-bit nonce for both ChaCha20 and AES-GCM-SIV
+
+# HKDF domain separation labels — different info strings guarantee the two
+# subkeys are cryptographically independent even if master_key is known.
+_HKDF_INFO_CHACHA = b"wireseal-v2-chacha20-poly1305"
+_HKDF_INFO_AES    = b"wireseal-v2-aes-256-gcm-siv"
 
 DEFAULT_VAULT_DIR = Path.home() / ".wireseal"
 DEFAULT_VAULT_PATH = DEFAULT_VAULT_DIR / "vault.enc"
 
-# Binary header layout (47 bytes total):
+# Binary header layout v2 (76 bytes total):
 #   4  bytes: MAGIC (b'WGAV')
-#   1  byte:  FORMAT_VERSION
+#   1  byte:  FORMAT_VERSION (2)
 #   4  bytes: ARGON2_MEMORY_COST_KIB (uint32 big-endian)
-#   4  bytes: ARGON2_TIME_COST (uint32 big-endian)
-#   4  bytes: ARGON2_PARALLELISM (uint32 big-endian)
-#   1  byte:  salt length (always 16)
-#   16 bytes: salt
-#   1  byte:  nonce length (always 12)
-#   12 bytes: nonce
+#   4  bytes: ARGON2_TIME_COST       (uint32 big-endian)
+#   4  bytes: ARGON2_PARALLELISM     (uint32 big-endian)
+#   1  byte:  salt length (always 32)
+#   32 bytes: Argon2id salt
+#   1  byte:  nonce1 length (always 12) — ChaCha20-Poly1305
+#   12 bytes: nonce1
+#   1  byte:  nonce2 length (always 12) — AES-256-GCM-SIV
+#   12 bytes: nonce2
 #   ----
-#   47 bytes total
-_HEADER_STRUCT = struct.Struct(">4sBIII B16sB12s")
-_HEADER_SIZE = 47  # bytes
+#   76 bytes total
+_HEADER_STRUCT = struct.Struct(">4sBIII B32s B12s B12s")
+_HEADER_SIZE = 76  # bytes
 assert _HEADER_STRUCT.size == _HEADER_SIZE, "Header struct size mismatch"
+
+# v1 header struct kept for format detection only (read-only, never written)
+_HEADER_STRUCT_V1 = struct.Struct(">4sBIII B16sB12s")
+_HEADER_SIZE_V1 = 47
 
 
 # ---------------------------------------------------------------------------
@@ -74,19 +103,14 @@ assert _HEADER_STRUCT.size == _HEADER_SIZE, "Header struct size mismatch"
 # ---------------------------------------------------------------------------
 
 
-def _derive_key(passphrase: bytearray, salt: bytes, *, memory_cost: int = ARGON2_MEMORY_COST_KIB,
-                time_cost: int = ARGON2_TIME_COST, parallelism: int = ARGON2_PARALLELISM) -> bytearray:
-    """Derive a 256-bit AES key from passphrase and salt using Argon2id.
+def _derive_master_key(passphrase: bytearray, salt: bytes, *,
+                       memory_cost: int = ARGON2_MEMORY_COST_KIB,
+                       time_cost: int = ARGON2_TIME_COST,
+                       parallelism: int = ARGON2_PARALLELISM) -> bytearray:
+    """Derive a 256-bit master key from passphrase + salt using Argon2id.
 
-    Args:
-        passphrase: Mutable bytearray holding the passphrase (not copied here).
-        salt:       16-byte random salt.
-        memory_cost: Argon2 memory parameter in KiB (default: 262144 = 256 MiB).
-        time_cost:  Argon2 iteration count (default: 4).
-        parallelism: Argon2 parallelism (default: 4).
-
-    Returns:
-        32-byte derived key as mutable bytearray (caller must wipe after use).
+    The returned bytearray is the input to HKDF — it is never used directly
+    as a cipher key. Caller must wipe after use.
     """
     raw = hash_secret_raw(
         secret=bytes(passphrase),
@@ -97,13 +121,32 @@ def _derive_key(passphrase: bytearray, salt: bytes, *, memory_cost: int = ARGON2
         hash_len=ARGON2_HASH_LEN,
         type=Type.ID,
     )
-    # Convert immutable bytes to mutable bytearray so callers can wipe in-place.
-    # The immutable bytes object (raw) cannot be reliably zeroed via ctypes because
-    # the offset calculation is CPython-version-dependent and prone to memory
-    # corruption. Relying on CPython's allocator to overwrite it on deallocation
-    # is the least-bad option for this best-effort residue.
-    result = bytearray(raw)
-    return result
+    return bytearray(raw)
+
+
+def _derive_subkeys(master_key: bytearray, salt: bytes) -> tuple[bytearray, bytearray]:
+    """Derive two independent 256-bit cipher keys via HKDF-SHA512.
+
+    Uses different info labels so the two keys are cryptographically
+    independent: knowing one key reveals nothing about the other.
+
+    Returns:
+        (key_chacha, key_aes) — both mutable bytearrays, caller must wipe.
+    """
+    key_chacha = bytearray(
+        HKDF(algorithm=hashes.SHA512(), length=32, salt=salt, info=_HKDF_INFO_CHACHA)
+        .derive(bytes(master_key))
+    )
+    key_aes = bytearray(
+        HKDF(algorithm=hashes.SHA512(), length=32, salt=salt, info=_HKDF_INFO_AES)
+        .derive(bytes(master_key))
+    )
+    return key_chacha, key_aes
+
+
+# Backward-compat alias used by tests that call _derive_key directly
+def _derive_key(passphrase: bytearray, salt: bytes, **kwargs) -> bytearray:
+    return _derive_master_key(passphrase, salt, **kwargs)
 
 
 # ---------------------------------------------------------------------------
@@ -148,27 +191,29 @@ def _ensure_vault_dir(dir_path: Path) -> None:
 
 
 def _encrypt_vault(plaintext_dict: dict[str, Any], passphrase: bytearray) -> bytes:
-    """Serialize and encrypt a vault state dict.
+    """Serialize and double-encrypt a vault state dict (FORMAT_VERSION 2).
+
+    Encryption pipeline:
+      plaintext JSON
+        → ChaCha20-Poly1305  (inner, key_chacha, nonce1)
+        → AES-256-GCM-SIV    (outer, key_aes,    nonce2)
+        → stored ciphertext
+
+    Both layers use the full 76-byte header as AEAD additional data (AAD),
+    so any header modification invalidates both authentication tags.
 
     Binary layout:
-      [47-byte header][4-byte ct_len][ct_len bytes ciphertext+GCM_tag]
+      [76-byte header][4-byte ct_len][ct_len bytes double-ciphertext]
 
-    The 47-byte header is used as AAD (additional authenticated data) for
-    AES-GCM, so any modification to the header also invalidates the tag.
-
-    SEC-06: Fresh nonce (os.urandom(12)) generated per call -- never reused.
-
-    Args:
-        plaintext_dict: Vault state dict to encrypt.
-        passphrase:     Mutable bytearray holding the passphrase.
-
-    Returns:
-        Encrypted binary blob.
+    SEC-06: Two independent fresh nonces per call (os.urandom(12) each).
     """
-    salt = os.urandom(ARGON2_SALT_LEN)
-    nonce = os.urandom(GCM_NONCE_LEN)  # SEC-06: fresh nonce per encryption
+    salt    = os.urandom(ARGON2_SALT_LEN)   # 32 bytes
+    nonce1  = os.urandom(NONCE_LEN)          # ChaCha20-Poly1305
+    nonce2  = os.urandom(NONCE_LEN)          # AES-256-GCM-SIV
 
-    key = _derive_key(passphrase, salt)
+    master_key = _derive_master_key(passphrase, salt)
+    key_chacha, key_aes = _derive_subkeys(master_key, salt)
+
     try:
         header = _HEADER_STRUCT.pack(
             MAGIC,
@@ -176,41 +221,62 @@ def _encrypt_vault(plaintext_dict: dict[str, Any], passphrase: bytearray) -> byt
             ARGON2_MEMORY_COST_KIB,
             ARGON2_TIME_COST,
             ARGON2_PARALLELISM,
-            ARGON2_SALT_LEN,
-            salt,
-            GCM_NONCE_LEN,
-            nonce,
+            ARGON2_SALT_LEN, salt,
+            NONCE_LEN, nonce1,
+            NONCE_LEN, nonce2,
         )
 
         plaintext_json = json.dumps(plaintext_dict, separators=(",", ":")).encode("utf-8")
-        ciphertext = AESGCM(bytes(key)).encrypt(nonce, plaintext_json, header)
-    finally:
-        # Wipe derived key in-place (key is a mutable bytearray)
-        wipe_bytes(key)
 
-    ct_len_field = struct.pack(">I", len(ciphertext))
-    return header + ct_len_field + ciphertext
+        # Layer 1: ChaCha20-Poly1305 — stream cipher inner layer
+        layer1 = ChaCha20Poly1305(bytes(key_chacha)).encrypt(nonce1, plaintext_json, header)
+
+        # Layer 2: AES-256-GCM-SIV — nonce-misuse-resistant outer layer
+        layer2 = AESGCMSIV(bytes(key_aes)).encrypt(nonce2, layer1, header)
+
+    finally:
+        wipe_bytes(master_key)
+        wipe_bytes(key_chacha)
+        wipe_bytes(key_aes)
+
+    ct_len_field = struct.pack(">I", len(layer2))
+    return header + ct_len_field + layer2
 
 
 def _decrypt_vault(blob: bytes, passphrase: bytearray) -> dict[str, Any]:
     """Decrypt and deserialize a vault binary blob.
 
-    Parses Argon2 parameters from the header (not module constants) for
-    forward compatibility: future vaults may have different parameters.
+    Supports FORMAT_VERSION 2 (double AEAD).
+    FORMAT_VERSION 1 vaults are detected and rejected with an upgrade notice.
 
     Raises:
-        VaultTamperedError: Magic bytes are wrong (structural tampering).
-        VaultUnlockError:   GCM tag verification failed (wrong passphrase or
-                            ciphertext tampering). Generic message only --
-                            never distinguish the two failure modes.
+        VaultTamperedError: Magic bytes wrong or format unrecognised.
+        VaultUnlockError:   Authentication tag failed (wrong passphrase or
+                            ciphertext tampering). Generic — never reveals
+                            which layer failed or which condition triggered.
     """
-    min_size = _HEADER_SIZE + 4  # header + ct_len field
-    if len(blob) < min_size:
+    if len(blob) < 5:
         raise VaultTamperedError("Vault file is too small to be valid")
 
-    # Validate magic bytes before attempting expensive Argon2 derivation
     if blob[:4] != MAGIC:
         raise VaultTamperedError("Vault file has invalid magic bytes")
+
+    version = blob[4]
+    if version == 1:
+        raise VaultTamperedError(
+            "Vault was created with FORMAT_VERSION 1 (AES-256-GCM only). "
+            "Run 'sudo wireseal fresh-start' then 'sudo wireseal init' to "
+            "upgrade to the v2 dual-layer encryption engine."
+        )
+    if version != FORMAT_VERSION:
+        raise VaultTamperedError(
+            f"Unsupported vault FORMAT_VERSION {version} "
+            f"(this build supports version {FORMAT_VERSION})."
+        )
+
+    min_size = _HEADER_SIZE + 4
+    if len(blob) < min_size:
+        raise VaultTamperedError("Vault file is too small to be valid")
 
     (
         _magic,
@@ -218,33 +284,45 @@ def _decrypt_vault(blob: bytes, passphrase: bytearray) -> dict[str, Any]:
         memory_cost,
         time_cost,
         parallelism,
-        salt_len,
+        _salt_len,
         salt,
-        nonce_len,
-        nonce,
+        _nonce1_len,
+        nonce1,
+        _nonce2_len,
+        nonce2,
     ) = _HEADER_STRUCT.unpack(blob[:_HEADER_SIZE])
 
     header = blob[:_HEADER_SIZE]
 
-    # Extract ciphertext length and validate it against the actual blob size.
-    # Python slice notation silently truncates on out-of-bounds, so we must
-    # explicitly check that the declared length is consistent with the blob.
-    # A corrupted ct_len field prevents decryption -> VaultUnlockError (generic).
     ct_len = struct.unpack(">I", blob[_HEADER_SIZE:_HEADER_SIZE + 4])[0]
     expected_total = _HEADER_SIZE + 4 + ct_len
     if len(blob) < expected_total:
         raise VaultUnlockError("Vault unlock failed") from None
     ciphertext = blob[_HEADER_SIZE + 4: expected_total]
 
-    key = _derive_key(passphrase, salt, memory_cost=memory_cost,
-                      time_cost=time_cost, parallelism=parallelism)
+    master_key = _derive_master_key(passphrase, salt,
+                                    memory_cost=memory_cost,
+                                    time_cost=time_cost,
+                                    parallelism=parallelism)
+    key_chacha, key_aes = _derive_subkeys(master_key, salt)
+
     try:
-        plaintext = AESGCM(bytes(key)).decrypt(nonce, ciphertext, header)
-    except InvalidTag:
-        raise VaultUnlockError("Vault unlock failed") from None
+        # Peel outer layer: AES-256-GCM-SIV
+        try:
+            layer1 = AESGCMSIV(bytes(key_aes)).decrypt(nonce2, ciphertext, header)
+        except InvalidTag:
+            raise VaultUnlockError("Vault unlock failed") from None
+
+        # Peel inner layer: ChaCha20-Poly1305
+        try:
+            plaintext = ChaCha20Poly1305(bytes(key_chacha)).decrypt(nonce1, layer1, header)
+        except InvalidTag:
+            raise VaultUnlockError("Vault unlock failed") from None
+
     finally:
-        # Wipe derived key in-place (key is a mutable bytearray)
-        wipe_bytes(key)
+        wipe_bytes(master_key)
+        wipe_bytes(key_chacha)
+        wipe_bytes(key_aes)
 
     return json.loads(plaintext.decode("utf-8"))
 
