@@ -18,7 +18,7 @@ from argon2.low_level import Type, hash_secret_raw
 # Production Argon2id parameters -- must match vault.py exactly.
 # Changing these values is a breaking security change requiring a migration plan.
 PRODUCTION_PARAMS = {
-    "time_cost": 4,
+    "time_cost": 6,
     "memory_cost": 262144,  # 256 MiB
     "parallelism": 4,
     "hash_len": 32,
@@ -62,7 +62,7 @@ def test_argon2id_minimum_timing(benchmark):
             enforce = os.environ.get("WG_ENFORCE_TIMING", "0") == "1"
             message = (
                 f"Argon2id KDF minimum time was {min_time:.3f}s -- below the 0.5s security floor. "
-                "This indicates the production parameters (time_cost=4, memory_cost=262144, "
+                "This indicates the production parameters (time_cost=6, memory_cost=262144, "
                 "parallelism=4) have been degraded or the test hardware is unexpectedly fast. "
                 "Review PRODUCTION_PARAMS against the vault.py Argon2id configuration before release. "
                 "Set WG_ENFORCE_TIMING=1 to turn this into a hard failure (required in CI/release)."

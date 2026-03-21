@@ -42,7 +42,7 @@ FORMAT_VERSION = 1
 
 # CRITICAL: memory_cost is in KiB. 256 MiB = 262144 KiB. Passing 256 = catastrophically weak.
 ARGON2_MEMORY_COST_KIB = 262144  # 256 MiB
-ARGON2_TIME_COST = 4
+ARGON2_TIME_COST = 6
 ARGON2_PARALLELISM = 4
 ARGON2_HASH_LEN = 32  # 256-bit AES key
 ARGON2_SALT_LEN = 16
@@ -500,11 +500,10 @@ class Vault:
         plaintext = _decrypt_vault(blob, old_passphrase.expose_secret())
         try:
             new_blob = _encrypt_vault(plaintext, new_raw)
+            atomic_write(self._path, new_blob, mode=0o600)
         finally:
             # Wipe the intermediate plaintext dict (best-effort for string values)
             plaintext.clear()
-
-        atomic_write(self._path, new_blob, mode=0o600)
 
     # ------------------------------------------------------------------
     # Integrity verification (VAULT-08)
