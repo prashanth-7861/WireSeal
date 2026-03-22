@@ -38,6 +38,7 @@ BrandingText "${APPNAME} ${VERSION}"
 ; Pages
 ;---------------------------------------------------------------------------
 !include "MUI2.nsh"
+!include "FileFunc.nsh"
 
 !define MUI_ABORTWARNING
 
