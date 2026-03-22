@@ -175,6 +175,7 @@ def _ensure_vault_dir(dir_path: Path) -> None:
                  "/grant:r", "Administrators:(OI)(CI)F"],
                 check=True,
                 capture_output=True,
+                creationflags=subprocess.CREATE_NO_WINDOW,
             )
         except Exception as exc:
             warnings.warn(

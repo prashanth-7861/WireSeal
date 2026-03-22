@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import {
   Server, Play, Activity, Monitor, Clock, Wifi, WifiOff,
-  Lock, Eye, EyeOff, AlertCircle, ShieldCheck, Users,
+  Lock, Eye, EyeOff, AlertCircle, ShieldCheck, Users, CheckCircle,
 } from "lucide-react";
 import { api, VAULT_LOCKED_EVENT, type Status } from "../api";
 
@@ -21,6 +21,11 @@ export function Dashboard() {
   const [showPw, setShowPw] = useState(false);
   const [authError, setAuthError] = useState("");
   const [authLoading, setAuthLoading] = useState(false);
+
+  // Post-init success state
+  const [initResult, setInitResult] = useState<{
+    server_ip: string; subnet: string; public_key: string; endpoint: string | null;
+  } | null>(null);
 
   // ── Vault info probe ─────────────────────────────────────────────────────
   const probeVault = useCallback(async () => {
@@ -99,7 +104,13 @@ export function Dashboard() {
     setAuthLoading(true);
     try {
       if (passphraseMode === "setup") {
-        await api.init(passphrase);
+        const result = await api.init(passphrase);
+        setInitResult({
+          server_ip: result.server_ip,
+          subnet: result.subnet,
+          public_key: result.public_key,
+          endpoint: result.endpoint,
+        });
       } else {
         await api.unlock(passphrase);
       }
@@ -169,6 +180,47 @@ export function Dashboard() {
       {/* ── Unlocked — full dashboard ────────────────────────────────────── */}
       {vaultState === "unlocked" && (
         <>
+          {/* Post-init success banner */}
+          {initResult && (
+            <div className="bg-green-50 border border-green-200 rounded-lg p-6 mb-6">
+              <div className="flex items-start gap-4">
+                <div className="w-12 h-12 bg-green-100 rounded-full flex items-center justify-center flex-shrink-0">
+                  <CheckCircle className="w-7 h-7 text-green-600" />
+                </div>
+                <div className="flex-1">
+                  <h2 className="text-xl font-semibold text-green-900 mb-1">Server Initialized Successfully</h2>
+                  <p className="text-green-700 text-sm mb-4">Your WireSeal vault has been created and the WireGuard tunnel is configured.</p>
+                  <div className="grid grid-cols-2 gap-3 text-sm">
+                    <div>
+                      <span className="text-green-600">Server IP:</span>{" "}
+                      <span className="font-mono text-green-900">{initResult.server_ip}</span>
+                    </div>
+                    <div>
+                      <span className="text-green-600">Subnet:</span>{" "}
+                      <span className="font-mono text-green-900">{initResult.subnet}</span>
+                    </div>
+                    <div className="col-span-2">
+                      <span className="text-green-600">Public Key:</span>{" "}
+                      <span className="font-mono text-green-900 text-xs break-all">{initResult.public_key}</span>
+                    </div>
+                    {initResult.endpoint && (
+                      <div className="col-span-2">
+                        <span className="text-green-600">Endpoint:</span>{" "}
+                        <span className="font-mono text-green-900">{initResult.endpoint}</span>
+                      </div>
+                    )}
+                  </div>
+                  <p className="text-green-600 text-sm mt-4">Head to the <strong>Clients</strong> page to add your first VPN client.</p>
+                </div>
+                <button
+                  onClick={() => setInitResult(null)}
+                  className="text-green-400 hover:text-green-600 text-lg leading-none"
+                  title="Dismiss"
+                >&times;</button>
+              </div>
+            </div>
+          )}
+
           {/* Server status card */}
           <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-6 mb-6">
             <div className="flex items-center justify-between mb-4">
@@ -314,6 +366,18 @@ export function Dashboard() {
               <ShieldCheck className="w-12 h-12 text-green-500 mx-auto mb-3" />
               <h3 className="font-medium text-gray-900 mb-1">WireGuard is running</h3>
               <p className="text-gray-500 text-sm">No peers connected yet. Add clients from the Clients page.</p>
+            </div>
+          )}
+
+          {/* Guidance when vault is unlocked but WireGuard is not running */}
+          {status !== null && !status.running && (
+            <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-10 text-center">
+              <Server className="w-12 h-12 text-gray-400 mx-auto mb-3" />
+              <h3 className="font-medium text-gray-900 mb-1">Vault Unlocked</h3>
+              <p className="text-gray-500 text-sm max-w-md mx-auto">
+                The vault is unlocked and ready. The WireGuard tunnel service may still be starting up,
+                or it may need to be started manually. Add clients from the Clients page to get started.
+              </p>
             </div>
           )}
         </>

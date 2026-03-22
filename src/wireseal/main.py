@@ -21,20 +21,31 @@ import time
 from pathlib import Path
 
 # ---------------------------------------------------------------------------
-# Windows console reattach — when the binary is built as a GUI app
-# (console=False) but invoked from cmd.exe / PowerShell with CLI args,
-# reattach to the parent console so stdout/stderr reach the terminal.
-# When double-clicked (no parent console), this is a no-op.
+# Windows console handling for GUI binary (console=False).
+#
+# With CLI args: reattach to the parent console so stdout/stderr reach the
+# terminal (cmd.exe / PowerShell).
+#
+# Without CLI args (double-click): redirect stdout/stderr to devnull so that
+# stray print() calls never trigger a console window allocation.
 # ---------------------------------------------------------------------------
-if sys.platform == "win32" and len(sys.argv) > 1:
-    try:
-        import ctypes
-        _ATTACH_PARENT_PROCESS = -1
-        if ctypes.windll.kernel32.AttachConsole(_ATTACH_PARENT_PROCESS):
-            sys.stdout = open("CONOUT$", "w")
-            sys.stderr = open("CONOUT$", "w")
-    except Exception:
-        pass
+if sys.platform == "win32":
+    if len(sys.argv) > 1:
+        try:
+            import ctypes
+            _ATTACH_PARENT_PROCESS = -1
+            if ctypes.windll.kernel32.AttachConsole(_ATTACH_PARENT_PROCESS):
+                sys.stdout = open("CONOUT$", "w")
+                sys.stderr = open("CONOUT$", "w")
+        except Exception:
+            pass
+    else:
+        # GUI mode (double-click) — suppress all console output
+        try:
+            sys.stdout = open(os.devnull, "w")
+            sys.stderr = open(os.devnull, "w")
+        except Exception:
+            pass
 
 import click
 
@@ -609,8 +620,9 @@ def _reload_wireguard(interface: str = "wg0") -> None:
     manager can abort and discard the pending state change.
     """
     if sys.platform == "win32":
-        subprocess.run(["wg-quick", "down", interface], check=False, capture_output=True)
-        subprocess.run(["wg-quick", "up", interface], check=True, capture_output=True)
+        _no_win = subprocess.CREATE_NO_WINDOW
+        subprocess.run(["wg-quick", "down", interface], check=False, capture_output=True, creationflags=_no_win)
+        subprocess.run(["wg-quick", "up", interface], check=True, capture_output=True, creationflags=_no_win)
         return
 
     # If the interface is not running, bring it up instead of syncconf
@@ -2036,7 +2048,8 @@ def serve(host: str, port: int, no_gui: bool, background: bool, stop: bool) -> N
         try:
             if sys.platform == "win32":
                 subprocess.run(["taskkill", "/PID", str(pid), "/F"],
-                               check=True, capture_output=True)
+                               check=True, capture_output=True,
+                               creationflags=subprocess.CREATE_NO_WINDOW)
             else:
                 os.kill(pid, 15)  # SIGTERM
             _PID_FILE.unlink(missing_ok=True)

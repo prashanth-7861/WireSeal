@@ -41,6 +41,10 @@ WG_EXE = Path(r"C:\Program Files\WireGuard\wireguard.exe")
 WG_CONFIG_DIR = Path(os.environ.get("ProgramData", r"C:\ProgramData")) / "WireGuard"
 WG_SERVICE_PREFIX = "WireGuardTunnel$"
 
+# Prevent subprocess calls from flashing a visible console window when
+# the app is running as a GUI (PyInstaller console=False / pywebview).
+_NO_WIN = subprocess.CREATE_NO_WINDOW  # 0x08000000
+
 
 # ---------------------------------------------------------------------------
 # WindowsAdapter
@@ -151,6 +155,7 @@ class WindowsAdapter(AbstractPlatformAdapter):
                 check=True,
                 capture_output=True,
                 timeout=120,
+                creationflags=_NO_WIN,
             )
         except subprocess.CalledProcessError as e:
             raise SetupError(
@@ -236,6 +241,7 @@ class WindowsAdapter(AbstractPlatformAdapter):
             capture_output=True,
             text=True,
             shell=False,
+            creationflags=_NO_WIN,
         )
         if result.returncode == 0 and f"wireseal-{wg_interface}-in" in result.stdout:
             return  # rules already exist
@@ -277,6 +283,7 @@ class WindowsAdapter(AbstractPlatformAdapter):
             shell=False,
             check=True,
             capture_output=True,
+            creationflags=_NO_WIN,
         )
 
         # Block all other inbound on WG interface (deny-by-default, FW-01)
@@ -293,6 +300,7 @@ class WindowsAdapter(AbstractPlatformAdapter):
             shell=False,
             check=True,
             capture_output=True,
+            creationflags=_NO_WIN,
         )
 
         # Set WG interface to Public network profile (most restrictive)
@@ -304,6 +312,7 @@ class WindowsAdapter(AbstractPlatformAdapter):
             ],
             shell=False,
             capture_output=True,
+            creationflags=_NO_WIN,
             # do not check -- interface may not exist yet when firewall rules are pre-configured
         )
 
@@ -316,6 +325,7 @@ class WindowsAdapter(AbstractPlatformAdapter):
             ],
             shell=False,
             capture_output=True,
+            creationflags=_NO_WIN,
             # do not check -- may already exist from a previous run (idempotent)
         )
 
@@ -334,6 +344,7 @@ class WindowsAdapter(AbstractPlatformAdapter):
             ],
             shell=False,
             capture_output=True,
+            creationflags=_NO_WIN,
         )
         subprocess.run(
             [
@@ -342,6 +353,7 @@ class WindowsAdapter(AbstractPlatformAdapter):
             ],
             shell=False,
             capture_output=True,
+            creationflags=_NO_WIN,
         )
         subprocess.run(
             [
@@ -350,6 +362,7 @@ class WindowsAdapter(AbstractPlatformAdapter):
             ],
             shell=False,
             capture_output=True,
+            creationflags=_NO_WIN,
         )
 
     # ------------------------------------------------------------------
@@ -431,6 +444,7 @@ class WindowsAdapter(AbstractPlatformAdapter):
             check=True,
             capture_output=True,
             timeout=30,
+            creationflags=_NO_WIN,
         )
 
         # Configure for auto-start
@@ -443,6 +457,7 @@ class WindowsAdapter(AbstractPlatformAdapter):
             shell=False,
             check=True,
             capture_output=True,
+            creationflags=_NO_WIN,
         )
 
         # Start the service (don't check return code -- may already be running)
@@ -450,6 +465,7 @@ class WindowsAdapter(AbstractPlatformAdapter):
             ["sc.exe", "start", f"{WG_SERVICE_PREFIX}{interface}"],
             shell=False,
             capture_output=True,
+            creationflags=_NO_WIN,
         )
 
     def disable_tunnel_service(self, interface: str = "wg0") -> None:
@@ -464,11 +480,13 @@ class WindowsAdapter(AbstractPlatformAdapter):
             ["sc.exe", "stop", f"{WG_SERVICE_PREFIX}{interface}"],
             shell=False,
             capture_output=True,
+            creationflags=_NO_WIN,
         )
         subprocess.run(
             [str(WG_EXE), "/uninstalltunnelservice", interface],
             shell=False,
             capture_output=True,
+            creationflags=_NO_WIN,
         )
 
     # ------------------------------------------------------------------
@@ -495,6 +513,7 @@ class WindowsAdapter(AbstractPlatformAdapter):
             ["net", "user", "wireseal-dns"],
             capture_output=True,
             shell=False,
+            creationflags=_NO_WIN,
         )
         user_exists = check.returncode == 0
 
@@ -513,12 +532,14 @@ class WindowsAdapter(AbstractPlatformAdapter):
                 shell=False,
                 check=True,
                 capture_output=True,
+                creationflags=_NO_WIN,
             )
             # Remove from Users group to deny interactive logon (least privilege)
             subprocess.run(
                 ["net", "localgroup", "Users", "wireseal-dns", "/delete"],
                 shell=False,
                 capture_output=True,
+                creationflags=_NO_WIN,
                 # Don't check -- may already not be in Users group
             )
 
@@ -537,6 +558,7 @@ class WindowsAdapter(AbstractPlatformAdapter):
             shell=False,
             check=True,
             capture_output=True,
+            creationflags=_NO_WIN,
         )
 
         # Best-effort memory wipe of the temporary password
@@ -582,6 +604,7 @@ class WindowsAdapter(AbstractPlatformAdapter):
             shell=False,
             check=True,
             timeout=30,
+            creationflags=_NO_WIN,
         )
         interface = result.stdout.strip()  # CRLF handling: .strip() removes \r\n
         if not interface:

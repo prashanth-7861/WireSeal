@@ -15,6 +15,9 @@ import sys
 import warnings
 from pathlib import Path
 
+# On Windows, prevent subprocess calls (icacls) from flashing a console window.
+_SP_FLAGS = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
+
 
 def set_file_permissions(path: Path, mode: int = 0o600) -> None:
     """Set restrictive permissions on a file.
@@ -86,6 +89,7 @@ def _set_windows_file_permissions(path: Path) -> None:
             ],
             check=True,
             capture_output=True,
+            creationflags=_SP_FLAGS,
         )
     except Exception as exc:
         # Try pywin32 as fallback
@@ -111,6 +115,7 @@ def _set_windows_dir_permissions(path: Path) -> None:
             ],
             check=True,
             capture_output=True,
+            creationflags=_SP_FLAGS,
         )
     except Exception as exc:
         warnings.warn(
@@ -161,6 +166,7 @@ def _check_windows_permissions(path: Path) -> bool:
             capture_output=True,
             text=True,
             check=True,
+            creationflags=_SP_FLAGS,
         )
         output = result.stdout
         # A file with correct permissions should only list SYSTEM and Administrators.

@@ -98,6 +98,10 @@ _VAULT_PATH = _VAULT_DIR / "vault.enc"
 _AUDIT_PATH = _VAULT_DIR / "audit.log"
 _WG_IFACE   = "wg0"
 
+# On Windows, prevent subprocess calls from flashing a visible console window.
+# CREATE_NO_WINDOW (0x08000000) suppresses the console for child processes.
+_SP_FLAGS = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -300,13 +304,27 @@ def _h_status(req: "_Handler", _groups: tuple) -> dict:
     peers: list[dict] = []
     try:
         result = subprocess.run(
-            ["wg", "show"], capture_output=True, text=True, timeout=5
+            ["wg", "show"], capture_output=True, text=True, timeout=5,
+            creationflags=_SP_FLAGS,
         )
         if result.returncode == 0:
             running = True
             peers = _parse_wg_show(result.stdout)
     except (FileNotFoundError, subprocess.TimeoutExpired):
         pass
+
+    # Windows fallback: wg CLI may not be in PATH; check service status instead
+    if not running and sys.platform == "win32":
+        try:
+            sc_result = subprocess.run(
+                ["sc.exe", "query", "WireGuardTunnel$wg0"],
+                capture_output=True, text=True, timeout=5,
+                creationflags=_SP_FLAGS,
+            )
+            if sc_result.returncode == 0 and "RUNNING" in sc_result.stdout:
+                running = True
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            pass
 
     ip_to_name = {
         data["ip"].split("/")[0]: name
@@ -648,6 +666,7 @@ def _h_terminate(req: "_Handler", _groups: tuple) -> dict:
         subprocess.run(
             ["wg-quick", "down", _WG_IFACE],
             check=True, capture_output=True, timeout=15,
+            creationflags=_SP_FLAGS,
         )
         from wireseal.security.audit import AuditLog
         AuditLog(_AUDIT_PATH).log("terminate", {"interface": _WG_IFACE})
@@ -671,6 +690,7 @@ def _h_fresh_start(req: "_Handler", _groups: tuple) -> dict:
         subprocess.run(
             ["wg-quick", "down", _WG_IFACE],
             check=False, capture_output=True, timeout=10,
+            creationflags=_SP_FLAGS,
         )
     except Exception:
         pass
@@ -868,10 +888,16 @@ def serve(host: str = "127.0.0.1", port: int = 8080, gui: bool = True) -> None:
 
     server = ThreadingHTTPServer((host, port), _Handler)
     url = f"http://{host}:{port}/"
-    print(f"[wireseal] Serving on {url}")
+
+    # In GUI mode on Windows (console=False binary), suppress prints to avoid
+    # allocating a console window.  Headless mode keeps prints for terminal use.
+    _quiet = gui and sys.platform == "win32"
+    if not _quiet:
+        print(f"[wireseal] Serving on {url}")
 
     if not gui:
-        print("[wireseal] Headless mode — press Ctrl+C to stop.")
+        if not _quiet:
+            print("[wireseal] Headless mode — press Ctrl+C to stop.")
         try:
             server.serve_forever()
         except KeyboardInterrupt:
@@ -895,16 +921,18 @@ def serve(host: str = "127.0.0.1", port: int = 8080, gui: bool = True) -> None:
         )
         webview.start()  # blocks until the native window is closed
     except ImportError:
-        print("[wireseal] pywebview not installed — falling back to system browser.")
-        print("[wireseal] Press Ctrl+C to stop.")
+        if not _quiet:
+            print("[wireseal] pywebview not installed — falling back to system browser.")
+            print("[wireseal] Press Ctrl+C to stop.")
         webbrowser.open(url)
         try:
             server_thread.join()
         except KeyboardInterrupt:
             pass
     except Exception as exc:
-        print(f"[wireseal] GUI failed ({exc}) — falling back to system browser.")
-        print("[wireseal] Press Ctrl+C to stop.")
+        if not _quiet:
+            print(f"[wireseal] GUI failed ({exc}) — falling back to system browser.")
+            print("[wireseal] Press Ctrl+C to stop.")
         webbrowser.open(url)
         try:
             server_thread.join()

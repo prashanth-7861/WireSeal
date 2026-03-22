@@ -181,10 +181,12 @@ class AuditLog:
                 try:
                     import getpass
                     username = getpass.getuser()
+                    _flags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
                     subprocess.run(
                         ["icacls", str(self._log_path), "/grant:r", f"{username}:(R,W)"],
                         check=True,
                         capture_output=True,
+                        creationflags=_flags,
                     )
                 except Exception:
                     pass
