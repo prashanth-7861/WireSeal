@@ -9,7 +9,7 @@ env:
 
 jobs:
   # ─────────────────────────────────────────────────────────────────────────
-  # 1. Build raw standalone binaries (PyInstaller one-file, dashboard bundled)
+  # 1. Build GUI + CLI binaries (PyInstaller one-file, dashboard bundled)
   # ─────────────────────────────────────────────────────────────────────────
   build:
     strategy:
@@ -17,11 +17,14 @@ jobs:
       matrix:
         include:
           - os: ubuntu-latest
-            artifact_name: wireseal-linux-x86_64
+            gui_name: WireSeal-linux-x86_64
+            cli_name: wireseal-cli-linux-x86_64
           - os: macos-latest
-            artifact_name: wireseal-macos-arm64
+            gui_name: WireSeal-macos-arm64
+            cli_name: wireseal-cli-macos-arm64
           - os: windows-latest
-            artifact_name: wireseal-windows-x86_64.exe
+            gui_name: WireSeal-windows-x86_64.exe
+            cli_name: wireseal-cli-windows-x86_64.exe
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -52,24 +55,28 @@ jobs:
         env:
           WG_ENFORCE_TIMING: "1"
 
-      - name: Build standalone binary (with bundled dashboard)
+      - name: Build GUI binary (desktop app)
         run: pyinstaller wireseal.spec
 
-      - name: Stage binary
+      - name: Build CLI binary (terminal)
+        run: pyinstaller wireseal-cli.spec
+
+      - name: Stage binaries
         shell: bash
         run: |
           mkdir -p dist/release
-          # PyInstaller now outputs "WireSeal" / "WireSeal.exe" (console=False, name='WireSeal')
           find dist -maxdepth 1 \( -name "WireSeal" -o -name "WireSeal.exe" \) \
-            -exec cp {} dist/release/${{ matrix.artifact_name }} \;
+            -exec cp {} dist/release/${{ matrix.gui_name }} \;
+          find dist -maxdepth 1 \( -name "wireseal" -o -name "wireseal.exe" \) \
+            -exec cp {} dist/release/${{ matrix.cli_name }} \;
 
       - uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.artifact_name }}
-          path: dist/release/${{ matrix.artifact_name }}
+          name: binaries-${{ matrix.os }}
+          path: dist/release/
 
   # ─────────────────────────────────────────────────────────────────────────
-  # 2a. Linux packages — .deb (Debian/Ubuntu) and .rpm (Fedora/RHEL/Rocky)
+  # 2a. Linux packages — .deb / .rpm / .tar.gz (includes GUI + CLI)
   # ─────────────────────────────────────────────────────────────────────────
   package-linux:
     needs: build
@@ -77,14 +84,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Download Linux binary
+      - name: Download Linux binaries
         uses: actions/download-artifact@v4
         with:
-          name: wireseal-linux-x86_64
+          name: binaries-ubuntu-latest
           path: dist/release
 
-      - name: Make binary executable
-        run: chmod +x dist/release/wireseal-linux-x86_64
+      - name: Make binaries executable
+        run: |
+          chmod +x dist/release/WireSeal-linux-x86_64
+          chmod +x dist/release/wireseal-cli-linux-x86_64
 
       - name: Compute version (strip leading 'v')
         id: ver
@@ -100,9 +109,13 @@ jobs:
 
       - name: Prepare payload directory
         run: |
-          # Binary
+          # GUI binary
           mkdir -p pkg_root/usr/local/bin
-          cp dist/release/wireseal-linux-x86_64 pkg_root/usr/local/bin/wireseal
+          cp dist/release/WireSeal-linux-x86_64 pkg_root/usr/local/bin/WireSeal
+          chmod +x pkg_root/usr/local/bin/WireSeal
+
+          # CLI binary
+          cp dist/release/wireseal-cli-linux-x86_64 pkg_root/usr/local/bin/wireseal
           chmod +x pkg_root/usr/local/bin/wireseal
 
           # Desktop entry (app menu integration)
@@ -156,7 +169,7 @@ jobs:
         run: |
           VERSION="${{ steps.ver.outputs.version }}"
           tar -czf "dist/release/wireseal-${VERSION}-linux-x86_64.tar.gz" \
-            -C pkg_root/usr/local/bin wireseal
+            -C pkg_root/usr/local/bin WireSeal wireseal
 
       - uses: actions/upload-artifact@v4
         with:
@@ -167,7 +180,7 @@ jobs:
             dist/release/*.tar.gz
 
   # ─────────────────────────────────────────────────────────────────────────
-  # 2b. macOS — .app bundle in .dmg + .pkg installer + .tar.gz
+  # 2b. macOS — .app bundle in .pkg installer + .tar.gz
   # ─────────────────────────────────────────────────────────────────────────
   package-macos:
     needs: build
@@ -175,14 +188,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Download macOS binary
+      - name: Download macOS binaries
         uses: actions/download-artifact@v4
         with:
-          name: wireseal-macos-arm64
+          name: binaries-macos-latest
           path: dist/release
 
-      - name: Make binary executable
-        run: chmod +x dist/release/wireseal-macos-arm64
+      - name: Make binaries executable
+        run: |
+          chmod +x dist/release/WireSeal-macos-arm64
+          chmod +x dist/release/wireseal-cli-macos-arm64
 
       - name: Compute version
         id: ver
@@ -198,10 +213,10 @@ jobs:
           mkdir -p "$APP/Contents/MacOS"
           mkdir -p "$APP/Contents/Resources"
 
-          cp dist/release/wireseal-macos-arm64 "$APP/Contents/MacOS/WireSeal"
+          cp dist/release/WireSeal-macos-arm64 "$APP/Contents/MacOS/WireSeal"
           chmod +x "$APP/Contents/MacOS/WireSeal"
 
-          # Create .icns from PNG (macOS sips + iconutil)
+          # Create .icns from PNG
           ICONSET="$RUNNER_TEMP/WireSeal.iconset"
           mkdir -p "$ICONSET"
           for size in 16 32 64 128 256 512; do
@@ -213,7 +228,6 @@ jobs:
           done
           iconutil -c icns "$ICONSET" -o "$APP/Contents/Resources/WireSeal.icns"
 
-          # Info.plist
           cat > "$APP/Contents/Info.plist" <<PLIST
           <?xml version="1.0" encoding="UTF-8"?>
           <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
@@ -244,16 +258,17 @@ jobs:
           </plist>
           PLIST
 
-      - name: Build .pkg installer (installs .app to /Applications)
+      - name: Build .pkg installer (GUI .app + CLI symlink)
         run: |
           VERSION="${{ steps.ver.outputs.version }}"
 
           mkdir -p payload/Applications
           cp -R dist/release/WireSeal.app payload/Applications/
 
-          # Also install CLI symlink
+          # CLI binary + GUI symlink
           mkdir -p payload/usr/local/bin
-          ln -s /Applications/WireSeal.app/Contents/MacOS/WireSeal payload/usr/local/bin/wireseal
+          cp dist/release/wireseal-cli-macos-arm64 payload/usr/local/bin/wireseal
+          chmod +x payload/usr/local/bin/wireseal
 
           pkgbuild \
             --root payload \
@@ -285,14 +300,15 @@ jobs:
 
           rm dist/release/wireseal-component.pkg
 
-      - name: Build .tar.gz (Homebrew / manual install)
+      - name: Build .tar.gz (includes both GUI and CLI)
         run: |
           VERSION="${{ steps.ver.outputs.version }}"
           mkdir -p tarball_root/bin
-          cp dist/release/wireseal-macos-arm64 tarball_root/bin/wireseal
-          chmod +x tarball_root/bin/wireseal
+          cp dist/release/WireSeal-macos-arm64 tarball_root/bin/WireSeal
+          cp dist/release/wireseal-cli-macos-arm64 tarball_root/bin/wireseal
+          chmod +x tarball_root/bin/*
           tar -czf "dist/release/wireseal-${VERSION}-macos-arm64.tar.gz" \
-            -C tarball_root/bin wireseal
+            -C tarball_root/bin WireSeal wireseal
 
       - uses: actions/upload-artifact@v4
         with:
@@ -302,7 +318,7 @@ jobs:
             dist/release/*.tar.gz
 
   # ─────────────────────────────────────────────────────────────────────────
-  # 2c. Windows installer — NSIS .exe setup wizard + plain .zip
+  # 2c. Windows — NSIS setup (GUI + CLI) + portable .zip
   # ─────────────────────────────────────────────────────────────────────────
   package-windows:
     needs: build
@@ -310,10 +326,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Download Windows binary
+      - name: Download Windows binaries
         uses: actions/download-artifact@v4
         with:
-          name: wireseal-windows-x86_64.exe
+          name: binaries-windows-latest
           path: dist/release
 
       - name: Compute version
@@ -332,16 +348,17 @@ jobs:
         run: |
           $version = "${{ steps.ver.outputs.version }}"
           $nsis    = "C:\Program Files (x86)\NSIS\makensis.exe"
-          $src     = (Resolve-Path "dist\release\wireseal-windows-x86_64.exe").Path
-          & $nsis /DVERSION="$version" "/DSRCBINARY=$src" installer\wireseal.nsi
+          $guiSrc  = (Resolve-Path "dist\release\WireSeal-windows-x86_64.exe").Path
+          $cliSrc  = (Resolve-Path "dist\release\wireseal-cli-windows-x86_64.exe").Path
+          & $nsis /DVERSION="$version" "/DSRCBINARY=$guiSrc" "/DCLIBINARY=$cliSrc" installer\wireseal.nsi
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-      - name: Build .zip (portable / manual install)
+      - name: Build .zip (portable — GUI + CLI)
         shell: powershell
         run: |
           $version = "${{ steps.ver.outputs.version }}"
           Compress-Archive `
-            -Path "dist\release\wireseal-windows-x86_64.exe" `
+            -Path "dist\release\WireSeal-windows-x86_64.exe","dist\release\wireseal-cli-windows-x86_64.exe" `
             -DestinationPath "dist\release\wireseal-${version}-windows-x86_64.zip"
 
       - uses: actions/upload-artifact@v4
@@ -358,8 +375,8 @@ jobs:
     needs: [build, package-linux, package-macos, package-windows]
     runs-on: ubuntu-latest
     permissions:
-      contents: write    # upload to GitHub Release
-      id-token: write    # Sigstore keyless OIDC signing
+      contents: write
+      id-token: write
 
     steps:
       - name: Download all artifacts
@@ -377,14 +394,17 @@ jobs:
           sha256sum * > sha256sums.txt
           echo "=== sha256sums.txt ===" && cat sha256sums.txt
 
-      - name: Sign with Sigstore CLI (keyless — no stored private key)
+      - name: Sign with Sigstore CLI (keyless)
         run: |
           pip install --quiet sigstore
           cd dist/release
           sigstore sign \
-            wireseal-linux-x86_64 \
-            wireseal-macos-arm64 \
-            wireseal-windows-x86_64.exe \
+            WireSeal-linux-x86_64 \
+            WireSeal-macos-arm64 \
+            WireSeal-windows-x86_64.exe \
+            wireseal-cli-linux-x86_64 \
+            wireseal-cli-macos-arm64 \
+            wireseal-cli-windows-x86_64.exe \
             wireseal_*_amd64.deb \
             wireseal-*-1.x86_64.rpm \
             wireseal-*-linux-x86_64.tar.gz \

@@ -12,13 +12,17 @@ Unicode True
   !define VERSION "dev"
 !endif
 !ifndef SRCBINARY
-  !define SRCBINARY "..\dist\release\wireseal-windows-x86_64.exe"
+  !define SRCBINARY "..\dist\release\WireSeal-windows-x86_64.exe"
+!endif
+!ifndef CLIBINARY
+  !define CLIBINARY "..\dist\release\wireseal-cli-windows-x86_64.exe"
 !endif
 
 !define APPNAME     "WireSeal"
 !define PUBLISHER   "WireSeal Contributors"
 !define URL         "https://github.com/prashanth-7861/WireSeal"
 !define EXENAME     "WireSeal.exe"
+!define CLINAME     "wireseal.exe"
 !define REGKEY      "Software\Microsoft\Windows\CurrentVersion\Uninstall\WireSeal"
 !define INSTREGKEY  "Software\WireSeal"
 
@@ -61,8 +65,11 @@ Section "WireSeal (required)" SecMain
 
   SetOutPath "$INSTDIR"
 
-  ; Copy the single-file binary
+  ; Copy the GUI desktop app
   File /oname=${EXENAME} "${SRCBINARY}"
+
+  ; Copy the CLI binary (for terminal usage)
+  File /oname=${CLINAME} "${CLIBINARY}"
 
   ; Create uninstaller
   WriteUninstaller "$INSTDIR\uninstall.exe"
@@ -111,6 +118,7 @@ SectionEnd
 Section "Uninstall"
   ; Remove files
   Delete "$INSTDIR\${EXENAME}"
+  Delete "$INSTDIR\${CLINAME}"
   Delete "$INSTDIR\uninstall.exe"
   RMDir  "$INSTDIR"
 

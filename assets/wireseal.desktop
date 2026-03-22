@@ -2,7 +2,7 @@
 Type=Application
 Name=WireSeal
 Comment=WireGuard server automation with zero plaintext secrets on disk
-Exec=/usr/local/bin/wireseal
+Exec=/usr/local/bin/WireSeal
 Icon=wireseal
 Categories=Network;System;Security;
 Terminal=false
