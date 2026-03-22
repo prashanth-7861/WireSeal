@@ -849,10 +849,23 @@ class _Handler(BaseHTTPRequestHandler):
 
 def serve(host: str = "127.0.0.1", port: int = 8080) -> None:
     """Start the WireSeal API server (blocking)."""
+    import threading
+    import webbrowser
+
     server = ThreadingHTTPServer((host, port), _Handler)
-    print(f"[wireseal] API server listening on http://{host}:{port}")
-    print(f"[wireseal] Open your browser at http://{host}:{port}/")
+    url = f"http://{host}:{port}/"
+    print(f"[wireseal] API server listening on {url}")
     print("[wireseal] Press Ctrl+C to stop.")
+
+    # Open the dashboard in the default browser after a short delay
+    # so the server is ready to accept connections first.
+    def _open_browser() -> None:
+        import time
+        time.sleep(0.8)
+        webbrowser.open(url)
+
+    threading.Thread(target=_open_browser, daemon=True).start()
+
     try:
         server.serve_forever()
     except KeyboardInterrupt:

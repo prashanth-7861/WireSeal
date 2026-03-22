@@ -35,10 +35,14 @@ DEFAULT_AUDIT_LOG_PATH = DEFAULT_VAULT_DIR / "audit.log"
 # ---------------------------------------------------------------------------
 
 
-@click.group()
+@click.group(invoke_without_command=True)
 @click.version_option()
-def cli() -> None:
+@click.pass_context
+def cli(ctx: click.Context) -> None:
     """wireseal: zero-secrets WireGuard server automation."""
+    if ctx.invoked_subcommand is None:
+        # Double-clicked / run with no arguments — launch the web dashboard
+        ctx.invoke(serve)
 
 
 # ===========================================================================
