@@ -1933,14 +1933,97 @@ def update_endpoint(ip_or_host: str | None) -> None:
 # serve  — web dashboard + REST API
 # ---------------------------------------------------------------------------
 
+_PID_FILE = Path.home() / ".wireseal" / "server.pid"
+
+
+def _pid_file_path() -> Path:
+    return _PID_FILE
+
+
+def _write_pid(pid: int) -> None:
+    _PID_FILE.parent.mkdir(parents=True, exist_ok=True)
+    _PID_FILE.write_text(str(pid))
+
+
+def _read_pid() -> int | None:
+    try:
+        return int(_PID_FILE.read_text().strip())
+    except (FileNotFoundError, ValueError):
+        return None
+
+
+def _spawn_background(host: str, port: int) -> None:
+    """Re-launch the current executable as a detached background process."""
+    import platform
+
+    exe = sys.executable
+    # When running as a PyInstaller one-file binary sys.argv[0] is the binary
+    if getattr(sys, "frozen", False):
+        cmd = [sys.argv[0], "serve", "--host", host, "--port", str(port)]
+    else:
+        cmd = [exe, "-m", "wireseal", "serve", "--host", host, "--port", str(port)]
+
+    if platform.system() == "Windows":
+        import ctypes
+        DETACHED_PROCESS = 0x00000008
+        CREATE_NEW_PROCESS_GROUP = 0x00000200
+        proc = subprocess.Popen(
+            cmd,
+            creationflags=DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            close_fds=True,
+        )
+    else:
+        proc = subprocess.Popen(
+            cmd,
+            start_new_session=True,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            close_fds=True,
+        )
+
+    _write_pid(proc.pid)
+    click.echo(f"[wireseal] Server started in background (PID {proc.pid})")
+    click.echo(f"[wireseal] Dashboard: http://{host}:{port}/")
+    click.echo(f"[wireseal] Stop with: wireseal serve --stop")
+
 
 @cli.command("serve")
 @click.option("--host", default="127.0.0.1", show_default=True,
               help="Address to bind (use 0.0.0.0 for LAN access)")
 @click.option("--port", default=8080, type=int, show_default=True,
               help="Port for the web dashboard")
-def serve(host: str, port: int) -> None:
+@click.option("--background", "-d", is_flag=True, default=False,
+              help="Run server in the background (detached process)")
+@click.option("--stop", is_flag=True, default=False,
+              help="Stop a background server started with --background")
+def serve(host: str, port: int, background: bool, stop: bool) -> None:
     """Start the WireSeal web dashboard and REST API server."""
+    if stop:
+        pid = _read_pid()
+        if pid is None:
+            click.echo("[wireseal] No background server found (no PID file).")
+            return
+        try:
+            if sys.platform == "win32":
+                subprocess.run(["taskkill", "/PID", str(pid), "/F"],
+                               check=True, capture_output=True)
+            else:
+                os.kill(pid, 15)  # SIGTERM
+            _PID_FILE.unlink(missing_ok=True)
+            click.echo(f"[wireseal] Server (PID {pid}) stopped.")
+        except (ProcessLookupError, subprocess.CalledProcessError):
+            _PID_FILE.unlink(missing_ok=True)
+            click.echo(f"[wireseal] Process {pid} was not running (PID file removed).")
+        return
+
+    if background:
+        _spawn_background(host, port)
+        return
+
     from wireseal.api import serve as _serve
     _serve(host=host, port=port)
 

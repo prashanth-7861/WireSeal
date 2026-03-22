@@ -48,13 +48,26 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Build React dashboard
+        working-directory: Dashboard
+        run: |
+          npm ci
+          npm run build
+
       - uses: actions/setup-python@v5
         with:
           python-version: "3.14"
+
       - name: Install dependencies
         run: |
           pip install -r requirements-dev.txt
           pip install -e .
+
       - name: Build binary
         run: pyinstaller wireseal.spec
       - name: Stage binary for upload
