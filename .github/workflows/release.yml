@@ -62,7 +62,8 @@ jobs:
         shell: bash
         run: |
           mkdir -p dist/release
-          find dist -maxdepth 1 \( -name "wireseal" -o -name "wireseal.exe" \) \
+          # PyInstaller now outputs "WireSeal" / "WireSeal.exe" (console=False, name='WireSeal')
+          find dist -maxdepth 1 \( -name "WireSeal" -o -name "WireSeal.exe" \) \
             -exec cp {} dist/release/${{ matrix.artifact_name }} \;
 
       - uses: actions/upload-artifact@v4
@@ -102,9 +103,18 @@ jobs:
 
       - name: Prepare payload directory
         run: |
+          # Binary
           mkdir -p pkg_root/usr/local/bin
           cp dist/release/wireseal-linux-x86_64 pkg_root/usr/local/bin/wireseal
           chmod +x pkg_root/usr/local/bin/wireseal
+
+          # Desktop entry (app menu integration)
+          mkdir -p pkg_root/usr/share/applications
+          cp assets/wireseal.desktop pkg_root/usr/share/applications/wireseal.desktop
+
+          # Application icon
+          mkdir -p pkg_root/usr/share/icons/hicolor/256x256/apps
+          cp assets/wireseal.png pkg_root/usr/share/icons/hicolor/256x256/apps/wireseal.png
 
       - name: Build .deb package (Debian / Ubuntu)
         run: |
@@ -160,7 +170,7 @@ jobs:
             dist/release/*.tar.gz
 
   # ─────────────────────────────────────────────────────────────────────────
-  # 2b. macOS package — .pkg installer + plain .tar.gz
+  # 2b. macOS — .app bundle in .dmg + .pkg installer + .tar.gz
   # ─────────────────────────────────────────────────────────────────────────
   package-macos:
     needs: build
@@ -183,17 +193,74 @@ jobs:
           V="${{ github.ref_name }}"
           echo "version=${V#v}" >> "$GITHUB_OUTPUT"
 
-      - name: Build .pkg installer
+      - name: Create .app bundle
+        run: |
+          VERSION="${{ steps.ver.outputs.version }}"
+          APP="dist/release/WireSeal.app"
+
+          mkdir -p "$APP/Contents/MacOS"
+          mkdir -p "$APP/Contents/Resources"
+
+          cp dist/release/wireseal-macos-arm64 "$APP/Contents/MacOS/WireSeal"
+          chmod +x "$APP/Contents/MacOS/WireSeal"
+
+          # Create .icns from PNG (macOS sips + iconutil)
+          ICONSET="$RUNNER_TEMP/WireSeal.iconset"
+          mkdir -p "$ICONSET"
+          for size in 16 32 64 128 256 512; do
+            sips -z $size $size assets/wireseal-1024.png --out "$ICONSET/icon_${size}x${size}.png" > /dev/null
+            double=$((size * 2))
+            if [ $double -le 1024 ]; then
+              sips -z $double $double assets/wireseal-1024.png --out "$ICONSET/icon_${size}x${size}@2x.png" > /dev/null
+            fi
+          done
+          iconutil -c icns "$ICONSET" -o "$APP/Contents/Resources/WireSeal.icns"
+
+          # Info.plist
+          cat > "$APP/Contents/Info.plist" <<PLIST
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+            "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>CFBundleName</key>
+            <string>WireSeal</string>
+            <key>CFBundleDisplayName</key>
+            <string>WireSeal</string>
+            <key>CFBundleIdentifier</key>
+            <string>com.wireseal.app</string>
+            <key>CFBundleVersion</key>
+            <string>${VERSION}</string>
+            <key>CFBundleShortVersionString</key>
+            <string>${VERSION}</string>
+            <key>CFBundleExecutable</key>
+            <string>WireSeal</string>
+            <key>CFBundleIconFile</key>
+            <string>WireSeal</string>
+            <key>CFBundlePackageType</key>
+            <string>APPL</string>
+            <key>LSMinimumSystemVersion</key>
+            <string>11.0</string>
+            <key>NSHighResolutionCapable</key>
+            <true/>
+          </dict>
+          </plist>
+          PLIST
+
+      - name: Build .pkg installer (installs .app to /Applications)
         run: |
           VERSION="${{ steps.ver.outputs.version }}"
 
+          mkdir -p payload/Applications
+          cp -R dist/release/WireSeal.app payload/Applications/
+
+          # Also install CLI symlink
           mkdir -p payload/usr/local/bin
-          cp dist/release/wireseal-macos-arm64 payload/usr/local/bin/wireseal
-          chmod +x payload/usr/local/bin/wireseal
+          ln -s /Applications/WireSeal.app/Contents/MacOS/WireSeal payload/usr/local/bin/wireseal
 
           pkgbuild \
             --root payload \
-            --identifier com.wireseal.cli \
+            --identifier com.wireseal.app \
             --version "$VERSION" \
             --install-location / \
             dist/release/wireseal-component.pkg
@@ -203,14 +270,14 @@ jobs:
           <installer-gui-script minSpecVersion="2">
             <title>WireSeal</title>
             <options customize="never" require-scripts="false" hostArchitectures="arm64"/>
-            <pkg-ref id="com.wireseal.cli"/>
+            <pkg-ref id="com.wireseal.app"/>
             <choices-outline>
-              <line choice="com.wireseal.cli"/>
+              <line choice="com.wireseal.app"/>
             </choices-outline>
-            <choice id="com.wireseal.cli" visible="false">
-              <pkg-ref id="com.wireseal.cli"/>
+            <choice id="com.wireseal.app" visible="false">
+              <pkg-ref id="com.wireseal.app"/>
             </choice>
-            <pkg-ref id="com.wireseal.cli" version="${VERSION}" onConclusion="none">wireseal-component.pkg</pkg-ref>
+            <pkg-ref id="com.wireseal.app" version="${VERSION}" onConclusion="none">wireseal-component.pkg</pkg-ref>
           </installer-gui-script>
           EOF
 

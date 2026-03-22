@@ -5,9 +5,10 @@
 # Build: pyinstaller wireseal.spec
 #
 # Notes:
-#   upx=False   -- UPX triggers AV false positives on some platforms (PyInstaller pitfall)
-#   strip=False -- strip can corrupt binaries on macOS
-#   console=True -- CLI tool; never use --windowed / noconsole
+#   upx=False    -- UPX triggers AV false positives on some platforms
+#   strip=False  -- strip can corrupt binaries on macOS
+#   console=False -- desktop GUI app (pywebview native window);
+#                    CLI use is handled via AttachConsole at startup
 #   onefile=True -- single-file binary for all platforms
 #
 # Windows: Windows Defender may flag the binary due to the PyInstaller bootloader.
@@ -19,7 +20,8 @@
 # them statically. They must be listed explicitly.
 #
 # pyinstaller-hooks-contrib >= 2026.0 handles cryptography and argon2 automatically.
-# No custom hook files are needed.
+
+import sys
 
 block_cipher = None
 
@@ -61,17 +63,18 @@ exe = EXE(
     a.zipfiles,
     a.datas,
     [],
-    name='wireseal',
+    name='WireSeal',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
     upx=False,
     upx_exclude=[],
     runtime_tmpdir=None,
-    console=True,
+    console=False,
     disable_windowed_traceback=False,
     argv_emulation=False,
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
+    icon='assets/wireseal.ico' if sys.platform == 'win32' else None,
 )

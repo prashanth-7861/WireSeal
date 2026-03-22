@@ -20,6 +20,22 @@ import sys
 import time
 from pathlib import Path
 
+# ---------------------------------------------------------------------------
+# Windows console reattach — when the binary is built as a GUI app
+# (console=False) but invoked from cmd.exe / PowerShell with CLI args,
+# reattach to the parent console so stdout/stderr reach the terminal.
+# When double-clicked (no parent console), this is a no-op.
+# ---------------------------------------------------------------------------
+if sys.platform == "win32" and len(sys.argv) > 1:
+    try:
+        import ctypes
+        _ATTACH_PARENT_PROCESS = -1
+        if ctypes.windll.kernel32.AttachConsole(_ATTACH_PARENT_PROCESS):
+            sys.stdout = open("CONOUT$", "w")
+            sys.stderr = open("CONOUT$", "w")
+    except Exception:
+        pass
+
 import click
 
 # ---------------------------------------------------------------------------

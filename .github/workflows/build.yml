@@ -78,7 +78,7 @@ jobs:
         shell: bash
         run: |
           mkdir -p dist/release
-          find dist -maxdepth 1 \( -name "wireseal" -o -name "wireseal.exe" \) | \
+          find dist -maxdepth 1 \( -name "WireSeal" -o -name "WireSeal.exe" \) | \
             xargs -I{} cp {} dist/release/${{ matrix.artifact_name }}
       - uses: actions/upload-artifact@v4
         with:

@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=WireSeal
+Comment=WireGuard server automation with zero plaintext secrets on disk
+Exec=/usr/local/bin/wireseal
+Icon=wireseal
+Categories=Network;System;Security;
+Terminal=false
+StartupNotify=true
+Keywords=wireguard;vpn;tunnel;server;
