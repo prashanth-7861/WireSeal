@@ -85,7 +85,7 @@ jobs:
           find dist -maxdepth 1 \( -name "WireSeal" -o -name "WireSeal.exe" \) | \
             xargs -I{} cp {} dist/release/${{ matrix.gui_artifact }}
           # CLI binary (wireseal / wireseal.exe)
-          find dist -maxdepth 1 \( -name "wireseal" -o -name "wireseal.exe" \) | \
+          find dist -maxdepth 1 \( -name "wireseal-cli" -o -name "wireseal-cli.exe" \) | \
             xargs -I{} cp {} dist/release/${{ matrix.cli_artifact }}
 
       - uses: actions/upload-artifact@v4

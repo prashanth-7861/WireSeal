@@ -67,7 +67,7 @@ jobs:
           mkdir -p dist/release
           find dist -maxdepth 1 \( -name "WireSeal" -o -name "WireSeal.exe" \) \
             -exec cp {} dist/release/${{ matrix.gui_name }} \;
-          find dist -maxdepth 1 \( -name "wireseal" -o -name "wireseal.exe" \) \
+          find dist -maxdepth 1 \( -name "wireseal-cli" -o -name "wireseal-cli.exe" \) \
             -exec cp {} dist/release/${{ matrix.cli_name }} \;
 
       - uses: actions/upload-artifact@v4

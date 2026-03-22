@@ -41,7 +41,7 @@ exe = EXE(
     a.zipfiles,
     a.datas,
     [],
-    name='wireseal',
+    name='wireseal-cli',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
