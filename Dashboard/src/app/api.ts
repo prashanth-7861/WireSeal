@@ -93,7 +93,7 @@ export const api = {
     _fetch<VaultInfo>("GET", "/vault-info"),
 
   init: (passphrase: string, opts?: { subnet?: string; port?: number; endpoint?: string }) =>
-    _fetch<{ ok: boolean; server_ip: string; subnet: string; public_key: string; endpoint: string }>(
+    _fetch<{ ok: boolean; server_ip: string; subnet: string; public_key: string; endpoint: string; warnings?: string[] | null }>(
       "POST", "/init", { passphrase, ...opts }
     ),
 

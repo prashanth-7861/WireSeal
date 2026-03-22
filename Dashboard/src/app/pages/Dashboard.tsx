@@ -25,6 +25,7 @@ export function Dashboard() {
   // Post-init success state
   const [initResult, setInitResult] = useState<{
     server_ip: string; subnet: string; public_key: string; endpoint: string | null;
+    warnings?: string[] | null;
   } | null>(null);
 
   // ── Vault info probe ─────────────────────────────────────────────────────
@@ -110,6 +111,7 @@ export function Dashboard() {
           subnet: result.subnet,
           public_key: result.public_key,
           endpoint: result.endpoint,
+          warnings: result.warnings,
         });
       } else {
         await api.unlock(passphrase);
@@ -210,6 +212,17 @@ export function Dashboard() {
                       </div>
                     )}
                   </div>
+                  {initResult.warnings && initResult.warnings.length > 0 && (
+                    <div className="bg-yellow-50 border border-yellow-200 rounded-lg p-3 mt-3">
+                      <p className="text-yellow-800 text-sm font-medium mb-1">Setup warnings:</p>
+                      <ul className="text-yellow-700 text-xs space-y-1 list-disc list-inside">
+                        {initResult.warnings.map((w, i) => <li key={i}>{w}</li>)}
+                      </ul>
+                      <p className="text-yellow-600 text-xs mt-2">
+                        The vault was created successfully. Run WireSeal as Administrator to complete WireGuard setup.
+                      </p>
+                    </div>
+                  )}
                   <p className="text-green-600 text-sm mt-4">Head to the <strong>Clients</strong> page to add your first VPN client.</p>
                 </div>
                 <button

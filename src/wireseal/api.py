@@ -178,7 +178,6 @@ def _h_init(req: "_Handler", _groups: tuple) -> dict:
     from wireseal.core.keygen            import generate_keypair
     from wireseal.core.ip_pool           import IPPool
     from wireseal.core.config_builder    import ConfigBuilder
-    from wireseal.platform.detect        import get_adapter
 
     passphrase = SecretBytes(bytearray(passphrase_str.encode()))
     try:
@@ -212,36 +211,74 @@ def _h_init(req: "_Handler", _groups: tuple) -> dict:
             "integrity": {},
         }
 
+        # ── Step 1: Create the encrypted vault (always succeeds or fails fast) ──
         vault = Vault.create(_VAULT_PATH, passphrase, initial_state)
 
-        adapter = get_adapter()
-        adapter.check_privileges()
-
-        config = ConfigBuilder().render_server_config(
-            server_private_key=priv_key_str,
-            server_ip=server_ip,
-            prefix_length=int(pool.subnet_str.split("/")[1]),
-            server_port=port,
-            clients=[],
-        )
-        adapter.deploy_config(config)
-
-        config_hash = hashlib.sha256(config.encode()).hexdigest()
-        with vault.open(passphrase) as st:
-            st.integrity["server"] = config_hash
-            vault.save(st, passphrase)
-
-        adapter.install_wireguard()
-        adapter.apply_firewall_rules(port, _WG_IFACE, pool.subnet_str)
-        adapter.enable_tunnel_service(_WG_IFACE)
-
-        AuditLog(_AUDIT_PATH).log("init", {"subnet": subnet, "port": port})
-
+        # Unlock the session immediately so the dashboard is usable even if
+        # platform operations below fail (WireGuard not installed, not admin, etc.)
         with vault.open(passphrase) as st:
             cache = _refresh_cache(st)
         with _lock:
             _session.update(vault=vault, passphrase=passphrase, cache=cache)
         passphrase = None  # ownership transferred to session
+
+        AuditLog(_AUDIT_PATH).log("init", {"subnet": subnet, "port": port})
+
+        # ── Step 2: Platform setup (best-effort — failures are warnings) ────────
+        # These operations require admin privileges and WireGuard to be installed.
+        # If they fail, the vault is still created and the dashboard works.
+        warnings_list: list[str] = []
+
+        try:
+            from wireseal.platform.detect import get_adapter
+            adapter = get_adapter()
+            adapter.check_privileges()
+        except Exception as exc:
+            warnings_list.append(f"Not running as admin: {exc}")
+            # Cannot proceed with platform setup without admin
+            return {
+                "ok":         True,
+                "server_ip":  server_ip,
+                "subnet":     pool.subnet_str,
+                "public_key": pub_key_str,
+                "endpoint":   endpoint,
+                "warnings":   warnings_list,
+            }
+
+        try:
+            config = ConfigBuilder().render_server_config(
+                server_private_key=priv_key_str,
+                server_ip=server_ip,
+                prefix_length=int(pool.subnet_str.split("/")[1]),
+                server_port=port,
+                clients=[],
+            )
+            adapter.deploy_config(config)
+
+            config_hash = hashlib.sha256(config.encode()).hexdigest()
+            with _lock:
+                v = _session["vault"]
+                p = _session["passphrase"]
+            with v.open(p) as st:
+                st.integrity["server"] = config_hash
+                v.save(st, p)
+        except Exception as exc:
+            warnings_list.append(f"Config deploy failed: {exc}")
+
+        try:
+            adapter.install_wireguard()
+        except Exception as exc:
+            warnings_list.append(f"WireGuard install skipped: {exc}")
+
+        try:
+            adapter.apply_firewall_rules(port, _WG_IFACE, pool.subnet_str)
+        except Exception as exc:
+            warnings_list.append(f"Firewall rules skipped: {exc}")
+
+        try:
+            adapter.enable_tunnel_service(_WG_IFACE)
+        except Exception as exc:
+            warnings_list.append(f"Tunnel service failed: {exc}")
 
         return {
             "ok":         True,
@@ -249,6 +286,7 @@ def _h_init(req: "_Handler", _groups: tuple) -> dict:
             "subnet":     pool.subnet_str,
             "public_key": pub_key_str,
             "endpoint":   endpoint,
+            "warnings":   warnings_list if warnings_list else None,
         }
     except _ApiError:
         raise
