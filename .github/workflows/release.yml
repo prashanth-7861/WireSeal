@@ -9,7 +9,7 @@ env:
 
 jobs:
   # ─────────────────────────────────────────────────────────────────────────
-  # 1. Build raw standalone binaries (PyInstaller one-file)
+  # 1. Build raw standalone binaries (PyInstaller one-file, dashboard bundled)
   # ─────────────────────────────────────────────────────────────────────────
   build:
     strategy:
@@ -25,9 +25,20 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-python@v5
         with:
           python-version: "3.14"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Build React dashboard
+        working-directory: Dashboard
+        run: |
+          npm ci
+          npm run build
 
       - name: Install dependencies (with hash verification)
         run: pip install --require-hashes -r requirements-dev.txt
@@ -40,7 +51,7 @@ jobs:
         env:
           WG_ENFORCE_TIMING: "1"
 
-      - name: Build standalone binary
+      - name: Build standalone binary (with bundled dashboard)
         run: pyinstaller wireseal.spec
 
       - name: Stage binary
@@ -91,7 +102,7 @@ jobs:
           cp dist/release/wireseal-linux-x86_64 pkg_root/usr/local/bin/wireseal
           chmod +x pkg_root/usr/local/bin/wireseal
 
-      - name: Build .deb package
+      - name: Build .deb package (Debian / Ubuntu)
         run: |
           fpm \
             -s dir \
@@ -110,7 +121,7 @@ jobs:
             --package "dist/release/wireseal_${{ steps.ver.outputs.version }}_amd64.deb" \
             .
 
-      - name: Build .rpm package
+      - name: Build .rpm package (Fedora / RHEL / Rocky / openSUSE)
         run: |
           fpm \
             -s dir \
@@ -128,15 +139,22 @@ jobs:
             --package "dist/release/wireseal-${{ steps.ver.outputs.version }}-1.x86_64.rpm" \
             .
 
+      - name: Build .tar.gz (Arch Linux / Alpine / generic)
+        run: |
+          VERSION="${{ steps.ver.outputs.version }}"
+          tar -czf "dist/release/wireseal-${VERSION}-linux-x86_64.tar.gz" \
+            -C pkg_root/usr/local/bin wireseal
+
       - uses: actions/upload-artifact@v4
         with:
           name: linux-packages
           path: |
             dist/release/*.deb
             dist/release/*.rpm
+            dist/release/*.tar.gz
 
   # ─────────────────────────────────────────────────────────────────────────
-  # 2b. macOS package — .pkg installer (installs to /usr/local/bin)
+  # 2b. macOS package — .pkg installer + plain .tar.gz
   # ─────────────────────────────────────────────────────────────────────────
   package-macos:
     needs: build
@@ -163,12 +181,10 @@ jobs:
         run: |
           VERSION="${{ steps.ver.outputs.version }}"
 
-          # Build payload tree
           mkdir -p payload/usr/local/bin
           cp dist/release/wireseal-macos-arm64 payload/usr/local/bin/wireseal
           chmod +x payload/usr/local/bin/wireseal
 
-          # Build component package
           pkgbuild \
             --root payload \
             --identifier com.wireseal.cli \
@@ -176,7 +192,6 @@ jobs:
             --install-location / \
             dist/release/wireseal-component.pkg
 
-          # Write distribution XML to a temp file (productbuild does not accept stdin)
           cat > /tmp/distribution.xml <<EOF
           <?xml version="1.0" encoding="utf-8"?>
           <installer-gui-script minSpecVersion="2">
@@ -200,13 +215,24 @@ jobs:
 
           rm dist/release/wireseal-component.pkg
 
+      - name: Build .tar.gz (Homebrew / manual install)
+        run: |
+          VERSION="${{ steps.ver.outputs.version }}"
+          mkdir -p tarball_root/bin
+          cp dist/release/wireseal-macos-arm64 tarball_root/bin/wireseal
+          chmod +x tarball_root/bin/wireseal
+          tar -czf "dist/release/wireseal-${VERSION}-macos-arm64.tar.gz" \
+            -C tarball_root/bin wireseal
+
       - uses: actions/upload-artifact@v4
         with:
           name: macos-package
-          path: dist/release/*.pkg
+          path: |
+            dist/release/*.pkg
+            dist/release/*.tar.gz
 
   # ─────────────────────────────────────────────────────────────────────────
-  # 2c. Windows installer — NSIS .exe setup wizard
+  # 2c. Windows installer — NSIS .exe setup wizard + plain .zip
   # ─────────────────────────────────────────────────────────────────────────
   package-windows:
     needs: build
@@ -236,15 +262,24 @@ jobs:
         run: |
           $version = "${{ steps.ver.outputs.version }}"
           $nsis    = "C:\Program Files (x86)\NSIS\makensis.exe"
-          # Resolve absolute path — NSIS File directive is relative to the .nsi file location
           $src     = (Resolve-Path "dist\release\wireseal-windows-x86_64.exe").Path
           & $nsis /DVERSION="$version" "/DSRCBINARY=$src" installer\wireseal.nsi
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
+      - name: Build .zip (portable / manual install)
+        shell: powershell
+        run: |
+          $version = "${{ steps.ver.outputs.version }}"
+          Compress-Archive `
+            -Path "dist\release\wireseal-windows-x86_64.exe" `
+            -DestinationPath "dist\release\wireseal-${version}-windows-x86_64.zip"
+
       - uses: actions/upload-artifact@v4
         with:
           name: windows-installer
-          path: dist/release/*-setup.exe
+          path: |
+            dist/release/*-setup.exe
+            dist/release/*.zip
 
   # ─────────────────────────────────────────────────────────────────────────
   # 3. Sign all artifacts with Sigstore (keyless) and publish to GitHub Release
@@ -282,8 +317,11 @@ jobs:
             wireseal-windows-x86_64.exe \
             wireseal_*_amd64.deb \
             wireseal-*-1.x86_64.rpm \
+            wireseal-*-linux-x86_64.tar.gz \
             wireseal-*-macos-arm64.pkg \
-            wireseal-*-windows-x86_64-setup.exe
+            wireseal-*-macos-arm64.tar.gz \
+            wireseal-*-windows-x86_64-setup.exe \
+            wireseal-*-windows-x86_64.zip
 
       - name: Upload all files to GitHub Release
         env:

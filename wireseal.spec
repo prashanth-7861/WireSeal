@@ -29,6 +29,7 @@ a = Analysis(
     binaries=[],
     datas=[
         ('src/wireseal/templates', 'wireseal/templates'),
+        ('Dashboard/dist',         'dashboard'),
     ],
     hiddenimports=[
         'wireseal.platform.linux',

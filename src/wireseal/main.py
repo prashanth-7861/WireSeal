@@ -1929,5 +1929,21 @@ def update_endpoint(ip_or_host: str | None) -> None:
 # Entry point
 # ===========================================================================
 
+# ---------------------------------------------------------------------------
+# serve  — web dashboard + REST API
+# ---------------------------------------------------------------------------
+
+
+@cli.command("serve")
+@click.option("--host", default="127.0.0.1", show_default=True,
+              help="Address to bind (use 0.0.0.0 for LAN access)")
+@click.option("--port", default=8080, type=int, show_default=True,
+              help="Port for the web dashboard")
+def serve(host: str, port: int) -> None:
+    """Start the WireSeal web dashboard and REST API server."""
+    from wireseal.api import serve as _serve
+    _serve(host=host, port=port)
+
+
 if __name__ == "__main__":
     cli()
