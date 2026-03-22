@@ -514,9 +514,13 @@ def _h_add_client(req: "_Handler", _groups: tuple) -> dict:
             server_port=state.server["port"],
             clients=peers,
         )
-        adapter = get_adapter()
-        adapter.deploy_config(server_config)
-        _reload_wireguard()
+        wg_warning = None
+        try:
+            adapter = get_adapter()
+            adapter.deploy_config(server_config)
+            _reload_wireguard()
+        except Exception as exc:
+            wg_warning = str(exc)
 
         state.clients[name] = {
             "private_key": priv_key_str,
@@ -534,7 +538,10 @@ def _h_add_client(req: "_Handler", _groups: tuple) -> dict:
         with _lock:
             _session["cache"] = _refresh_cache(state)
 
-    return {"name": name, "ip": allocated_ip}
+    result: dict = {"name": name, "ip": allocated_ip}
+    if wg_warning:
+        result["warning"] = f"Client added to vault but WireGuard reload failed: {wg_warning}"
+    return result
 
 
 def _h_remove_client(req: "_Handler", groups: tuple) -> dict:
@@ -577,9 +584,12 @@ def _h_remove_client(req: "_Handler", groups: tuple) -> dict:
             server_port=state.server["port"],
             clients=peers,
         )
-        adapter = get_adapter()
-        adapter.deploy_config(server_config)
-        _reload_wireguard()
+        try:
+            adapter = get_adapter()
+            adapter.deploy_config(server_config)
+            _reload_wireguard()
+        except Exception:
+            pass  # best-effort: client is removed from vault regardless
 
         pool = IPPool(state.ip_pool["subnet"])
         pool.load_state(state.ip_pool.get("allocated", {}))
@@ -632,14 +642,19 @@ def _h_client_qr(req: "_Handler", groups: tuple) -> dict:
             server_endpoint=_resolve_client_endpoint(state.server),
         )
 
-    import qrcode
-    qr = qrcode.QRCode(error_correction=qrcode.constants.ERROR_CORRECT_L)
-    qr.add_data(config_str)
-    qr.make(fit=True)
-    img = qr.make_image(fill_color="black", back_color="white")
-    buf = io.BytesIO()
-    img.save(buf, format="PNG")
-    png_b64 = base64.b64encode(buf.getvalue()).decode()
+    try:
+        import qrcode
+        qr = qrcode.QRCode(error_correction=qrcode.constants.ERROR_CORRECT_L)
+        qr.add_data(config_str)
+        qr.make(fit=True)
+        img = qr.make_image(fill_color="black", back_color="white")
+        buf = io.BytesIO()
+        img.save(buf, format="PNG")
+        png_b64 = base64.b64encode(buf.getvalue()).decode()
+    except ImportError:
+        raise _ApiError("QR code generation unavailable — 'qrcode' package not installed", 500)
+    except Exception as exc:
+        raise _ApiError(f"QR code generation failed: {exc}", 500)
 
     return {"name": name, "qr_png_b64": png_b64}
 
@@ -700,13 +715,32 @@ def _h_change_passphrase(req: "_Handler", _groups: tuple) -> dict:
 
 def _h_terminate(req: "_Handler", _groups: tuple) -> dict:
     _require_unlocked()
+    from wireseal.security.audit import AuditLog
+
+    if sys.platform == "win32":
+        # Windows: stop via sc.exe and uninstall the tunnel service
+        svc = f"WireGuardTunnel${_WG_IFACE}"
+        subprocess.run(
+            ["sc.exe", "stop", svc],
+            check=False, capture_output=True, timeout=15,
+            creationflags=_SP_FLAGS,
+        )
+        wg_exe = Path(r"C:\Program Files\WireGuard\wireguard.exe")
+        if wg_exe.exists():
+            subprocess.run(
+                [str(wg_exe), "/uninstalltunnelservice", _WG_IFACE],
+                check=False, capture_output=True, timeout=15,
+                creationflags=_SP_FLAGS,
+            )
+        AuditLog(_AUDIT_PATH).log("terminate", {"interface": _WG_IFACE})
+        return {"ok": True}
+
+    # Linux/macOS: use wg-quick down
     try:
         subprocess.run(
             ["wg-quick", "down", _WG_IFACE],
             check=True, capture_output=True, timeout=15,
-            creationflags=_SP_FLAGS,
         )
-        from wireseal.security.audit import AuditLog
         AuditLog(_AUDIT_PATH).log("terminate", {"interface": _WG_IFACE})
         return {"ok": True}
     except subprocess.CalledProcessError as exc:
@@ -724,14 +758,24 @@ def _h_fresh_start(req: "_Handler", _groups: tuple) -> dict:
     if body.get("confirm") != "CONFIRM":
         raise _ApiError('Send {"confirm":"CONFIRM"} to proceed.', 400)
 
-    try:
-        subprocess.run(
-            ["wg-quick", "down", _WG_IFACE],
-            check=False, capture_output=True, timeout=10,
-            creationflags=_SP_FLAGS,
-        )
-    except Exception:
-        pass
+    # Stop the WireGuard tunnel
+    if sys.platform == "win32":
+        svc = f"WireGuardTunnel${_WG_IFACE}"
+        try:
+            subprocess.run(["sc.exe", "stop", svc], check=False, capture_output=True, timeout=10, creationflags=_SP_FLAGS)
+        except Exception:
+            pass
+        wg_exe = Path(r"C:\Program Files\WireGuard\wireguard.exe")
+        if wg_exe.exists():
+            try:
+                subprocess.run([str(wg_exe), "/uninstalltunnelservice", _WG_IFACE], check=False, capture_output=True, timeout=10, creationflags=_SP_FLAGS)
+            except Exception:
+                pass
+    else:
+        try:
+            subprocess.run(["wg-quick", "down", _WG_IFACE], check=False, capture_output=True, timeout=10)
+        except Exception:
+            pass
 
     import shutil
     shutil.rmtree(_VAULT_DIR, ignore_errors=True)

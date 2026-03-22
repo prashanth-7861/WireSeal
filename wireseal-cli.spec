@@ -21,6 +21,10 @@ a = Analysis(
         'wireseal.platform.linux',
         'wireseal.platform.macos',
         'wireseal.platform.windows',
+        # QR code generation
+        'qrcode',
+        'qrcode.image.pil',
+        'PIL',
     ],
     hookspath=[],
     hooksconfig={},

@@ -43,6 +43,10 @@ a = Analysis(
         'webview.platforms.winforms',   # Windows (Edge WebView2 via WinForms)
         'webview.platforms.cocoa',      # macOS (WKWebView)
         'webview.platforms.gtk',        # Linux (WebKit2GTK)
+        # QR code generation for client configs
+        'qrcode',
+        'qrcode.image.pil',
+        'PIL',
     ],
     hookspath=[],
     hooksconfig={},
