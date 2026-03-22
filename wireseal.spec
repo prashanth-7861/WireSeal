@@ -32,9 +32,15 @@ a = Analysis(
         ('Dashboard/dist',         'dashboard'),
     ],
     hiddenimports=[
+        # Platform adapters imported by string name at runtime
         'wireseal.platform.linux',
         'wireseal.platform.macos',
         'wireseal.platform.windows',
+        # pywebview platform backends
+        'webview',
+        'webview.platforms.winforms',   # Windows (Edge WebView2 via WinForms)
+        'webview.platforms.cocoa',      # macOS (WKWebView)
+        'webview.platforms.gtk',        # Linux (WebKit2GTK)
     ],
     hookspath=[],
     hooksconfig={},

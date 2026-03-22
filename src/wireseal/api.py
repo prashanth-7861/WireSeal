@@ -847,32 +847,68 @@ class _Handler(BaseHTTPRequestHandler):
 # ---------------------------------------------------------------------------
 
 
-def serve(host: str = "127.0.0.1", port: int = 8080) -> None:
-    """Start the WireSeal API server (blocking)."""
+def _cleanup_session(server: ThreadingHTTPServer) -> None:
+    """Wipe vault state and shut down the HTTP server."""
+    with _lock:
+        if _session["passphrase"]:
+            _session["passphrase"].wipe()
+    server.server_close()
+    print("\n[wireseal] Server stopped. Vault state wiped.")
+
+
+def serve(host: str = "127.0.0.1", port: int = 8080, gui: bool = True) -> None:
+    """Start the WireSeal API server.
+
+    gui=True  (default): opens a native pywebview desktop window.
+    gui=False (headless): binds the server and blocks; no window opened.
+    Falls back to the system browser if pywebview is unavailable.
+    """
     import threading
     import webbrowser
 
     server = ThreadingHTTPServer((host, port), _Handler)
     url = f"http://{host}:{port}/"
-    print(f"[wireseal] API server listening on {url}")
-    print("[wireseal] Press Ctrl+C to stop.")
+    print(f"[wireseal] Serving on {url}")
 
-    # Open the dashboard in the default browser after a short delay
-    # so the server is ready to accept connections first.
-    def _open_browser() -> None:
-        import time
-        time.sleep(0.8)
-        webbrowser.open(url)
+    if not gui:
+        print("[wireseal] Headless mode — press Ctrl+C to stop.")
+        try:
+            server.serve_forever()
+        except KeyboardInterrupt:
+            pass
+        finally:
+            _cleanup_session(server)
+        return
 
-    threading.Thread(target=_open_browser, daemon=True).start()
+    # GUI mode: server runs in a daemon thread; pywebview owns the main thread.
+    server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+    server_thread.start()
 
     try:
-        server.serve_forever()
-    except KeyboardInterrupt:
-        pass
+        import webview  # pywebview
+        window = webview.create_window(
+            "WireSeal",
+            url,
+            width=1200,
+            height=800,
+            min_size=(900, 600),
+        )
+        webview.start()  # blocks until the native window is closed
+    except ImportError:
+        print("[wireseal] pywebview not installed — falling back to system browser.")
+        print("[wireseal] Press Ctrl+C to stop.")
+        webbrowser.open(url)
+        try:
+            server_thread.join()
+        except KeyboardInterrupt:
+            pass
+    except Exception as exc:
+        print(f"[wireseal] GUI failed ({exc}) — falling back to system browser.")
+        print("[wireseal] Press Ctrl+C to stop.")
+        webbrowser.open(url)
+        try:
+            server_thread.join()
+        except KeyboardInterrupt:
+            pass
     finally:
-        with _lock:
-            if _session["passphrase"]:
-                _session["passphrase"].wipe()
-        server.server_close()
-        print("\n[wireseal] Server stopped. Vault state wiped.")
+        _cleanup_session(server)

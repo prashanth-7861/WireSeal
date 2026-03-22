@@ -2000,12 +2000,18 @@ def _spawn_background(host: str, port: int) -> None:
               help="Address to bind (use 0.0.0.0 for LAN access)")
 @click.option("--port", default=8080, type=int, show_default=True,
               help="Port for the web dashboard")
+@click.option("--no-gui", "no_gui", is_flag=True, default=False,
+              help="Headless server only — no desktop window (for SSH / remote servers)")
 @click.option("--background", "-d", is_flag=True, default=False,
-              help="Run server in the background (detached process)")
+              help="Run server in the background (detached process, implies --no-gui)")
 @click.option("--stop", is_flag=True, default=False,
               help="Stop a background server started with --background")
-def serve(host: str, port: int, background: bool, stop: bool) -> None:
-    """Start the WireSeal web dashboard and REST API server."""
+def serve(host: str, port: int, no_gui: bool, background: bool, stop: bool) -> None:
+    """Start the WireSeal web dashboard and REST API server.
+
+    By default opens a native desktop window (pywebview).
+    Use --no-gui for headless / remote-server deployments.
+    """
     if stop:
         pid = _read_pid()
         if pid is None:
@@ -2029,7 +2035,7 @@ def serve(host: str, port: int, background: bool, stop: bool) -> None:
         return
 
     from wireseal.api import serve as _serve
-    _serve(host=host, port=port)
+    _serve(host=host, port=port, gui=not no_gui)
 
 
 if __name__ == "__main__":

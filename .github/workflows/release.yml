@@ -26,10 +26,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.14"
-
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
@@ -39,6 +35,14 @@ jobs:
         run: |
           npm ci
           npm run build
+
+      - name: Install Linux WebKit (for pywebview GUI)
+        if: runner.os == 'Linux'
+        run: sudo apt-get install -y libwebkit2gtk-4.0-dev
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
 
       - name: Install dependencies (with hash verification)
         run: pip install --require-hashes -r requirements-dev.txt
@@ -117,6 +121,7 @@ jobs:
             --license MIT \
             --category net \
             --depends wireguard-tools \
+            --depends "libwebkit2gtk-4.0-37 | libwebkit2gtk-4.1-0" \
             --deb-priority optional \
             --package "dist/release/wireseal_${{ steps.ver.outputs.version }}_amd64.deb" \
             .
@@ -136,6 +141,7 @@ jobs:
             --license MIT \
             --category "Applications/Internet" \
             --depends wireguard-tools \
+            --depends webkit2gtk3 \
             --package "dist/release/wireseal-${{ steps.ver.outputs.version }}-1.x86_64.rpm" \
             .
 
