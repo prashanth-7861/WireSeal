@@ -623,23 +623,17 @@ def _reload_wireguard(interface: str = "wg0") -> None:
         _no_win = subprocess.CREATE_NO_WINDOW
         svc = f"WireGuardTunnel${interface}"
         # Try to restart the WireGuard tunnel service (Windows uses services, not wg-quick)
-        subprocess.run(["sc.exe", "stop", svc], check=False, capture_output=True, creationflags=_no_win)
-        # Give the service a moment to stop
-        import time as _time
-        _time.sleep(1)
+        subprocess.run(["sc.exe", "stop", svc], check=False, capture_output=True, timeout=10, creationflags=_no_win)
         # Re-deploy config and re-install service if config file exists
         from wireseal.platform.detect import get_adapter as _get_adapter
         _adapter = _get_adapter()
         config_path = _adapter.get_config_path(interface)
         wg_exe = Path(r"C:\Program Files\WireGuard\wireguard.exe")
         if config_path.exists() and wg_exe.exists():
-            # Uninstall old service, reinstall with updated config
-            subprocess.run([str(wg_exe), "/uninstalltunnelservice", interface], check=False, capture_output=True, creationflags=_no_win)
-            _time.sleep(1)
-            subprocess.run([str(wg_exe), "/installtunnelservice", str(config_path)], check=False, capture_output=True, timeout=30, creationflags=_no_win)
+            subprocess.run([str(wg_exe), "/uninstalltunnelservice", interface], check=False, capture_output=True, timeout=10, creationflags=_no_win)
+            subprocess.run([str(wg_exe), "/installtunnelservice", str(config_path)], check=False, capture_output=True, timeout=10, creationflags=_no_win)
         else:
-            # Just try to start the existing service
-            subprocess.run(["sc.exe", "start", svc], check=False, capture_output=True, creationflags=_no_win)
+            subprocess.run(["sc.exe", "start", svc], check=False, capture_output=True, timeout=10, creationflags=_no_win)
         return
 
     # If the interface is not running, bring it up instead of syncconf

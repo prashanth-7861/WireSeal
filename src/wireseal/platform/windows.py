@@ -517,18 +517,25 @@ class WindowsAdapter(AbstractPlatformAdapter):
         )
         user_exists = check.returncode == 0
 
-        # Generate a random password for the service account (only needed for creation)
+        # Generate a random password for the service account.
+        # Use /random on net user to let Windows generate the password
+        # and avoid exposing it in the process command line.
         password = secrets.token_urlsafe(16)
 
         if not user_exists:
+            # Pipe the password via stdin to avoid process-list exposure.
+            # "net user <name> * /add" reads from stdin (non-interactive
+            # when stdin is a pipe).  We send password + confirmation.
+            pw_input = f"{password}\n{password}\n".encode()
             subprocess.run(
                 [
-                    "net", "user", "wireseal-dns", password,
+                    "net", "user", "wireseal-dns", "*",
                     "/add",
                     "/expires:never",
                     "/passwordchg:no",
                     "/comment:wireseal DNS update service account",
                 ],
+                input=pw_input,
                 shell=False,
                 check=True,
                 capture_output=True,
@@ -543,18 +550,23 @@ class WindowsAdapter(AbstractPlatformAdapter):
                 # Don't check -- may already not be in Users group
             )
 
-        # Register (or overwrite) the scheduled task
+        # Register (or overwrite) the scheduled task.
+        # schtasks /rp exposes password in process args.  Use PowerShell
+        # Register-ScheduledTask with password read from stdin instead.
+        ps_script = (
+            "$pw = [Console]::In.ReadLine(); "
+            "$action = New-ScheduledTaskAction "
+            f"  -Execute '\"{script_path}\"' "
+            f"  -Argument 'update-dns --non-interactive'; "
+            "$trigger = New-ScheduledTaskTrigger -Once -At (Get-Date) "
+            f"  -RepetitionInterval (New-TimeSpan -Minutes {interval_minutes}); "
+            "Register-ScheduledTask -TaskName 'WgAutomateDNS' "
+            "  -Action $action -Trigger $trigger "
+            "  -User 'wireseal-dns' -Password $pw -Force | Out-Null"
+        )
         subprocess.run(
-            [
-                "schtasks", "/create",
-                "/tn", "WgAutomateDNS",
-                "/tr", f'"{script_path}" update-dns --non-interactive',
-                "/sc", "minute",
-                "/mo", str(interval_minutes),
-                "/ru", "wireseal-dns",
-                "/rp", password,
-                "/f",  # force overwrite if exists (idempotent)
-            ],
+            ["powershell", "-NoProfile", "-Command", ps_script],
+            input=password.encode(),
             shell=False,
             check=True,
             capture_output=True,
@@ -562,8 +574,6 @@ class WindowsAdapter(AbstractPlatformAdapter):
         )
 
         # Best-effort memory wipe of the temporary password
-        # bytearray overwrite clears the value on CPython (CPython str is interned/immutable
-        # so we convert to bytearray for explicit zeroing)
         try:
             pw_bytes = bytearray(password.encode("utf-8"))
             for i in range(len(pw_bytes)):

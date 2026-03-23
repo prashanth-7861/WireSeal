@@ -1,0 +1,39 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+*.egg
+.venv/
+venv/
+.env
+
+# Build artifacts (PyInstaller output)
+build/
+dist/
+releases/
+*.spec.bak
+
+# Keep Dashboard/dist/ (bundled React app used by the server)
+!Dashboard/dist/
+
+# Node
+Dashboard/node_modules/
+node_modules/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# WireSeal runtime
+*.enc
+audit.log
+
+# Misc
+plan.md
+*.log

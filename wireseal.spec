@@ -22,8 +22,16 @@
 # pyinstaller-hooks-contrib >= 2026.0 handles cryptography and argon2 automatically.
 
 import sys
+import os
 
 block_cipher = None
+
+# Locate pywebview's bundled lib directory (contains WebView2 interop DLLs)
+_site = os.path.join(sys.prefix, 'Lib', 'site-packages')
+_webview_lib = os.path.join(_site, 'webview', 'lib')
+_extra_datas = []
+if os.path.isdir(_webview_lib):
+    _extra_datas.append((_webview_lib, os.path.join('webview', 'lib')))
 
 a = Analysis(
     ['src/wireseal/main.py'],
@@ -32,17 +40,21 @@ a = Analysis(
     datas=[
         ('src/wireseal/templates', 'wireseal/templates'),
         ('Dashboard/dist',         'dashboard'),
-    ],
+    ] + _extra_datas,
     hiddenimports=[
         # Platform adapters imported by string name at runtime
         'wireseal.platform.linux',
         'wireseal.platform.macos',
         'wireseal.platform.windows',
-        # pywebview platform backends
+        # pywebview — EdgeChromium on Windows, WKWebView on macOS, WebKitGTK on Linux
         'webview',
-        'webview.platforms.winforms',   # Windows (Edge WebView2 via WinForms)
-        'webview.platforms.cocoa',      # macOS (WKWebView)
-        'webview.platforms.gtk',        # Linux (WebKit2GTK)
+        'webview.platforms.edgechromium',  # Windows (Edge WebView2 via pythonnet)
+        'webview.platforms.cocoa',         # macOS (WKWebView)
+        'webview.platforms.gtk',           # Linux (WebKit2GTK)
+        # pythonnet / clr_loader for EdgeChromium backend
+        'clr',
+        'clr_loader',
+        'pythonnet',
         # QR code generation for client configs
         'qrcode',
         'qrcode.image.pil',
@@ -51,7 +63,26 @@ a = Analysis(
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=[],
+    excludes=[
+        # Exclude heavy Qt — pywebview uses EdgeChromium (no Qt needed)
+        'PySide6', 'PySide6.QtCore', 'PySide6.QtGui', 'PySide6.QtWidgets',
+        'PySide6.QtWebEngineWidgets', 'PySide6.QtWebEngineCore',
+        'PySide6.QtWebChannel', 'PySide6.QtNetwork',
+        'shiboken6', 'qtpy',
+        'PyQt5', 'PyQt5.QtCore', 'PyQt5.QtGui', 'PyQt5.QtWidgets',
+        'PyQt5.QtWebEngineWidgets', 'PyQt5.QtWebEngineCore',
+        'PyQt5.QtWebChannel', 'PyQt5.QtNetwork',
+        'PyQtWebEngine',
+        'webview.platforms.qt',
+        # Exclude heavy packages not needed by WireSeal
+        'numpy', 'numpy.core', 'numpy._core',
+        'scipy', 'pandas', 'matplotlib',
+        'tornado', 'tkinter', 'unittest',
+        'test', 'setuptools',
+        'PIL.ImageQt',
+        # Exclude nicegui and its heavy deps (installed but not used)
+        'nicegui',
+    ],
     win_no_prefer_redirects=False,
     win_private_assemblies=False,
     cipher=block_cipher,

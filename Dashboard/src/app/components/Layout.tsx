@@ -3,8 +3,9 @@ import { NavLink, Outlet, useNavigate } from "react-router";
 import {
   Server, ScrollText, Monitor, Settings, LogOut, Info,
   Lock, Play, Eye, EyeOff, AlertCircle, CheckCircle,
+  Shield, Sparkles, Wifi, WifiOff, Circle,
 } from "lucide-react";
-import { api, VAULT_LOCKED_EVENT } from "../api";
+import { api, VAULT_LOCKED_EVENT, type Status } from "../api";
 
 type VaultState = "loading" | "uninitialized" | "locked" | "unlocked";
 
@@ -27,6 +28,10 @@ export function Layout() {
     warnings?: string[] | null;
   } | null>(null);
 
+  // Server status for sidebar indicator
+  const [serverStatus, setServerStatus] = useState<Status | null>(null);
+  const [apiOnline, setApiOnline] = useState(false);
+
   // ── Vault info probe ─────────────────────────────────────────────────────
   const probeVault = useCallback(async () => {
     try {
@@ -45,9 +50,29 @@ export function Layout() {
 
   useEffect(() => { probeVault(); }, [probeVault]);
 
+  // ── Server status polling (for sidebar indicator) ──────────────────────────
+  useEffect(() => {
+    if (vaultState !== "unlocked") { setApiOnline(false); setServerStatus(null); return; }
+    setApiOnline(true); // if vault is unlocked, API server is reachable
+    const poll = async () => {
+      try {
+        const s = await api.status();
+        setServerStatus(s);
+        setApiOnline(true);
+      } catch {
+        setServerStatus(null);
+        // Don't set apiOnline=false here — the API may still be up, just vault locked
+      }
+    };
+    poll();
+    const id = window.setInterval(poll, 5000);
+    return () => clearInterval(id);
+  }, [vaultState]);
+
   // Listen for 401 events from any page's API calls
   useEffect(() => {
     const handler = () => {
+      try { localStorage.removeItem("vault_users"); } catch { /* ignore */ }
       setVaultState("locked");
       setInitResult(null);
     };
@@ -101,6 +126,8 @@ export function Layout() {
 
   const handleLock = async () => {
     try { await api.lock(); } catch { /* ignore */ }
+    // Clear any client-side persisted data that bypasses vault encryption
+    try { localStorage.removeItem("vault_users"); } catch { /* ignore */ }
     setVaultState("locked");
     setInitResult(null);
     navigate("/");
@@ -117,38 +144,69 @@ export function Layout() {
   // ── Loading state ─────────────────────────────────────────────────────────
   if (vaultState === "loading") {
     return (
-      <div className="min-h-screen bg-gray-50 flex items-center justify-center">
-        <div className="text-gray-500 text-lg">Connecting to WireSeal server…</div>
+      <div className="min-h-screen bg-gradient-to-br from-slate-900 via-blue-950 to-slate-900 flex items-center justify-center">
+        <div className="flex flex-col items-center gap-6 animate-fade-in">
+          <div className="w-24 h-24 bg-blue-600/20 rounded-3xl flex items-center justify-center border border-blue-500/30 shadow-lg shadow-blue-500/10">
+            <Shield className="w-14 h-14 text-blue-400" />
+          </div>
+          <div className="text-center">
+            <h1 className="text-3xl font-bold text-white tracking-tight">WireSeal</h1>
+            <p className="text-blue-300/70 text-sm mt-1">Secure WireGuard Management</p>
+          </div>
+          <div className="flex items-center gap-2 text-blue-300/60 text-sm">
+            <div className="w-4 h-4 border-2 border-blue-400/40 border-t-blue-400 rounded-full animate-spin" />
+            <span>Connecting to server...</span>
+          </div>
+        </div>
       </div>
     );
   }
 
-  // ── Locked / Uninitialized — full-screen lock screen ──────────────────────
+  // ── Locked / Uninitialized — full-screen welcome screen ──────────────────
   if (vaultState === "locked" || vaultState === "uninitialized") {
     return (
-      <div className="min-h-screen bg-gray-50 flex items-center justify-center">
-        <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-10 flex flex-col items-center text-center gap-6 max-w-lg w-full mx-4">
-          <div className="w-20 h-20 bg-gray-100 rounded-full flex items-center justify-center">
-            <Lock className="w-10 h-10 text-gray-400" />
+      <div className="min-h-screen bg-gradient-to-br from-slate-900 via-blue-950 to-slate-900 flex items-center justify-center">
+        <div className="flex flex-col items-center text-center gap-8 max-w-lg w-full mx-4 animate-fade-in">
+          {/* Logo */}
+          <div className="w-24 h-24 bg-blue-600/20 rounded-3xl flex items-center justify-center border border-blue-500/30 shadow-lg shadow-blue-500/10">
+            <Shield className="w-14 h-14 text-blue-400" />
           </div>
+
+          {/* Welcome text */}
           <div>
-            <h1 className="text-2xl font-bold text-gray-900 mb-1">WireSeal</h1>
-            <h2 className="text-lg font-semibold text-gray-700 mb-2">
-              {vaultState === "uninitialized" ? "Initialize WireSeal" : "Server is offline"}
+            <div className="flex items-center justify-center gap-2 mb-2">
+              <Sparkles className="w-5 h-5 text-amber-400" />
+              <span className="text-amber-400/80 text-sm font-medium tracking-wide uppercase">
+                {vaultState === "uninitialized" ? "Welcome" : "Welcome back"}
+              </span>
+              <Sparkles className="w-5 h-5 text-amber-400" />
+            </div>
+            <h1 className="text-4xl font-bold text-white tracking-tight mb-2">WireSeal</h1>
+            <p className="text-blue-300/60 text-sm mb-4">Secure WireGuard Management</p>
+            <h2 className="text-lg font-semibold text-blue-200 mb-2">
+              {vaultState === "uninitialized" ? "Let's get you set up" : "Your server is ready"}
             </h2>
-            <p className="text-gray-500 max-w-sm">
+            <p className="text-blue-300/50 max-w-sm mx-auto text-sm leading-relaxed">
               {vaultState === "uninitialized"
-                ? "Set up your vault passphrase to get started. Your keys and config will be encrypted at rest."
-                : "Unlock the vault with your passphrase to start managing WireGuard."}
+                ? "Create a vault passphrase to encrypt your keys and configs. Everything is secured with dual-layer AEAD encryption."
+                : "Unlock the vault with your passphrase to start managing your WireGuard network."}
             </p>
           </div>
+
+          {/* CTA button */}
           <button
             onClick={openStartDialog}
-            className="flex items-center gap-3 px-8 py-3 bg-blue-600 text-white text-lg font-medium rounded-xl hover:bg-blue-700 transition-colors shadow-sm"
+            className="flex items-center gap-3 px-8 py-3.5 bg-blue-600 text-white text-lg font-medium rounded-xl hover:bg-blue-500 transition-all shadow-lg shadow-blue-600/30 hover:shadow-blue-500/40 hover:scale-[1.02] active:scale-[0.98]"
           >
             <Play className="w-6 h-6" />
-            {vaultState === "uninitialized" ? "Initialize & Start" : "Start Server"}
+            {vaultState === "uninitialized" ? "Get Started" : "Unlock & Start"}
           </button>
+
+          {/* Security badge */}
+          <div className="flex items-center gap-2 text-blue-400/40 text-xs mt-2">
+            <Lock className="w-3.5 h-3.5" />
+            <span>ChaCha20-Poly1305 + AES-256-GCM-SIV + Argon2id</span>
+          </div>
         </div>
 
         {/* Passphrase dialog */}
@@ -278,6 +336,30 @@ export function Layout() {
             </NavLink>
           ))}
         </nav>
+
+        {/* Status indicators */}
+        <div className="px-4 py-3 border-t border-gray-100 space-y-2">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              <Circle className={`w-2.5 h-2.5 fill-current ${apiOnline ? "text-green-500" : "text-red-500"}`} />
+              <span className="text-xs text-gray-500">API Server</span>
+            </div>
+            <span className={`text-xs font-medium ${apiOnline ? "text-green-600" : "text-red-500"}`}>
+              {apiOnline ? "Online" : "Offline"}
+            </span>
+          </div>
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              {serverStatus?.running
+                ? <Wifi className="w-3 h-3 text-green-500" />
+                : <WifiOff className="w-3 h-3 text-gray-400" />}
+              <span className="text-xs text-gray-500">WireGuard</span>
+            </div>
+            <span className={`text-xs font-medium ${serverStatus?.running ? "text-green-600" : "text-gray-400"}`}>
+              {serverStatus?.running ? "Running" : "Stopped"}
+            </span>
+          </div>
+        </div>
 
         <div className="p-2 border-t border-gray-100">
           <button

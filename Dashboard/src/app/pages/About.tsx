@@ -1,4 +1,4 @@
-import { Shield, Lock, Key, Layers, Github, Terminal, Globe } from "lucide-react";
+import { Shield, Lock, Key, Layers, Github, Terminal, Globe, ExternalLink, User } from "lucide-react";
 
 const FEATURES = [
   {
@@ -77,6 +77,41 @@ export function About() {
           <span className="inline-flex items-center gap-2 bg-white/10 px-4 py-2 rounded-lg text-sm">
             MIT License
           </span>
+        </div>
+
+        {/* Developer info */}
+        <div className="mt-6 pt-6 border-t border-white/20">
+          <div className="flex items-center gap-3">
+            <div className="w-10 h-10 bg-white/20 rounded-full flex items-center justify-center">
+              <User className="w-5 h-5 text-white" />
+            </div>
+            <div>
+              <p className="text-sm text-blue-200">Developed by</p>
+              <p className="font-semibold">Prashanth Mudigonda</p>
+            </div>
+          </div>
+          <div className="flex flex-wrap gap-3 mt-3 ml-[52px]">
+            <a
+              href="https://github.com/prashanth-7861"
+              target="_blank"
+              rel="noreferrer"
+              className="inline-flex items-center gap-1.5 text-blue-200 hover:text-white transition-colors text-sm"
+            >
+              <Github className="w-3.5 h-3.5" />
+              prashanth-7861
+              <ExternalLink className="w-3 h-3" />
+            </a>
+            <a
+              href="https://prashanth-mudigonda.vercel.app/"
+              target="_blank"
+              rel="noreferrer"
+              className="inline-flex items-center gap-1.5 text-blue-200 hover:text-white transition-colors text-sm"
+            >
+              <Globe className="w-3.5 h-3.5" />
+              Portfolio
+              <ExternalLink className="w-3 h-3" />
+            </a>
+          </div>
         </div>
       </div>
 

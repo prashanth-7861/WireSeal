@@ -231,9 +231,12 @@ class AuditLog:
         import datetime  # deferred: no side effects at module import
 
         scrubbed = _scrub_secrets(metadata)
+        # Scrub the error field too — callers may pass str(exc) which could
+        # contain file paths, key material, or other internal details.
+        scrubbed_error = str(_scrub_secrets(error)) if error else error
         # Sanitize action and error fields to prevent NDJSON log injection (HIGH-03)
         safe_action = action.replace("\n", " ").replace("\r", " ") if action else action
-        safe_error = error.replace("\n", " ").replace("\r", " ") if error else error
+        safe_error = scrubbed_error.replace("\n", " ").replace("\r", " ") if scrubbed_error else scrubbed_error
         entry = AuditEntry(
             timestamp=datetime.datetime.now(datetime.timezone.utc).isoformat(),
             action=safe_action,

@@ -55,21 +55,27 @@ export function Dashboard() {
         <p className="text-gray-500 mt-1">Monitor and control your WireGuard server</p>
       </div>
 
-      {/* Server status card */}
+      {/* WireGuard tunnel status card */}
       <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-6 mb-6">
         <div className="flex items-center justify-between mb-4">
           <div className="flex items-center gap-4">
             <div className={`w-16 h-16 rounded-full flex items-center justify-center ${
               status?.running ? "bg-green-100" : "bg-gray-100"
             }`}>
-              <Server className={`w-8 h-8 ${status?.running ? "text-green-700" : "text-gray-400"}`} />
+              {status?.running
+                ? <Wifi className="w-8 h-8 text-green-700" />
+                : <WifiOff className="w-8 h-8 text-gray-400" />}
             </div>
             <div>
-              <h2 className="text-xl font-semibold text-gray-900">Server Status</h2>
+              <h2 className="text-xl font-semibold text-gray-900">WireGuard Tunnel</h2>
               <div className="flex items-center gap-2 mt-1">
-                <div className={`w-2 h-2 rounded-full ${status?.running ? "bg-green-500" : "bg-gray-400"}`} />
-                <span className={`text-sm font-medium ${status?.running ? "text-green-700" : "text-gray-500"}`}>
-                  {status === null ? "Fetching…" : status.running ? "Running" : "Stopped"}
+                <div className={`w-2.5 h-2.5 rounded-full ${
+                  status === null ? "bg-yellow-400 animate-pulse" : status.running ? "bg-green-500" : "bg-red-400"
+                }`} />
+                <span className={`text-sm font-medium ${
+                  status === null ? "text-yellow-600" : status.running ? "text-green-700" : "text-red-500"
+                }`}>
+                  {status === null ? "Checking…" : status.running ? "Running" : "Not Running"}
                 </span>
               </div>
             </div>
@@ -203,14 +209,15 @@ export function Dashboard() {
         </div>
       )}
 
-      {/* Guidance when vault is unlocked but WireGuard is not running */}
+      {/* Guidance when vault is unlocked but WireGuard tunnel is not running */}
       {status !== null && !status.running && (
-        <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-10 text-center">
-          <Server className="w-12 h-12 text-gray-400 mx-auto mb-3" />
-          <h3 className="font-medium text-gray-900 mb-1">Vault Unlocked</h3>
+        <div className="bg-amber-50 rounded-lg border border-amber-200 p-10 text-center">
+          <WifiOff className="w-12 h-12 text-amber-400 mx-auto mb-3" />
+          <h3 className="font-medium text-gray-900 mb-1">WireGuard Tunnel Not Active</h3>
           <p className="text-gray-500 text-sm max-w-md mx-auto">
-            The vault is unlocked and ready. The WireGuard tunnel service may still be starting up,
-            or it may need to be started manually. Add clients from the Clients page to get started.
+            The API server is online and the vault is unlocked. The WireGuard tunnel is not running —
+            it may need to be started manually or requires administrator privileges.
+            Add clients from the Clients page to get started.
           </p>
         </div>
       )}

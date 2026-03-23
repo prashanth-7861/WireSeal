@@ -25,7 +25,9 @@ is exposed.
 - [Commands Reference](#commands-reference)
 - [Security Model](#security-model)
 - [Security Limitations](#security-limitations)
+- [Web Dashboard (GUI)](#web-dashboard-gui)
 - [Contributing](#contributing)
+- [Author](#author)
 
 ---
 
@@ -432,6 +434,37 @@ sudo mv wireseal-linux-x86_64 /usr/local/bin/wireseal
 
 ---
 
+## Web Dashboard (GUI)
+
+WireSeal includes a native desktop GUI built with React + pywebview. Run it with:
+
+```bash
+# Launch the dashboard (opens a native window on port 8080)
+wireseal serve
+
+# Or use the standalone WireSeal.exe on Windows (no Python needed)
+```
+
+The dashboard provides:
+
+- **Welcome screen** with animated branding and vault passphrase setup
+- **Real-time status** showing API server (Online/Offline) and WireGuard tunnel (Running/Stopped) indicators in the sidebar
+- **Client management** — add, remove, and view QR codes for mobile clients
+- **Live peers table** with connection status, handshake times, and transfer stats
+- **Audit log viewer** for security event history
+- **Settings** for passphrase changes, endpoint updates, and server termination
+
+The WireGuard tunnel runs as a **background system service** — you can close the dashboard
+and the VPN keeps running. Reopen the dashboard at any time to manage clients or check status.
+
+| Platform | GUI Backend | Size |
+|----------|------------|------|
+| **Windows** | pywebview + Edge WebView2 (pre-installed on Win10/11) | ~24 MB |
+| **Linux** | pywebview + WebKitGTK (system package) | ~18 MB |
+| **macOS** | pywebview + WKWebView (built into macOS) | ~15 MB |
+
+---
+
 ## Contributing
 
 Submit pull requests against `main`. All commits must pass:
@@ -446,3 +479,16 @@ on merge to `main` in CI.
 **Security issues:** Do not open a public GitHub issue for security vulnerabilities.
 Send a private report to the maintainers with a minimal reproduction and the affected
 version. Public disclosure is coordinated after a fix is available.
+
+---
+
+## Author
+
+**Prashanth Mudigonda**
+
+- GitHub: [prashanth-7861](https://github.com/prashanth-7861)
+- Portfolio: [prashanth-mudigonda.vercel.app](https://prashanth-mudigonda.vercel.app/)
+
+---
+
+*Licensed under [MIT](LICENSE)*

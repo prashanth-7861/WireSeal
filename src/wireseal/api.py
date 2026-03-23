@@ -145,6 +145,86 @@ def _extract(value: Any) -> str:
     return str(value)
 
 
+def _resolve_client_endpoint(server_state: dict) -> str:
+    """Return the endpoint string clients use to reach the server."""
+    port = server_state["port"]
+    duckdns_domain = server_state.get("duckdns_domain")
+    if duckdns_domain:
+        return f"{duckdns_domain}.duckdns.org:{port}"
+    stored_endpoint = server_state.get("endpoint")
+    if stored_endpoint:
+        return f"{stored_endpoint}:{port}"
+    return f"{server_state['ip']}:{port}"
+
+
+def _reload_wireguard(interface: str = "wg0") -> None:
+    """Reload WireGuard interface. Windows: sc.exe / wireguard.exe service.
+    Unix: wg syncconf or wg-quick up."""
+    if sys.platform == "win32":
+        _no_win = subprocess.CREATE_NO_WINDOW
+        svc = f"WireGuardTunnel${interface}"
+        subprocess.run(
+            ["sc.exe", "stop", svc],
+            check=False, capture_output=True, timeout=10, creationflags=_no_win,
+        )
+        from wireseal.platform.detect import get_adapter as _get_adapter
+        _adapter = _get_adapter()
+        config_path = _adapter.get_config_path(interface)
+        wg_exe = Path(r"C:\Program Files\WireGuard\wireguard.exe")
+        if config_path.exists() and wg_exe.exists():
+            subprocess.run(
+                [str(wg_exe), "/uninstalltunnelservice", interface],
+                check=False, capture_output=True, timeout=10, creationflags=_no_win,
+            )
+            subprocess.run(
+                [str(wg_exe), "/installtunnelservice", str(config_path)],
+                check=False, capture_output=True, timeout=10, creationflags=_no_win,
+            )
+        else:
+            subprocess.run(
+                ["sc.exe", "start", svc],
+                check=False, capture_output=True, timeout=10, creationflags=_no_win,
+            )
+        return
+
+    # Check if interface is up
+    check = subprocess.run(
+        ["ip", "link", "show", interface],
+        capture_output=True, timeout=5,
+    )
+    if check.returncode != 0:
+        subprocess.run(
+            ["wg-quick", "up", interface],
+            shell=False, check=True, capture_output=True,
+        )
+        return
+
+    import tempfile
+    from wireseal.platform.detect import get_adapter
+    adapter = get_adapter()
+    config_path = adapter.get_config_path(interface)
+    strip_result = subprocess.run(
+        ["wg-quick", "strip", str(config_path)],
+        shell=False, check=True, capture_output=True,
+    )
+    with tempfile.NamedTemporaryFile(
+        suffix=".conf", mode="wb", delete=False
+    ) as tmp:
+        tmp.write(strip_result.stdout)
+        tmp_path = tmp.name
+    try:
+        os.chmod(tmp_path, 0o600)
+        subprocess.run(
+            ["wg", "syncconf", interface, tmp_path],
+            shell=False, check=True, capture_output=True,
+        )
+    finally:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+
+
 # ---------------------------------------------------------------------------
 # Route handlers
 # ---------------------------------------------------------------------------
@@ -214,10 +294,19 @@ def _h_init(req: "_Handler", _groups: tuple) -> dict:
         # ── Step 1: Create the encrypted vault (always succeeds or fails fast) ──
         vault = Vault.create(_VAULT_PATH, passphrase, initial_state)
 
-        # Unlock the session immediately so the dashboard is usable even if
-        # platform operations below fail (WireGuard not installed, not admin, etc.)
-        with vault.open(passphrase) as st:
-            cache = _refresh_cache(st)
+        # Build cache directly from initial_state instead of re-opening the
+        # vault (which would run Argon2id KDF again, adding ~5s of latency).
+        cache = {
+            "server": {
+                "ip":       server_ip,
+                "subnet":   pool.subnet_str,
+                "port":     port,
+                "endpoint": endpoint or "",
+                "duckdns":  "",
+            },
+            "clients": {},
+            "ip_pool": dict(initial_state["ip_pool"]),
+        }
         with _lock:
             _session.update(vault=vault, passphrase=passphrase, cache=cache)
         passphrase = None  # ownership transferred to session
@@ -234,7 +323,7 @@ def _h_init(req: "_Handler", _groups: tuple) -> dict:
             adapter = get_adapter()
             adapter.check_privileges()
         except Exception as exc:
-            warnings_list.append(f"Not running as admin: {exc}")
+            warnings_list.append("Not running as admin — platform setup skipped.")
             # Cannot proceed with platform setup without admin
             return {
                 "ok":         True,
@@ -254,31 +343,23 @@ def _h_init(req: "_Handler", _groups: tuple) -> dict:
                 clients=[],
             )
             adapter.deploy_config(config)
-
-            config_hash = hashlib.sha256(config.encode()).hexdigest()
-            with _lock:
-                v = _session["vault"]
-                p = _session["passphrase"]
-            with v.open(p) as st:
-                st.integrity["server"] = config_hash
-                v.save(st, p)
         except Exception as exc:
-            warnings_list.append(f"Config deploy failed: {exc}")
+            warnings_list.append("Config deploy failed.")
 
         try:
             adapter.install_wireguard()
         except Exception as exc:
-            warnings_list.append(f"WireGuard install skipped: {exc}")
+            warnings_list.append("WireGuard install skipped.")
 
         try:
             adapter.apply_firewall_rules(port, _WG_IFACE, pool.subnet_str)
         except Exception as exc:
-            warnings_list.append(f"Firewall rules skipped: {exc}")
+            warnings_list.append("Firewall rules skipped.")
 
         try:
             adapter.enable_tunnel_service(_WG_IFACE)
         except Exception as exc:
-            warnings_list.append(f"Tunnel service failed: {exc}")
+            warnings_list.append("Tunnel service failed.")
 
         return {
             "ok":         True,
@@ -293,8 +374,9 @@ def _h_init(req: "_Handler", _groups: tuple) -> dict:
     except Exception as exc:
         if passphrase is not None:
             passphrase.wipe()
+        raise _ApiError("Server initialization failed.", 500)
+    finally:
         wipe_string(passphrase_str)
-        raise _ApiError(str(exc), 500)
 
 
 def _h_unlock(req: "_Handler", _groups: tuple) -> dict:
@@ -304,25 +386,29 @@ def _h_unlock(req: "_Handler", _groups: tuple) -> dict:
         raise _ApiError("passphrase is required", 400)
 
     from wireseal.security.secret_types import SecretBytes
+    from wireseal.security.secrets_wipe import wipe_string
     from wireseal.security.vault        import Vault
     from wireseal.security.audit        import AuditLog
 
     passphrase = SecretBytes(bytearray(passphrase_str.encode()))
-    vault = Vault(_VAULT_PATH)
     try:
-        with vault.open(passphrase) as st:
-            cache = _refresh_cache(st)
-    except Exception as exc:
-        passphrase.wipe()
-        raise _ApiError(f"Incorrect passphrase: {exc}", 401)
+        vault = Vault(_VAULT_PATH)
+        try:
+            with vault.open(passphrase) as st:
+                cache = _refresh_cache(st)
+        except Exception as exc:
+            passphrase.wipe()
+            raise _ApiError("Incorrect passphrase.", 401)
 
-    with _lock:
-        if _session["passphrase"]:
-            _session["passphrase"].wipe()
-        _session.update(vault=vault, passphrase=passphrase, cache=cache)
+        with _lock:
+            if _session["passphrase"]:
+                _session["passphrase"].wipe()
+            _session.update(vault=vault, passphrase=passphrase, cache=cache)
 
-    AuditLog(_AUDIT_PATH).log("unlock-web", {})
-    return {"ok": True}
+        AuditLog(_AUDIT_PATH).log("unlock-web", {})
+        return {"ok": True}
+    finally:
+        wipe_string(passphrase_str)
 
 
 def _h_lock(req: "_Handler", _groups: tuple) -> dict:
@@ -448,11 +534,6 @@ def _h_add_client(req: "_Handler", _groups: tuple) -> dict:
     from wireseal.security.atomic     import atomic_write
     from wireseal.security.audit      import AuditLog
     from wireseal.platform.detect     import get_adapter
-    from wireseal.main import (
-        _extract_secret_str,
-        _resolve_client_endpoint,
-        _reload_wireguard,
-    )
 
     allocated_ip = ""
     with vault.open(passphrase) as state:
@@ -472,7 +553,7 @@ def _h_add_client(req: "_Handler", _groups: tuple) -> dict:
 
         server_endpoint = _resolve_client_endpoint(state.server)
         server_ip       = state.server["ip"]
-        server_pub_key  = _extract_secret_str(state.server["public_key"])
+        server_pub_key  = _extract(state.server["public_key"])
 
         builder       = ConfigBuilder()
         client_config = builder.render_client_config(
@@ -494,8 +575,8 @@ def _h_add_client(req: "_Handler", _groups: tuple) -> dict:
         peers = [
             {
                 "name":       n,
-                "public_key": _extract_secret_str(d["public_key"]),
-                "psk":        _extract_secret_str(d["psk"]),
+                "public_key": _extract(d["public_key"]),
+                "psk":        _extract(d["psk"]),
                 "ip":         d["ip"],
             }
             for n, d in state.clients.items()
@@ -508,7 +589,7 @@ def _h_add_client(req: "_Handler", _groups: tuple) -> dict:
         })
 
         server_config = builder.render_server_config(
-            server_private_key=_extract_secret_str(state.server["private_key"]),
+            server_private_key=_extract(state.server["private_key"]),
             server_ip=server_ip,
             prefix_length=int(state.ip_pool["subnet"].split("/")[1]),
             server_port=state.server["port"],
@@ -517,10 +598,11 @@ def _h_add_client(req: "_Handler", _groups: tuple) -> dict:
         wg_warning = None
         try:
             adapter = get_adapter()
+            adapter.check_privileges()
             adapter.deploy_config(server_config)
             _reload_wireguard()
         except Exception as exc:
-            wg_warning = str(exc)
+            wg_warning = True
 
         state.clients[name] = {
             "private_key": priv_key_str,
@@ -540,7 +622,7 @@ def _h_add_client(req: "_Handler", _groups: tuple) -> dict:
 
     result: dict = {"name": name, "ip": allocated_ip}
     if wg_warning:
-        result["warning"] = f"Client added to vault but WireGuard reload failed: {wg_warning}"
+        result["warning"] = "Client added to vault but WireGuard reload failed (admin privileges required)."
     return result
 
 
@@ -558,7 +640,6 @@ def _h_remove_client(req: "_Handler", groups: tuple) -> dict:
     from wireseal.core.config_builder import ConfigBuilder
     from wireseal.security.audit      import AuditLog
     from wireseal.platform.detect     import get_adapter
-    from wireseal.main import _extract_secret_str, _reload_wireguard
 
     with vault.open(passphrase) as state:
         if name not in state.clients:
@@ -569,8 +650,8 @@ def _h_remove_client(req: "_Handler", groups: tuple) -> dict:
         peers = [
             {
                 "name":       n,
-                "public_key": _extract_secret_str(d["public_key"]),
-                "psk":        _extract_secret_str(d["psk"]),
+                "public_key": _extract(d["public_key"]),
+                "psk":        _extract(d["psk"]),
                 "ip":         d["ip"],
             }
             for n, d in state.clients.items()
@@ -578,7 +659,7 @@ def _h_remove_client(req: "_Handler", groups: tuple) -> dict:
         ]
 
         server_config = ConfigBuilder().render_server_config(
-            server_private_key=_extract_secret_str(state.server["private_key"]),
+            server_private_key=_extract(state.server["private_key"]),
             server_ip=state.server["ip"],
             prefix_length=int(state.ip_pool["subnet"].split("/")[1]),
             server_port=state.server["port"],
@@ -586,6 +667,7 @@ def _h_remove_client(req: "_Handler", groups: tuple) -> dict:
         )
         try:
             adapter = get_adapter()
+            adapter.check_privileges()
             adapter.deploy_config(server_config)
             _reload_wireguard()
         except Exception:
@@ -626,7 +708,7 @@ def _h_client_qr(req: "_Handler", groups: tuple) -> dict:
         passphrase = _session["passphrase"]
 
     from wireseal.core.config_builder import ConfigBuilder
-    from wireseal.main import _extract_secret_str, _resolve_client_endpoint
+    from wireseal.security.audit      import AuditLog
 
     config_str = ""
     with vault.open(passphrase) as state:
@@ -634,11 +716,11 @@ def _h_client_qr(req: "_Handler", groups: tuple) -> dict:
             raise _ApiError(f"Client '{name}' not found.", 404)
         cdata = state.clients[name]
         config_str = ConfigBuilder().render_client_config(
-            client_private_key=_extract_secret_str(cdata["private_key"]),
+            client_private_key=_extract(cdata["private_key"]),
             client_ip=cdata["ip"],
             dns_server=state.server["ip"],
-            server_public_key=_extract_secret_str(state.server["public_key"]),
-            psk=_extract_secret_str(cdata["psk"]),
+            server_public_key=_extract(state.server["public_key"]),
+            psk=_extract(cdata["psk"]),
             server_endpoint=_resolve_client_endpoint(state.server),
         )
 
@@ -654,8 +736,9 @@ def _h_client_qr(req: "_Handler", groups: tuple) -> dict:
     except ImportError:
         raise _ApiError("QR code generation unavailable — 'qrcode' package not installed", 500)
     except Exception as exc:
-        raise _ApiError(f"QR code generation failed: {exc}", 500)
+        raise _ApiError("QR code generation failed.", 500)
 
+    AuditLog(_AUDIT_PATH).log("export-qr", {"client": name})
     return {"name": name, "qr_png_b64": png_b64}
 
 
@@ -694,23 +777,23 @@ def _h_change_passphrase(req: "_Handler", _groups: tuple) -> dict:
     old_passphrase = SecretBytes(bytearray(current_str.encode()))
     new_passphrase = SecretBytes(bytearray(new_str.encode()))
     try:
-        vault.change_passphrase(old_passphrase, new_passphrase)
-    except Exception as exc:
+        try:
+            vault.change_passphrase(old_passphrase, new_passphrase)
+        except Exception:
+            old_passphrase.wipe()
+            new_passphrase.wipe()
+            raise _ApiError("Passphrase change failed — check current passphrase.", 401)
+
+        with _lock:
+            _session["passphrase"].wipe()
+            _session["passphrase"] = new_passphrase
         old_passphrase.wipe()
-        new_passphrase.wipe()
+
+        AuditLog(_AUDIT_PATH).log("change-passphrase", {})
+        return {"ok": True}
+    finally:
         wipe_string(current_str)
         wipe_string(new_str)
-        raise _ApiError(str(exc), 401)
-
-    with _lock:
-        _session["passphrase"].wipe()
-        _session["passphrase"] = new_passphrase
-    old_passphrase.wipe()
-    wipe_string(current_str)
-    wipe_string(new_str)
-
-    AuditLog(_AUDIT_PATH).log("change-passphrase", {})
-    return {"ok": True}
 
 
 def _h_terminate(req: "_Handler", _groups: tuple) -> dict:
@@ -747,7 +830,7 @@ def _h_terminate(req: "_Handler", _groups: tuple) -> dict:
         stderr = exc.stderr.decode() if exc.stderr else ""
         if "not a WireGuard interface" in stderr or "does not exist" in stderr:
             return {"ok": True, "note": "interface was already down"}
-        raise _ApiError(f"terminate failed: {stderr}", 500)
+        raise _ApiError("Failed to stop WireGuard interface.", 500)
     except FileNotFoundError:
         raise _ApiError("wg-quick not found — is WireGuard installed?", 500)
 
@@ -804,7 +887,7 @@ def _h_update_endpoint(req: "_Handler", _groups: tuple) -> dict:
             from wireseal.dns.ip_resolver import resolve_public_ip
             endpoint = str(resolve_public_ip())
         except Exception as exc:
-            raise _ApiError(f"Could not auto-detect public IP: {exc}", 500)
+            raise _ApiError("Could not auto-detect public IP.", 500)
 
     with _lock:
         vault      = _session["vault"]
@@ -853,7 +936,15 @@ class _Handler(BaseHTTPRequestHandler):
         pass
 
     def _cors(self) -> None:
-        self.send_header("Access-Control-Allow-Origin",  "*")
+        # Only allow requests from the same host — never wildcard.
+        # The dashboard is served from the same origin so no CORS header
+        # is strictly needed, but dev tools / local testing may use
+        # 127.0.0.1 or localhost interchangeably.
+        origin = self.headers.get("Origin", "")
+        _allowed = {"http://127.0.0.1", "http://localhost"}
+        if any(origin == a or origin.startswith(a + ":") for a in _allowed):
+            self.send_header("Access-Control-Allow-Origin", origin)
+        # No header at all for unknown origins — browser will block.
         self.send_header("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
         self.send_header("Access-Control-Allow-Headers", "Content-Type")
 
@@ -864,7 +955,7 @@ class _Handler(BaseHTTPRequestHandler):
         try:
             return json.loads(self.rfile.read(length))
         except json.JSONDecodeError as exc:
-            raise _ApiError(f"Invalid JSON: {exc}", 400)
+            raise _ApiError("Invalid JSON in request body.", 400)
 
     def _send(self, data: Any, status: int = 200) -> None:
         body = json.dumps(data, default=str).encode()
@@ -887,7 +978,7 @@ class _Handler(BaseHTTPRequestHandler):
                 except _ApiError as exc:
                     self._send({"error": str(exc)}, exc.status)
                 except Exception as exc:
-                    self._send({"error": f"Internal error: {exc}"}, 500)
+                    self._send({"error": "Internal server error."}, 500)
                 return
         self._send({"error": "Not found"}, 404)
 
@@ -993,18 +1084,14 @@ def serve(host: str = "127.0.0.1", port: int = 8080, gui: bool = True) -> None:
     server_thread.start()
 
     try:
-        import webview  # pywebview
+        import webview  # pywebview — EdgeChromium on Windows, WKWebView on macOS, WebKitGTK on Linux
         window = webview.create_window(
-            "WireSeal",
-            url,
-            width=1200,
-            height=800,
-            min_size=(900, 600),
+            "WireSeal", url, width=1200, height=800, min_size=(900, 600),
         )
         webview.start()  # blocks until the native window is closed
     except ImportError:
         if not _quiet:
-            print("[wireseal] pywebview not installed — falling back to system browser.")
+            print("[wireseal] Native window not available — falling back to system browser.")
             print("[wireseal] Press Ctrl+C to stop.")
         webbrowser.open(url)
         try:

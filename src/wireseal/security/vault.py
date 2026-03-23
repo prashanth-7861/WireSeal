@@ -168,11 +168,19 @@ def _ensure_vault_dir(dir_path: Path) -> None:
     else:
         try:
             dir_str = str(dir_path)
-            # Remove inherited permissions, then grant SYSTEM and Administrators full control
+            # Get the current user's name for ACL grant
+            current_user = os.environ.get("USERNAME", "")
+            # Remove inherited permissions, then grant SYSTEM, Administrators,
+            # and the current user full control (so the app works without admin).
+            acl_cmd = [
+                "icacls", dir_str, "/inheritance:r",
+                "/grant:r", "SYSTEM:(OI)(CI)F",
+                "/grant:r", "Administrators:(OI)(CI)F",
+            ]
+            if current_user:
+                acl_cmd.extend(["/grant:r", f"{current_user}:(OI)(CI)F"])
             subprocess.run(
-                ["icacls", dir_str, "/inheritance:r",
-                 "/grant:r", "SYSTEM:(OI)(CI)F",
-                 "/grant:r", "Administrators:(OI)(CI)F"],
+                acl_cmd,
                 check=True,
                 capture_output=True,
                 creationflags=subprocess.CREATE_NO_WINDOW,

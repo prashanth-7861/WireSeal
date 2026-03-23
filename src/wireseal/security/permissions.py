@@ -78,19 +78,18 @@ def check_file_permissions(path: Path) -> bool:
 
 
 def _set_windows_file_permissions(path: Path) -> None:
-    """Set SYSTEM + Administrators R,W permissions on a file using icacls."""
+    """Set SYSTEM + Administrators + current user R,W permissions on a file using icacls."""
     try:
-        subprocess.run(
-            [
-                "icacls", str(path),
-                "/inheritance:r",          # remove inherited permissions
-                "/grant:r", "SYSTEM:(R,W)",
-                "/grant:r", "Administrators:(R,W)",
-            ],
-            check=True,
-            capture_output=True,
-            creationflags=_SP_FLAGS,
-        )
+        current_user = os.environ.get("USERNAME", "")
+        cmd = [
+            "icacls", str(path),
+            "/inheritance:r",
+            "/grant:r", "SYSTEM:(R,W)",
+            "/grant:r", "Administrators:(R,W)",
+        ]
+        if current_user:
+            cmd.extend(["/grant:r", f"{current_user}:(R,W)"])
+        subprocess.run(cmd, check=True, capture_output=True, creationflags=_SP_FLAGS)
     except Exception as exc:
         # Try pywin32 as fallback
         if _try_pywin32_file_permissions(path):
@@ -104,19 +103,18 @@ def _set_windows_file_permissions(path: Path) -> None:
 
 
 def _set_windows_dir_permissions(path: Path) -> None:
-    """Set SYSTEM + Administrators full control on a directory using icacls."""
+    """Set SYSTEM + Administrators + current user full control on a directory using icacls."""
     try:
-        subprocess.run(
-            [
-                "icacls", str(path),
-                "/inheritance:r",
-                "/grant:r", "SYSTEM:(OI)(CI)F",
-                "/grant:r", "Administrators:(OI)(CI)F",
-            ],
-            check=True,
-            capture_output=True,
-            creationflags=_SP_FLAGS,
-        )
+        current_user = os.environ.get("USERNAME", "")
+        cmd = [
+            "icacls", str(path),
+            "/inheritance:r",
+            "/grant:r", "SYSTEM:(OI)(CI)F",
+            "/grant:r", "Administrators:(OI)(CI)F",
+        ]
+        if current_user:
+            cmd.extend(["/grant:r", f"{current_user}:(OI)(CI)F"])
+        subprocess.run(cmd, check=True, capture_output=True, creationflags=_SP_FLAGS)
     except Exception as exc:
         warnings.warn(
             f"Could not set restrictive permissions on directory {path}: {exc}. "

@@ -29,7 +29,21 @@ a = Analysis(
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=[],
+    excludes=[
+        # No GUI in CLI binary
+        'webview', 'webview2', 'pythonnet', 'clr', 'clr_loader',
+        'PySide6', 'qtpy', 'shiboken6',
+        'PySide6.QtWebEngineWidgets', 'PySide6.QtWebEngineCore',
+        'PyQt5', 'PyQt5.QtCore', 'PyQt5.QtGui', 'PyQt5.QtWidgets',
+        'PyQt5.QtWebEngineWidgets', 'PyQtWebEngine',
+        'nicegui',
+        # Exclude heavy packages not needed by CLI
+        'numpy', 'numpy.core', 'numpy._core',
+        'scipy', 'pandas', 'matplotlib',
+        'tornado', 'tkinter', 'unittest',
+        'test', 'setuptools',
+        'PIL.ImageQt',
+    ],
     win_no_prefer_redirects=False,
     win_private_assemblies=False,
     cipher=block_cipher,

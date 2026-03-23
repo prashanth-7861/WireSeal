@@ -1,0 +1,36 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "wireseal-server",
+      "runtimeExecutable": "python",
+      "runtimeArgs": ["-c", "import sys; sys.path.insert(0,'src'); from wireseal.api import serve; serve(gui=False)"],
+      "port": 8080
+    },
+    {
+      "name": "pytest (unit tests)",
+      "runtimeExecutable": "python",
+      "runtimeArgs": ["-m", "pytest", "-m", "not integration", "-q"],
+      "port": 0
+    },
+    {
+      "name": "pytest (all tests, with coverage)",
+      "runtimeExecutable": "python",
+      "runtimeArgs": ["-m", "pytest", "-m", "not integration", "--cov=wireseal", "--cov-report=term-missing", "-q"],
+      "port": 0
+    },
+    {
+      "name": "wireseal CLI",
+      "runtimeExecutable": "python",
+      "runtimeArgs": ["-m", "wireseal.main", "--help"],
+      "port": 0
+    },
+    {
+      "name": "dashboard-dev",
+      "runtimeExecutable": "node",
+      "runtimeArgs": ["C:\\Program Files\\nodejs\\node_modules\\npm\\bin\\npm-cli.js", "run", "dev"],
+      "cwd": "Dashboard",
+      "port": 5173
+    }
+  ]
+}
