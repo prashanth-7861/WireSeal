@@ -1084,6 +1084,21 @@ def serve(host: str = "127.0.0.1", port: int = 8080, gui: bool = True) -> None:
     server_thread.start()
 
     try:
+        # On Linux, ensure GI_TYPELIB_PATH includes system typelib dirs.
+        # PyInstaller's runtime hook sets it to only the bundled dir; append system paths.
+        if sys.platform == "linux":
+            _sys_typelib_dirs = [
+                "/usr/lib/girepository-1.0",
+                "/usr/lib64/girepository-1.0",
+                "/usr/lib/x86_64-linux-gnu/girepository-1.0",
+                "/usr/lib/aarch64-linux-gnu/girepository-1.0",
+            ]
+            existing = os.environ.get("GI_TYPELIB_PATH", "")
+            extra = [d for d in _sys_typelib_dirs if os.path.isdir(d) and d not in existing]
+            if extra:
+                parts = ([existing] if existing else []) + extra
+                os.environ["GI_TYPELIB_PATH"] = os.pathsep.join(parts)
+
         import webview  # pywebview — EdgeChromium on Windows, WKWebView on macOS, WebKitGTK on Linux
         window = webview.create_window(
             "WireSeal", url, width=1200, height=800, min_size=(900, 600),

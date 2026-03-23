@@ -69,6 +69,9 @@ jobs:
             libgirepository-2.0-dev \
             gir1.2-webkit2-4.1 \
             gir1.2-gtk-3.0 \
+            gir1.2-glib-2.0 \
+            gir1.2-gdkpixbuf-2.0 \
+            gir1.2-pango-1.0 \
             libcairo2-dev \
             pkg-config \
             || sudo apt-get install -y \
@@ -76,6 +79,9 @@ jobs:
               libgirepository1.0-dev \
               gir1.2-webkit2-4.0 \
               gir1.2-gtk-3.0 \
+              gir1.2-glib-2.0 \
+              gir1.2-gdkpixbuf-2.0 \
+              gir1.2-pango-1.0 \
               libcairo2-dev \
               pkg-config
 
@@ -88,7 +94,10 @@ jobs:
 
       - name: Install PyGObject (Linux only — GTK bindings for pywebview)
         if: runner.os == 'Linux'
-        run: pip install PyGObject
+        run: |
+          # PyGObject >=3.52 requires GIRepository 3.0 typelib which Ubuntu 24.04
+          # doesn't ship. Pin to 3.50.x which works with GIRepository 2.0.
+          pip install 'PyGObject>=3.50,<3.52'
 
       - name: Build GUI binary
         run: pyinstaller wireseal.spec

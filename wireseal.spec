@@ -102,7 +102,7 @@ a = Analysis(
     ],
     hookspath=[],
     hooksconfig={},
-    runtime_hooks=['hooks/hook-gi.py'] if sys.platform == 'linux' else [],
+    runtime_hooks=[],
     excludes=[
         # Exclude heavy Qt — pywebview uses EdgeChromium (no Qt needed)
         'PySide6', 'PySide6.QtCore', 'PySide6.QtGui', 'PySide6.QtWidgets',
