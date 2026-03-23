@@ -314,6 +314,107 @@ class LinuxAdapter(AbstractPlatformAdapter):
     # 7. IP forwarding
     # ------------------------------------------------------------------
 
+    def open_firewalld_port(self, wg_port: int) -> None:
+        """Open WireGuard UDP port in firewalld if firewalld is active.
+
+        Without this, firewalld's filter_INPUT chain (priority filter+10) rejects
+        incoming WireGuard UDP packets even though wg_filter accepts them at
+        priority 0, because nftables evaluates both chains independently.
+
+        Idempotent: skips if firewalld is not running or port is already open.
+        """
+        if shutil.which("firewall-cmd") is None:
+            return
+
+        # Check if firewalld is running
+        check = subprocess.run(
+            ["firewall-cmd", "--state"],
+            shell=False, capture_output=True,
+        )
+        if check.returncode != 0:
+            return  # firewalld not running
+
+        # Check if port is already open
+        check = subprocess.run(
+            ["firewall-cmd", "--query-port", f"{wg_port}/udp"],
+            shell=False, capture_output=True,
+        )
+        if check.returncode == 0:
+            return  # already open
+
+        try:
+            subprocess.run(
+                ["firewall-cmd", "--add-port", f"{wg_port}/udp", "--permanent"],
+                shell=False, check=True, capture_output=True, timeout=30,
+            )
+            subprocess.run(
+                ["firewall-cmd", "--reload"],
+                shell=False, check=True, capture_output=True, timeout=30,
+            )
+        except subprocess.CalledProcessError as exc:
+            stderr = exc.stderr.decode("utf-8", errors="replace") if exc.stderr else ""
+            print(f"[wireseal] Warning: could not open firewalld port: {stderr}",
+                  file=sys.stderr)
+
+    def ensure_sshd(self) -> None:
+        """Ensure OpenSSH server is installed and running.
+
+        Enables SFTP/SSH access from VPN clients to the server for file transfer.
+        Idempotent: skips if sshd is already running.
+        """
+        # Check if sshd is already running
+        check = subprocess.run(
+            ["systemctl", "is-active", "sshd"],
+            shell=False, capture_output=True,
+        )
+        if check.returncode == 0:
+            return  # already running
+
+        # Also check ssh.service (Debian/Ubuntu name)
+        check = subprocess.run(
+            ["systemctl", "is-active", "ssh"],
+            shell=False, capture_output=True,
+        )
+        if check.returncode == 0:
+            return
+
+        # Try to install openssh if not present
+        if shutil.which("sshd") is None:
+            try:
+                if shutil.which("pacman"):
+                    subprocess.run(
+                        ["pacman", "-S", "--needed", "--noconfirm", "openssh"],
+                        shell=False, check=True, capture_output=True, timeout=120,
+                    )
+                elif shutil.which("apt-get"):
+                    subprocess.run(
+                        ["apt-get", "install", "-y", "openssh-server"],
+                        shell=False, check=True, capture_output=True, timeout=120,
+                    )
+                elif shutil.which("dnf"):
+                    subprocess.run(
+                        ["dnf", "install", "-y", "openssh-server"],
+                        shell=False, check=True, capture_output=True, timeout=120,
+                    )
+            except subprocess.CalledProcessError as exc:
+                stderr = exc.stderr.decode("utf-8", errors="replace") if exc.stderr else ""
+                print(f"[wireseal] Warning: could not install openssh: {stderr}",
+                      file=sys.stderr)
+                return
+
+        # Enable and start sshd
+        for svc_name in ("sshd", "ssh"):
+            try:
+                subprocess.run(
+                    ["systemctl", "enable", "--now", svc_name],
+                    shell=False, check=True, capture_output=True, timeout=30,
+                )
+                return
+            except subprocess.CalledProcessError:
+                continue
+
+        print("[wireseal] Warning: could not start sshd service", file=sys.stderr)
+
     def enable_ip_forwarding(self) -> None:
         """Write /etc/sysctl.d/99-wireguard.conf and apply it immediately.
 

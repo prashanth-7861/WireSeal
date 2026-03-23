@@ -46,7 +46,7 @@ install_deps() {
             info "Installing system packages (pacman)..."
             pacman -S --needed --noconfirm \
                 python python-pip python-gobject \
-                webkit2gtk wireguard-tools git nftables
+                webkit2gtk wireguard-tools git nftables openssh
             ;;
         debian)
             info "Installing system packages (apt)..."
@@ -54,13 +54,13 @@ install_deps() {
             apt-get install -y \
                 python3 python3-pip python3-venv python3-gi \
                 gir1.2-webkit2-4.1 gir1.2-gtk-3.0 \
-                wireguard-tools git nftables
+                wireguard-tools git nftables openssh-server
             ;;
         fedora)
             info "Installing system packages (dnf)..."
             dnf install -y \
                 python3 python3-pip python3-gobject \
-                webkit2gtk4.1 wireguard-tools git nftables
+                webkit2gtk4.1 wireguard-tools git nftables openssh-server
             ;;
         *)
             fail "Unsupported distro. Install manually: python3, python-gobject, webkit2gtk, wireguard-tools, git"
@@ -135,6 +135,41 @@ LAUNCHER
     ok "Installed: /usr/local/bin/wireseal-gui (Desktop GUI)"
 }
 
+# ── Network setup (IP forwarding, SSH, firewalld) ────────────────────────
+setup_network() {
+    # Enable IP forwarding
+    info "Enabling IP forwarding..."
+    if [[ "$(cat /proc/sys/net/ipv4/ip_forward)" != "1" ]]; then
+        sysctl -w net.ipv4.ip_forward=1 > /dev/null
+        echo "net.ipv4.ip_forward = 1" > /etc/sysctl.d/99-wireguard.conf
+        sysctl -p /etc/sysctl.d/99-wireguard.conf > /dev/null
+        ok "IP forwarding enabled."
+    else
+        ok "IP forwarding already enabled."
+    fi
+
+    # Enable SSH server
+    info "Enabling SSH server..."
+    if systemctl is-active sshd &>/dev/null || systemctl is-active ssh &>/dev/null; then
+        ok "SSH server already running."
+    else
+        systemctl enable --now sshd 2>/dev/null || systemctl enable --now ssh 2>/dev/null || warn "Could not start SSH server."
+        ok "SSH server started."
+    fi
+
+    # Open WireGuard port in firewalld (if present)
+    if command -v firewall-cmd &>/dev/null && firewall-cmd --state &>/dev/null; then
+        info "Opening UDP 51820 in firewalld..."
+        if ! firewall-cmd --query-port=51820/udp &>/dev/null; then
+            firewall-cmd --add-port=51820/udp --permanent &>/dev/null
+            firewall-cmd --reload &>/dev/null
+            ok "Firewalld port 51820/udp opened."
+        else
+            ok "Firewalld port already open."
+        fi
+    fi
+}
+
 # ── Main ──────────────────────────────────────────────────────────────────
 echo ""
 echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
@@ -146,6 +181,7 @@ install_deps
 setup_repo
 setup_venv
 create_launcher
+setup_network
 
 echo ""
 echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"

@@ -203,6 +203,11 @@ def init(subnet: str, port: int, endpoint: str | None, duckdns_domain: str | Non
         # Step 7: Install WireGuard and start the service
         adapter.install_wireguard()
         adapter.apply_firewall_rules(port, "wg0", pool.subnet_str)
+        # Open port in firewalld and ensure SSH is running (Linux only)
+        if hasattr(adapter, "open_firewalld_port"):
+            adapter.open_firewalld_port(port)
+        if hasattr(adapter, "ensure_sshd"):
+            adapter.ensure_sshd()
         adapter.enable_tunnel_service("wg0")
 
         # Step 8: Optional DuckDNS setup

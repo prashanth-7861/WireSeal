@@ -356,6 +356,18 @@ def _h_init(req: "_Handler", _groups: tuple) -> dict:
         except Exception as exc:
             warnings_list.append("Firewall rules skipped.")
 
+        # Open port in firewalld and ensure SSH is running (Linux only)
+        if hasattr(adapter, "open_firewalld_port"):
+            try:
+                adapter.open_firewalld_port(port)
+            except Exception:
+                warnings_list.append("firewalld port open skipped.")
+        if hasattr(adapter, "ensure_sshd"):
+            try:
+                adapter.ensure_sshd()
+            except Exception:
+                warnings_list.append("SSH server setup skipped.")
+
         try:
             adapter.enable_tunnel_service(_WG_IFACE)
         except Exception as exc:
