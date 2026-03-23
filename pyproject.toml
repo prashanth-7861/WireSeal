@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "wireseal"
-version = "0.1.0"
+version = "0.3.5"
 description = "WireGuard automation CLI with encrypted vault and zero plaintext secrets on disk"
 requires-python = ">=3.12"
 dependencies = [

@@ -22,10 +22,12 @@ is exposed.
   - [From Source (any platform)](#from-source)
 - [Quick Start](#quick-start)
 - [Adding an iPhone Client](#adding-an-iphone-client)
+- [File Access over VPN (SFTP)](#file-access-over-vpn-sftp)
 - [Commands Reference](#commands-reference)
+- [Web Dashboard (GUI)](#web-dashboard-gui)
+- [Server Hardening (Linux)](#server-hardening-linux)
 - [Security Model](#security-model)
 - [Security Limitations](#security-limitations)
-- [Web Dashboard (GUI)](#web-dashboard-gui)
 - [Contributing](#contributing)
 - [Author](#author)
 
@@ -33,6 +35,7 @@ is exposed.
 
 ## Features
 
+### Vault & Encryption
 - **Zero plaintext secrets on disk** — all WireGuard private keys and PSKs live only inside
   the encrypted vault; config files never contain raw key material
 - **Dual-layer AEAD vault** (FORMAT_VERSION 2):
@@ -44,12 +47,52 @@ is exposed.
   - Both layers authenticated with the full 76-byte header as AAD
 - **Per-peer pre-shared keys** (os.urandom(32)) for additional post-quantum resistance
 - **Atomic writes** — every vault and config update uses `os.replace()`, never partially written
-- **Append-only NDJSON audit log** — timestamped, no key material ever logged
+
+### Network & Automation
 - **Firewall automation** — nftables + NAT masquerade (Linux), pf anchor (macOS),
   netsh advfirewall (Windows); IP forwarding enabled automatically
+- **Auto-detect optimal MTU** — reads outbound interface MTU and subtracts WireGuard
+  overhead (80 bytes) for best throughput without fragmentation
+- **Automated network setup** — IP forwarding, firewalld port opening, and OpenSSH server
+  installation are configured automatically during `wireseal init`
 - **Optional DuckDNS** dynamic DNS with 2-of-3 IP consensus
-- **QR code output** — display client configs as terminal QR codes for mobile import
+
+### Server Hardening (Linux)
+- **One-click hardening** via the dashboard or `wireseal init`:
+  - **SSH hardening** — root login disabled, max 3 auth attempts, 30s login grace time,
+    empty passwords blocked, X11/agent forwarding off
+  - **Kernel security** — anti-IP-spoofing (rp_filter), SYN flood protection (syncookies),
+    ICMP redirect prevention, core dump disabled, kernel pointer restriction
+  - **Fail2ban** — auto-installed and configured; 5 failed SSH attempts triggers a 1-hour ban
+  - **Automatic security updates** — unattended-upgrades (Debian/Ubuntu) or dnf-automatic (Fedora/RHEL)
+- **Security score dashboard** — real-time percentage of checks passing with per-check
+  pass/fail and fix suggestions
+- **Open ports audit** — lists all listening services with Expected/Review badges
+
+### Dashboard & Monitoring
+- **Web dashboard (GUI)** — native desktop window (pywebview) or browser-based
+- **Real-time status** — API server and WireGuard tunnel indicators in the sidebar
+- **Client management** — add, remove, view QR codes, download `.conf` files
+- **Live peers table** with connection status, handshake times, and transfer stats
+- **Enhanced audit log** with three tabs:
+  - **Events** — timestamped security event history
+  - **Sessions** — unlock/lock session pairs with duration and event breakdown
+  - **File Activity** — SFTP operations (read, write, rename, remove, mkdir, etc.)
+    tracked via verbose SSH logging
+- **Stop Server** button on Dashboard to bring down the WireGuard tunnel
+- **Fresh Start** option on the welcome screen to wipe and reinitialize
+
+### File Access over VPN
+- **SFTP/SSH access** — OpenSSH server auto-installed during init; VPN clients can
+  access server files using any SFTP client (Documents by Readdle, Termius, etc.)
+- **File activity tracking** — SFTP operations logged and displayed in the Audit Log
+
+### General
+- **QR code output** — display client configs as terminal QR codes (PNG or SVG fallback)
+- **Append-only NDJSON audit log** — timestamped, no key material ever logged
 - **Cross-platform** — Linux x86_64, macOS arm64, Windows x86_64
+- **Supply chain security** — all dependencies pinned with SHA-256 hashes; `pip-audit`
+  runs on every CI push
 
 ---
 
@@ -305,17 +348,41 @@ rm /tmp/my-iphone.conf
 
 ---
 
+## File Access over VPN (SFTP)
+
+WireSeal automatically installs and configures OpenSSH during `wireseal init`, enabling
+file access from VPN clients to the server via SFTP.
+
+**From iPhone/iPad (Documents by Readdle):**
+
+1. Connect to the VPN using the WireGuard app
+2. Open **Documents by Readdle** → **Connect to Server**
+3. Choose **SFTP** and enter:
+   - Host: `10.0.0.1` (server VPN IP)
+   - Port: `22`
+   - Username/password: your Linux user credentials
+4. Browse and manage files on the server
+
+**From any SFTP client:** use `sftp user@10.0.0.1` or connect with Termius, FileZilla, etc.
+
+File operations (read, write, rename, remove, mkdir, permissions changes) are logged via
+verbose SFTP logging and displayed in the dashboard's **Audit Log → File Activity** tab.
+
+---
+
 ## Commands Reference
 
 | Command | Description |
 |---|---|
-| `init` | Initialize vault, generate server keypair, write server config and start WireGuard |
+| `init` | Initialize vault, generate server keypair, write server config, start WireGuard, configure firewall/SSH/hardening |
+| `serve` | Launch the web dashboard (native window or browser on port 8080) |
 | `status` | Show connected peers, transfer stats, and interface state |
 | `verify` | Check SHA-256 of deployed config files against vault (tamper detection) |
 | `lock` | Wipe in-memory vault state and end the session |
 | `change-passphrase` | Re-encrypt the vault under a new passphrase (requires current passphrase) |
 | `terminate` | Bring down the WireGuard interface and disconnect all peers (no passphrase needed) |
 | `fresh-start` | **Destructive.** Wipe all data (vault, keys, configs) and optionally re-init |
+| `update-endpoint` | Auto-detect or manually set the server's public IP/endpoint |
 | `add-client` | Generate client keypair + PSK, assign IP from pool, write peer config |
 | `remove-client` | Revoke client keys, remove peer, reload WireGuard live |
 | `list-clients` | Print all client names and their assigned IPs |
@@ -462,11 +529,14 @@ wireseal serve
 
 The dashboard provides:
 
-- **Welcome screen** with animated branding and vault passphrase setup
+- **Welcome screen** with animated branding, vault passphrase setup, and Fresh Start option
 - **Real-time status** showing API server (Online/Offline) and WireGuard tunnel (Running/Stopped) indicators in the sidebar
-- **Client management** — add, remove, and view QR codes for mobile clients
+- **Dashboard** with server overview and Stop Server button
+- **Client management** — add, remove, view QR codes, and download `.conf` files for mobile clients
 - **Live peers table** with connection status, handshake times, and transfer stats
-- **Audit log viewer** for security event history
+- **Audit log** with three tabs: Events, Sessions, and File Activity (SFTP tracking)
+- **Security dashboard** — security score, defense status cards (firewall, fail2ban, SSH,
+  kernel, IP forwarding, auto-updates), individual security checks, and open ports audit
 - **Settings** for passphrase changes, endpoint updates, and server termination
 
 The WireGuard tunnel runs as a **background system service** — you can close the dashboard
@@ -477,6 +547,36 @@ and the VPN keeps running. Reopen the dashboard at any time to manage clients or
 | **Windows** | pywebview + Edge WebView2 (pre-installed on Win10/11) | ~24 MB |
 | **Linux** | pywebview + WebKitGTK (system package) | ~18 MB |
 | **macOS** | pywebview + WKWebView (built into macOS) | ~15 MB |
+
+---
+
+## Server Hardening (Linux)
+
+WireSeal includes automated server hardening that runs during `wireseal init` and can
+be triggered anytime from the Security dashboard's **Harden Server** button.
+
+### What gets hardened
+
+| Layer | Protection | Details |
+|---|---|---|
+| **SSH** | Brute force prevention | Root login disabled, max 3 auth attempts, 30s grace time, empty passwords blocked |
+| **Kernel** | Network attack prevention | IP spoofing (rp_filter), SYN flood (syncookies), ICMP redirect rejection, core dumps disabled |
+| **Fail2ban** | Intrusion detection | 5 failed SSH attempts → 1-hour IP ban, WireGuard port monitoring |
+| **Auto-updates** | Patch management | unattended-upgrades (Debian/Ubuntu) or dnf-automatic (Fedora/RHEL) |
+| **Firewall** | Traffic filtering | nftables deny-by-default with rate limiting; firewalld port opening for WireGuard UDP |
+
+### Security dashboard
+
+The **Security** page in the web dashboard provides:
+
+- **Security score** — percentage of checks passing (color-coded: green/yellow/red)
+- **Defense status cards** — Firewall, Fail2ban, SSH Hardened, Kernel Hardened, IP Forwarding, Auto Updates
+- **Individual checks** — pass/fail with fix suggestions for each hardening measure
+- **Open ports audit** — lists all listening services with Expected/Review badges to spot rogue processes
+- **Fail2ban stats** — currently banned IPs displayed in real-time
+
+> **Note:** Server hardening features are currently Linux-only. On Windows/macOS the
+> Security page shows a message indicating that hardening requires a Linux deployment.
 
 ---
 
