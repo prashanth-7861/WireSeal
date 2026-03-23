@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import {
   Server, Activity, Monitor, Clock, Wifi, WifiOff,
-  ShieldCheck, Users,
+  ShieldCheck, Users, PowerOff,
 } from "lucide-react";
 import { api, type Status } from "../api";
 
@@ -9,6 +9,7 @@ export function Dashboard() {
   const [status, setStatus] = useState<Status | null>(null);
   const [uptime, setUptime] = useState(0);
   const uptimeRef = useRef(0);
+  const [stopping, setStopping] = useState(false);
 
   // ── Status polling ──────────────────────────────────────────────────────
   const fetchStatus = useCallback(async () => {
@@ -47,6 +48,20 @@ export function Dashboard() {
 
   const connectedPeers = status?.peers.filter((p) => p.connected).length ?? 0;
 
+  // ── Stop server ─────────────────────────────────────────────────────────
+  const handleStop = async () => {
+    if (!confirm("Stop the WireGuard tunnel? Connected clients will be disconnected.")) return;
+    setStopping(true);
+    try {
+      await api.terminate();
+      await fetchStatus();
+    } catch {
+      // ignore
+    } finally {
+      setStopping(false);
+    }
+  };
+
   // ── Render ──────────────────────────────────────────────────────────────
   return (
     <div>
@@ -82,13 +97,25 @@ export function Dashboard() {
           </div>
 
           {status && (
-            <div className="text-right text-sm text-gray-500 space-y-1">
-              <div>Interface: <span className="font-mono text-gray-700">{status.interface}</span></div>
-              {status.endpoint && (
-                <div>Endpoint: <span className="font-mono text-gray-700">{status.endpoint}:{status.port}</span></div>
-              )}
-              {status.server_ip && (
-                <div>Server IP: <span className="font-mono text-gray-700">{status.server_ip}</span></div>
+            <div className="flex items-start gap-4">
+              <div className="text-right text-sm text-gray-500 space-y-1">
+                <div>Interface: <span className="font-mono text-gray-700">{status.interface}</span></div>
+                {status.endpoint && (
+                  <div>Endpoint: <span className="font-mono text-gray-700">{status.endpoint}:{status.port}</span></div>
+                )}
+                {status.server_ip && (
+                  <div>Server IP: <span className="font-mono text-gray-700">{status.server_ip}</span></div>
+                )}
+              </div>
+              {status.running && (
+                <button
+                  onClick={handleStop}
+                  disabled={stopping}
+                  className="flex items-center gap-2 px-4 py-2 bg-red-600 text-white text-sm font-medium rounded-lg hover:bg-red-700 transition-colors disabled:opacity-60"
+                >
+                  <PowerOff className="w-4 h-4" />
+                  {stopping ? "Stopping…" : "Stop Server"}
+                </button>
               )}
             </div>
           )}

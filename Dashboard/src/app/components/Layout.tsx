@@ -3,7 +3,7 @@ import { NavLink, Outlet, useNavigate } from "react-router";
 import {
   Server, ScrollText, Monitor, Settings, LogOut, Info,
   Lock, Play, Eye, EyeOff, AlertCircle, CheckCircle,
-  Shield, Sparkles, Wifi, WifiOff, Circle,
+  Shield, Sparkles, Wifi, WifiOff, Circle, RotateCcw,
 } from "lucide-react";
 import { api, VAULT_LOCKED_EVENT, type Status } from "../api";
 
@@ -133,6 +133,23 @@ export function Layout() {
     navigate("/");
   };
 
+  // Fresh start
+  const [showFreshStart, setShowFreshStart] = useState(false);
+  const [freshStartLoading, setFreshStartLoading] = useState(false);
+
+  const handleFreshStart = async () => {
+    setFreshStartLoading(true);
+    try {
+      await api.freshStart();
+      setShowFreshStart(false);
+      setVaultState("uninitialized");
+    } catch (err: unknown) {
+      setAuthError(err instanceof Error ? err.message : "Fresh start failed");
+    } finally {
+      setFreshStartLoading(false);
+    }
+  };
+
   const navItems = [
     { to: "/", label: "Dashboard", icon: Server, end: true },
     { to: "/clients", label: "Clients", icon: Monitor },
@@ -202,12 +219,65 @@ export function Layout() {
             {vaultState === "uninitialized" ? "Get Started" : "Unlock & Start"}
           </button>
 
+          {/* Fresh Start option */}
+          {vaultState === "locked" && (
+            <button
+              onClick={() => setShowFreshStart(true)}
+              className="flex items-center gap-2 text-blue-400/50 hover:text-blue-300 text-sm transition-colors"
+            >
+              <RotateCcw className="w-4 h-4" />
+              Fresh Start
+            </button>
+          )}
+
           {/* Security badge */}
           <div className="flex items-center gap-2 text-blue-400/40 text-xs mt-2">
             <Lock className="w-3.5 h-3.5" />
             <span>ChaCha20-Poly1305 + AES-256-GCM-SIV + Argon2id</span>
           </div>
         </div>
+
+        {/* Fresh Start confirmation dialog */}
+        {showFreshStart && (
+          <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
+            <div className="bg-white rounded-xl shadow-2xl p-8 w-full max-w-md mx-4">
+              <div className="flex items-center gap-3 mb-4">
+                <div className="w-12 h-12 bg-red-100 rounded-full flex items-center justify-center">
+                  <RotateCcw className="w-6 h-6 text-red-600" />
+                </div>
+                <div>
+                  <h2 className="text-xl font-semibold text-gray-900">Fresh Start</h2>
+                  <p className="text-sm text-gray-500">This action cannot be undone</p>
+                </div>
+              </div>
+              <div className="bg-red-50 border border-red-200 rounded-lg p-4 mb-6">
+                <p className="text-red-800 text-sm font-medium mb-2">This will permanently destroy:</p>
+                <ul className="text-red-700 text-sm space-y-1 list-disc list-inside">
+                  <li>All encryption keys and vault data</li>
+                  <li>All client configurations</li>
+                  <li>Server WireGuard config</li>
+                  <li>Audit log history</li>
+                </ul>
+              </div>
+              <div className="flex gap-3">
+                <button
+                  onClick={() => setShowFreshStart(false)}
+                  className="flex-1 px-4 py-2.5 border border-gray-300 rounded-lg hover:bg-gray-50 transition-colors"
+                  disabled={freshStartLoading}
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={handleFreshStart}
+                  disabled={freshStartLoading}
+                  className="flex-1 bg-red-600 text-white px-4 py-2.5 rounded-lg hover:bg-red-700 transition-colors disabled:opacity-60"
+                >
+                  {freshStartLoading ? "Resetting…" : "Confirm Fresh Start"}
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
 
         {/* Passphrase dialog */}
         {showPassphrase && (
