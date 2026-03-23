@@ -125,16 +125,16 @@ The package installs the binary to `/usr/local/bin/wireseal` and declares
 
 ```bash
 # Arch / Manjaro
-sudo pacman -S python-gobject webkit2gtk
+sudo pacman -S gobject-introspection webkit2gtk
 
 # Debian / Ubuntu
-sudo apt install python3-gi gir1.2-webkit2-4.1
+sudo apt install libgirepository-1.0-1 libwebkit2gtk-4.1-0 gir1.2-webkit2-4.1 gir1.2-gtk-3.0
 
 # Fedora / RHEL
-sudo dnf install python3-gobject webkit2gtk4.1
+sudo dnf install gobject-introspection webkit2gtk4.1
 ```
 
-Without these, WireSeal falls back to opening the dashboard in your system browser.
+Without these system libraries, WireSeal falls back to opening the dashboard in your system browser.
 
 **Option B — installer script (all distros, including Arch):**
 
