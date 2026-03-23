@@ -402,6 +402,9 @@ class LinuxAdapter(AbstractPlatformAdapter):
                       file=sys.stderr)
                 return
 
+        # Enable SFTP logging for file activity tracking
+        self._enable_sftp_logging()
+
         # Enable and start sshd
         for svc_name in ("sshd", "ssh"):
             try:
@@ -414,6 +417,60 @@ class LinuxAdapter(AbstractPlatformAdapter):
                 continue
 
         print("[wireseal] Warning: could not start sshd service", file=sys.stderr)
+
+    def _enable_sftp_logging(self) -> None:
+        """Enable verbose SFTP logging in sshd_config for file activity tracking.
+
+        Sets LogLevel VERBOSE and configures internal-sftp with -l VERBOSE
+        so file operations (open, read, write, rename, remove, etc.) are logged
+        to the system journal for the file activity dashboard.
+        """
+        sshd_config = Path("/etc/ssh/sshd_config")
+        if not sshd_config.exists():
+            return
+
+        try:
+            content = sshd_config.read_text(encoding="utf-8")
+        except OSError:
+            return
+
+        modified = False
+
+        # Set LogLevel VERBOSE if not already set
+        if "LogLevel VERBOSE" not in content:
+            import re as _re
+            # Replace existing LogLevel or add it
+            if _re.search(r'^LogLevel\s+', content, _re.MULTILINE):
+                content = _re.sub(
+                    r'^LogLevel\s+\S+',
+                    'LogLevel VERBOSE',
+                    content,
+                    count=1,
+                    flags=_re.MULTILINE,
+                )
+            else:
+                content += "\n# Added by WireSeal for file activity logging\nLogLevel VERBOSE\n"
+            modified = True
+
+        # Ensure internal-sftp has verbose logging
+        if "internal-sftp" in content and "-l VERBOSE" not in content:
+            content = content.replace(
+                "internal-sftp",
+                "internal-sftp -l VERBOSE",
+                1,
+            )
+            modified = True
+
+        if modified:
+            try:
+                sshd_config.write_text(content, encoding="utf-8")
+                # Reload sshd to apply changes
+                subprocess.run(
+                    ["systemctl", "reload", "sshd"],
+                    shell=False, capture_output=True, timeout=10,
+                )
+            except (OSError, subprocess.CalledProcessError):
+                pass
 
     def enable_ip_forwarding(self) -> None:
         """Write /etc/sysctl.d/99-wireguard.conf and apply it immediately.

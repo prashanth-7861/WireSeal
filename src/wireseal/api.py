@@ -471,10 +471,12 @@ def _h_unlock(req: "_Handler", _groups: tuple) -> dict:
 
 
 def _h_lock(req: "_Handler", _groups: tuple) -> dict:
+    from wireseal.security.audit import AuditLog
     with _lock:
         if _session["passphrase"]:
             _session["passphrase"].wipe()
         _session.update(vault=None, passphrase=None, cache=None)
+    AuditLog(_AUDIT_PATH).log("lock", {})
     return {"ok": True}
 
 
@@ -864,6 +866,193 @@ def _h_audit_log(req: "_Handler", _groups: tuple) -> dict:
         return {"entries": []}
 
 
+def _h_session_summary(req: "_Handler", _groups: tuple) -> dict:
+    """Build a session summary from audit log entries."""
+    _require_unlocked()
+    if not _AUDIT_PATH.exists():
+        return {"sessions": [], "summary": {}}
+
+    try:
+        lines = _AUDIT_PATH.read_text().strip().splitlines()
+    except OSError:
+        return {"sessions": [], "summary": {}}
+
+    entries = []
+    for line in lines:
+        try:
+            entries.append(json.loads(line))
+        except json.JSONDecodeError:
+            pass
+
+    # Build session list (unlock → lock pairs)
+    sessions = []
+    current_session: dict | None = None
+    action_counts: dict[str, int] = {}
+    total_actions = 0
+
+    for entry in entries:
+        action = entry.get("action", "")
+        total_actions += 1
+        action_counts[action] = action_counts.get(action, 0) + 1
+
+        if action in ("unlock-web", "init"):
+            current_session = {
+                "start": entry.get("timestamp", ""),
+                "end": None,
+                "events": [entry],
+            }
+        elif action == "lock" and current_session:
+            current_session["end"] = entry.get("timestamp", "")
+            current_session["events"].append(entry)
+            sessions.append(current_session)
+            current_session = None
+        elif current_session:
+            current_session["events"].append(entry)
+
+    # If there's an active session (no lock yet), include it
+    if current_session:
+        current_session["end"] = None
+        sessions.append(current_session)
+
+    # Build session summaries (last 10)
+    session_summaries = []
+    for sess in sessions[-10:]:
+        event_types: dict[str, int] = {}
+        for ev in sess["events"]:
+            a = ev.get("action", "unknown")
+            event_types[a] = event_types.get(a, 0) + 1
+        session_summaries.append({
+            "start": sess["start"],
+            "end": sess["end"],
+            "event_count": len(sess["events"]),
+            "event_types": event_types,
+        })
+
+    return {
+        "sessions": list(reversed(session_summaries)),
+        "summary": {
+            "total_sessions": len(sessions),
+            "total_events": total_actions,
+            "action_counts": action_counts,
+            "clients_added": action_counts.get("add-client", 0),
+            "clients_removed": action_counts.get("remove-client", 0),
+            "configs_exported": action_counts.get("export-config", 0),
+            "qr_codes_generated": action_counts.get("export-qr", 0),
+        },
+    }
+
+
+def _h_file_activity(req: "_Handler", _groups: tuple) -> dict:
+    """Return recent SFTP/SSH file activity from system logs."""
+    _require_unlocked()
+
+    events: list[dict] = []
+
+    if sys.platform != "win32":
+        # Parse SFTP activity from journalctl (sshd internal-sftp logs)
+        try:
+            result = subprocess.run(
+                ["journalctl", "-u", "sshd", "--no-pager", "-n", "500",
+                 "--output=short-iso", "--grep=sftp-server"],
+                capture_output=True, text=True, timeout=10,
+            )
+            if result.returncode != 0:
+                # Try ssh.service (Debian/Ubuntu)
+                result = subprocess.run(
+                    ["journalctl", "-u", "ssh", "--no-pager", "-n", "500",
+                     "--output=short-iso", "--grep=sftp-server"],
+                    capture_output=True, text=True, timeout=10,
+                )
+
+            for line in result.stdout.strip().splitlines():
+                if not line:
+                    continue
+                event = _parse_sftp_log_line(line)
+                if event:
+                    events.append(event)
+        except Exception:
+            pass
+
+        # Also check auth.log if journalctl didn't find anything
+        if not events:
+            for log_path in ["/var/log/auth.log", "/var/log/secure"]:
+                try:
+                    with open(log_path, "r") as f:
+                        lines = f.readlines()[-500:]
+                    for line in lines:
+                        if "sftp-server" in line:
+                            event = _parse_sftp_log_line(line)
+                            if event:
+                                events.append(event)
+                    if events:
+                        break
+                except (OSError, PermissionError):
+                    continue
+
+    # Return most recent 100
+    return {"events": events[-100:]}
+
+
+def _parse_sftp_log_line(line: str) -> dict | None:
+    """Parse an SFTP log line into a structured event."""
+    import re as _re
+
+    # Common SFTP operations in log lines
+    sftp_ops = {
+        "open": "file_open",
+        "close": "file_close",
+        "read": "file_read",
+        "write": "file_write",
+        "opendir": "dir_open",
+        "closedir": "dir_close",
+        "mkdir": "dir_create",
+        "rmdir": "dir_remove",
+        "remove": "file_remove",
+        "rename": "file_rename",
+        "stat": "file_stat",
+        "lstat": "file_stat",
+        "fstat": "file_stat",
+        "setstat": "file_permissions",
+        "fsetstat": "file_permissions",
+        "symlink": "file_symlink",
+        "readlink": "file_readlink",
+        "realpath": "file_realpath",
+    }
+
+    for op, event_type in sftp_ops.items():
+        pattern = _re.compile(
+            rf'{op}\s+"([^"]+)"', _re.IGNORECASE
+        )
+        match = pattern.search(line)
+        if match:
+            filepath = match.group(1)
+            # Extract timestamp from beginning of line
+            ts_match = _re.match(r'(\d{4}-\d{2}-\d{2}T[\d:]+[+-]\d{4}|\w+\s+\d+\s+[\d:]+)', line)
+            timestamp = ts_match.group(1) if ts_match else ""
+
+            # For rename, try to find the second path
+            details: dict[str, Any] = {"path": filepath}
+            if op == "rename":
+                rename_match = _re.search(rf'rename\s+"([^"]+)"\s+"([^"]+)"', line)
+                if rename_match:
+                    details["from"] = rename_match.group(1)
+                    details["to"] = rename_match.group(2)
+
+            # Extract user if possible
+            user_match = _re.search(r'session opened for.*user\s+(\w+)|user\s+(\w+)', line)
+            if user_match:
+                details["user"] = user_match.group(1) or user_match.group(2)
+
+            return {
+                "timestamp": timestamp,
+                "type": event_type,
+                "operation": op,
+                "details": details,
+            }
+
+    return None
+
+
 def _h_change_passphrase(req: "_Handler", _groups: tuple) -> dict:
     _require_unlocked()
     body        = req._json()
@@ -1027,6 +1216,8 @@ _ROUTES: list[tuple[str, re.Pattern, Any]] = [
     ("GET",    re.compile(r"^/api/clients/([^/]+)/config$"), _h_client_config),
     ("DELETE", re.compile(r"^/api/clients/([^/]+)$"),        _h_remove_client),
     ("GET",    re.compile(r"^/api/audit-log$"),              _h_audit_log),
+    ("GET",    re.compile(r"^/api/session-summary$"),         _h_session_summary),
+    ("GET",    re.compile(r"^/api/file-activity$"),           _h_file_activity),
     ("POST",   re.compile(r"^/api/change-passphrase$"),      _h_change_passphrase),
     ("POST",   re.compile(r"^/api/terminate$"),              _h_terminate),
     ("POST",   re.compile(r"^/api/fresh-start$"),            _h_fresh_start),

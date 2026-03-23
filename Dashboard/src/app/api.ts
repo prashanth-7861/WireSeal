@@ -86,6 +86,31 @@ export interface AuditEntry {
   error: string | null;
 }
 
+export interface FileActivityEvent {
+  timestamp: string;
+  type: string;
+  operation: string;
+  details: Record<string, string>;
+}
+
+export interface SessionSummary {
+  sessions: {
+    start: string;
+    end: string | null;
+    event_count: number;
+    event_types: Record<string, number>;
+  }[];
+  summary: {
+    total_sessions: number;
+    total_events: number;
+    action_counts: Record<string, number>;
+    clients_added: number;
+    clients_removed: number;
+    configs_exported: number;
+    qr_codes_generated: number;
+  };
+}
+
 // ─── Endpoints ───────────────────────────────────────────────────────────────
 
 export const api = {
@@ -123,6 +148,12 @@ export const api = {
 
   auditLog: () =>
     _fetch<{ entries: AuditEntry[] }>("GET", "/audit-log"),
+
+  sessionSummary: () =>
+    _fetch<SessionSummary>("GET", "/session-summary"),
+
+  fileActivity: () =>
+    _fetch<{ events: FileActivityEvent[] }>("GET", "/file-activity"),
 
   changePassphrase: (current: string, newPass: string) =>
     _fetch<{ ok: boolean }>("POST", "/change-passphrase", { current, new: newPass }),
