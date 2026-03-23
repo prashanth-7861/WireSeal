@@ -54,6 +54,7 @@ def _build_nftables_ruleset(
             chain input {{
                 type filter hook input priority 0; policy drop;
                 iif "lo" accept
+                iifname "{wg_iface}" accept
                 meta l4proto {{ icmp, ipv6-icmp }} accept
                 ct state {{ established, related }} accept
                 ct state invalid drop

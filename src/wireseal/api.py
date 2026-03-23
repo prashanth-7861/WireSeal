@@ -559,7 +559,7 @@ def _h_add_client(req: "_Handler", _groups: tuple) -> dict:
         client_config = builder.render_client_config(
             client_private_key=priv_key_str,
             client_ip=allocated_ip,
-            dns_server=server_ip,
+            dns_server="1.1.1.1, 8.8.8.8",
             server_public_key=server_pub_key,
             psk=psk_str,
             server_endpoint=server_endpoint,
@@ -718,7 +718,7 @@ def _h_client_qr(req: "_Handler", groups: tuple) -> dict:
         config_str = ConfigBuilder().render_client_config(
             client_private_key=_extract(cdata["private_key"]),
             client_ip=cdata["ip"],
-            dns_server=state.server["ip"],
+            dns_server="1.1.1.1, 8.8.8.8",
             server_public_key=_extract(state.server["public_key"]),
             psk=_extract(cdata["psk"]),
             server_endpoint=_resolve_client_endpoint(state.server),
@@ -776,7 +776,7 @@ def _h_client_config(req: "_Handler", groups: tuple) -> dict:
         config_str = ConfigBuilder().render_client_config(
             client_private_key=_extract(cdata["private_key"]),
             client_ip=cdata["ip"],
-            dns_server=state.server["ip"],
+            dns_server="1.1.1.1, 8.8.8.8",
             server_public_key=_extract(state.server["public_key"]),
             psk=_extract(cdata["psk"]),
             server_endpoint=_resolve_client_endpoint(state.server),
