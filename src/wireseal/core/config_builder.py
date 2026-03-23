@@ -121,6 +121,7 @@ class ConfigBuilder:
         server_public_key: str,
         psk: str,
         server_endpoint: str,
+        mtu: int = 1420,
     ) -> str:
         """Render a WireGuard client config file.
 
@@ -134,6 +135,7 @@ class ConfigBuilder:
             server_public_key:  44-char base64 server public key.
             psk:                44-char base64 pre-shared key.
             server_endpoint:    Server endpoint (host:port).
+            mtu:                MTU for the client interface (default 1420).
 
         Returns:
             Rendered config file content as a string.
@@ -161,6 +163,7 @@ class ConfigBuilder:
             server_public_key=server_public_key,
             psk=psk,
             server_endpoint=server_endpoint,
+            mtu=mtu,
         )
 
     def write_config(

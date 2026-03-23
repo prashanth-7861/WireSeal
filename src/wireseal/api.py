@@ -145,6 +145,53 @@ def _extract(value: Any) -> str:
     return str(value)
 
 
+def _detect_mtu() -> int:
+    """Detect optimal WireGuard client MTU based on outbound interface MTU.
+
+    WireGuard adds 80 bytes overhead (60 IPv4/IPv6 + 20 WireGuard header).
+    We subtract that from the outbound interface MTU to get the optimal client MTU.
+    Falls back to 1420 if detection fails.
+    """
+    try:
+        if sys.platform == "win32":
+            import subprocess as _sp
+            result = _sp.run(
+                ["netsh", "interface", "ipv4", "show", "interfaces"],
+                capture_output=True, text=True, timeout=10,
+            )
+            # Find the highest MTU from connected interfaces (skip loopback)
+            import re as _re
+            mtus = []
+            for line in result.stdout.splitlines():
+                parts = line.split()
+                if len(parts) >= 4 and parts[0].isdigit() and parts[1].isdigit():
+                    mtu_val = int(parts[1])
+                    if 500 < mtu_val <= 9000:  # reasonable range
+                        mtus.append(mtu_val)
+            if mtus:
+                return max(mtus) - 80
+        else:
+            import subprocess as _sp
+            # Use ip route to find the outbound interface, then get its MTU
+            result = _sp.run(
+                ["ip", "route", "get", "8.8.8.8"],
+                capture_output=True, text=True, timeout=10,
+            )
+            import re as _re
+            iface_match = _re.search(r"\bdev\s+(\S+)", result.stdout)
+            if iface_match:
+                iface = iface_match.group(1)
+                mtu_result = _sp.run(
+                    ["cat", f"/sys/class/net/{iface}/mtu"],
+                    capture_output=True, text=True, timeout=5,
+                )
+                if mtu_result.returncode == 0:
+                    return int(mtu_result.stdout.strip()) - 80
+    except Exception:
+        pass
+    return 1420  # safe default
+
+
 def _resolve_client_endpoint(server_state: dict) -> str:
     """Return the endpoint string clients use to reach the server."""
     port = server_state["port"]
@@ -575,6 +622,7 @@ def _h_add_client(req: "_Handler", _groups: tuple) -> dict:
             server_public_key=server_pub_key,
             psk=psk_str,
             server_endpoint=server_endpoint,
+            mtu=_detect_mtu(),
         )
 
         clients_dir     = _VAULT_DIR / "clients"
@@ -734,6 +782,7 @@ def _h_client_qr(req: "_Handler", groups: tuple) -> dict:
             server_public_key=_extract(state.server["public_key"]),
             psk=_extract(cdata["psk"]),
             server_endpoint=_resolve_client_endpoint(state.server),
+            mtu=_detect_mtu(),
         )
 
     try:
@@ -792,6 +841,7 @@ def _h_client_config(req: "_Handler", groups: tuple) -> dict:
             server_public_key=_extract(state.server["public_key"]),
             psk=_extract(cdata["psk"]),
             server_endpoint=_resolve_client_endpoint(state.server),
+            mtu=_detect_mtu(),
         )
 
     AuditLog(_AUDIT_PATH).log("export-config", {"client": name})
