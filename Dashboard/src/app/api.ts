@@ -93,6 +93,30 @@ export interface FileActivityEvent {
   details: Record<string, string>;
 }
 
+export interface SecurityCheck {
+  name: string;
+  ok: boolean;
+  fix?: string | null;
+}
+
+export interface OpenPort {
+  port: number;
+  proto: string;
+  process: string;
+}
+
+export interface SecurityStatus {
+  ssh_hardened: boolean;
+  kernel_hardened: boolean;
+  fail2ban_active: boolean;
+  fail2ban_bans: number;
+  firewall_active: boolean;
+  ip_forwarding: boolean;
+  auto_updates: boolean;
+  open_ports: OpenPort[];
+  checks: SecurityCheck[];
+}
+
 export interface SessionSummary {
   sessions: {
     start: string;
@@ -154,6 +178,12 @@ export const api = {
 
   fileActivity: () =>
     _fetch<{ events: FileActivityEvent[] }>("GET", "/file-activity"),
+
+  securityStatus: () =>
+    _fetch<SecurityStatus>("GET", "/security-status"),
+
+  hardenServer: () =>
+    _fetch<{ ok: boolean; actions: string[] }>("POST", "/harden-server"),
 
   changePassphrase: (current: string, newPass: string) =>
     _fetch<{ ok: boolean }>("POST", "/change-passphrase", { current, new: newPass }),

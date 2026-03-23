@@ -414,6 +414,12 @@ def _h_init(req: "_Handler", _groups: tuple) -> dict:
                 adapter.ensure_sshd()
             except Exception:
                 warnings_list.append("SSH server setup skipped.")
+        # Server hardening (SSH, kernel, fail2ban, auto-updates)
+        if hasattr(adapter, "harden_server"):
+            try:
+                adapter.harden_server()
+            except Exception:
+                warnings_list.append("Server hardening skipped.")
 
         try:
             adapter.enable_tunnel_service(_WG_IFACE)
@@ -942,6 +948,41 @@ def _h_session_summary(req: "_Handler", _groups: tuple) -> dict:
     }
 
 
+def _h_security_status(req: "_Handler", _groups: tuple) -> dict:
+    """Return server security posture."""
+    _require_unlocked()
+    _empty: dict = {
+        "ssh_hardened": False, "kernel_hardened": False,
+        "fail2ban_active": False, "fail2ban_bans": 0,
+        "firewall_active": False, "ip_forwarding": False,
+        "auto_updates": False, "open_ports": [], "checks": [],
+    }
+    if sys.platform == "win32":
+        return _empty
+    try:
+        from wireseal.platform.linux import LinuxAdapter
+        adapter = LinuxAdapter()
+        return adapter.get_security_status()
+    except Exception:
+        return _empty
+
+
+def _h_harden_server(req: "_Handler", _groups: tuple) -> dict:
+    """Apply server hardening."""
+    _require_unlocked()
+    if sys.platform == "win32":
+        return {"ok": True, "actions": ["Hardening not available on Windows"]}
+    try:
+        from wireseal.platform.linux import LinuxAdapter
+        adapter = LinuxAdapter()
+        actions = adapter.harden_server()
+        from wireseal.security.audit import AuditLog
+        AuditLog(_AUDIT_PATH).log("harden-server", {"actions_count": len(actions)})
+        return {"ok": True, "actions": actions}
+    except Exception as exc:
+        return {"ok": False, "actions": [], "error": str(exc)}
+
+
 def _h_file_activity(req: "_Handler", _groups: tuple) -> dict:
     """Return recent SFTP/SSH file activity from system logs."""
     _require_unlocked()
@@ -1218,6 +1259,8 @@ _ROUTES: list[tuple[str, re.Pattern, Any]] = [
     ("GET",    re.compile(r"^/api/audit-log$"),              _h_audit_log),
     ("GET",    re.compile(r"^/api/session-summary$"),         _h_session_summary),
     ("GET",    re.compile(r"^/api/file-activity$"),           _h_file_activity),
+    ("GET",    re.compile(r"^/api/security-status$"),        _h_security_status),
+    ("POST",   re.compile(r"^/api/harden-server$"),          _h_harden_server),
     ("POST",   re.compile(r"^/api/change-passphrase$"),      _h_change_passphrase),
     ("POST",   re.compile(r"^/api/terminate$"),              _h_terminate),
     ("POST",   re.compile(r"^/api/fresh-start$"),            _h_fresh_start),

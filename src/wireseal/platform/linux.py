@@ -22,6 +22,7 @@ import subprocess
 import sys
 import textwrap
 from pathlib import Path
+from typing import Any
 
 from .base import AbstractPlatformAdapter
 from .exceptions import PrerequisiteError, PrivilegeError, SetupError
@@ -471,6 +472,385 @@ class LinuxAdapter(AbstractPlatformAdapter):
                 )
             except (OSError, subprocess.CalledProcessError):
                 pass
+
+    # ------------------------------------------------------------------
+    # Server hardening
+    # ------------------------------------------------------------------
+
+    def harden_server(self) -> list[str]:
+        """Apply security hardening to the server. Returns list of actions taken."""
+        actions = []
+        actions += self._harden_ssh()
+        actions += self._harden_kernel()
+        actions += self._setup_fail2ban()
+        actions += self._setup_auto_updates()
+        return actions
+
+    def _harden_ssh(self) -> list[str]:
+        """Harden SSH configuration to prevent brute force and unauthorized access."""
+        sshd_config = Path("/etc/ssh/sshd_config")
+        if not sshd_config.exists():
+            return []
+
+        try:
+            content = sshd_config.read_text(encoding="utf-8")
+        except OSError:
+            return []
+
+        actions = []
+        original = content
+        import re as _re
+
+        hardening = {
+            "PermitRootLogin": "no",
+            "MaxAuthTries": "3",
+            "LoginGraceTime": "30",
+            "PermitEmptyPasswords": "no",
+            "X11Forwarding": "no",
+            "AllowAgentForwarding": "no",
+            "ClientAliveInterval": "300",
+            "ClientAliveCountMax": "2",
+        }
+
+        for key, value in hardening.items():
+            pattern = _re.compile(rf'^#?\s*{key}\s+.*$', _re.MULTILINE)
+            replacement = f"{key} {value}"
+            if pattern.search(content):
+                new_content = pattern.sub(replacement, content, count=1)
+                if new_content != content:
+                    content = new_content
+                    actions.append(f"SSH: {key} → {value}")
+            elif f"{key} {value}" not in content:
+                content += f"\n{key} {value}"
+                actions.append(f"SSH: {key} → {value}")
+
+        if content != original:
+            try:
+                sshd_config.write_text(content, encoding="utf-8")
+                subprocess.run(
+                    ["systemctl", "reload", "sshd"],
+                    shell=False, capture_output=True, timeout=10,
+                )
+            except (OSError, subprocess.CalledProcessError):
+                subprocess.run(
+                    ["systemctl", "reload", "ssh"],
+                    shell=False, capture_output=True, timeout=10,
+                )
+
+        return actions
+
+    def _harden_kernel(self) -> list[str]:
+        """Apply kernel security parameters via sysctl."""
+        params = {
+            # Prevent IP spoofing
+            "net.ipv4.conf.all.rp_filter": "1",
+            "net.ipv4.conf.default.rp_filter": "1",
+            # Ignore ICMP redirects (prevent MITM)
+            "net.ipv4.conf.all.accept_redirects": "0",
+            "net.ipv4.conf.default.accept_redirects": "0",
+            "net.ipv4.conf.all.send_redirects": "0",
+            "net.ipv6.conf.all.accept_redirects": "0",
+            # Ignore source-routed packets
+            "net.ipv4.conf.all.accept_source_route": "0",
+            "net.ipv6.conf.all.accept_source_route": "0",
+            # SYN flood protection
+            "net.ipv4.tcp_syncookies": "1",
+            "net.ipv4.tcp_max_syn_backlog": "2048",
+            "net.ipv4.tcp_synack_retries": "2",
+            # Ignore ICMP broadcast requests
+            "net.ipv4.icmp_echo_ignore_broadcasts": "1",
+            # Log suspicious packets
+            "net.ipv4.conf.all.log_martians": "1",
+            "net.ipv4.conf.default.log_martians": "1",
+            # Disable IPv6 router advertisements
+            "net.ipv6.conf.all.accept_ra": "0",
+            "net.ipv6.conf.default.accept_ra": "0",
+            # Prevent core dumps
+            "fs.suid_dumpable": "0",
+            # Restrict kernel pointer exposure
+            "kernel.kptr_restrict": "2",
+            # Restrict dmesg access
+            "kernel.dmesg_restrict": "1",
+        }
+
+        sysctl_file = Path("/etc/sysctl.d/98-wireseal-hardening.conf")
+        lines = ["# WireSeal server hardening — DO NOT EDIT MANUALLY"]
+        actions = []
+
+        for key, value in params.items():
+            lines.append(f"{key} = {value}")
+            actions.append(f"Kernel: {key} = {value}")
+
+        try:
+            content = "\n".join(lines) + "\n"
+            if sysctl_file.exists() and sysctl_file.read_text() == content:
+                return []  # already applied
+
+            sysctl_file.write_text(content, encoding="utf-8")
+            subprocess.run(
+                ["sysctl", "-p", str(sysctl_file)],
+                shell=False, check=True, capture_output=True, timeout=10,
+            )
+        except (OSError, subprocess.CalledProcessError):
+            return []
+
+        return actions
+
+    def _setup_fail2ban(self) -> list[str]:
+        """Install and configure fail2ban for SSH brute force protection."""
+        actions = []
+
+        if shutil.which("fail2ban-client") is None:
+            try:
+                if shutil.which("pacman"):
+                    subprocess.run(
+                        ["pacman", "-S", "--needed", "--noconfirm", "fail2ban"],
+                        shell=False, check=True, capture_output=True, timeout=120,
+                    )
+                elif shutil.which("apt-get"):
+                    subprocess.run(
+                        ["apt-get", "install", "-y", "fail2ban"],
+                        shell=False, check=True, capture_output=True, timeout=120,
+                    )
+                elif shutil.which("dnf"):
+                    subprocess.run(
+                        ["dnf", "install", "-y", "fail2ban"],
+                        shell=False, check=True, capture_output=True, timeout=120,
+                    )
+                else:
+                    return []
+                actions.append("Installed fail2ban")
+            except subprocess.CalledProcessError:
+                return []
+
+        # Configure fail2ban for SSH + WireGuard
+        jail_conf = Path("/etc/fail2ban/jail.d/wireseal.conf")
+        jail_content = textwrap.dedent("""\
+            # WireSeal fail2ban configuration
+            [sshd]
+            enabled = true
+            port = ssh
+            filter = sshd
+            maxretry = 5
+            bantime = 3600
+            findtime = 600
+
+            [wireseal-wg]
+            enabled = true
+            port = 51820
+            protocol = udp
+            filter = wireseal-wg
+            maxretry = 10
+            bantime = 3600
+            findtime = 300
+        """)
+
+        try:
+            jail_conf.parent.mkdir(parents=True, exist_ok=True)
+            if not jail_conf.exists() or jail_conf.read_text() != jail_content:
+                jail_conf.write_text(jail_content, encoding="utf-8")
+                actions.append("Configured fail2ban SSH jail (5 retries → 1h ban)")
+        except OSError:
+            pass
+
+        # Enable and start fail2ban
+        try:
+            subprocess.run(
+                ["systemctl", "enable", "--now", "fail2ban"],
+                shell=False, check=True, capture_output=True, timeout=30,
+            )
+            if not any("Installed" in a for a in actions):
+                actions.append("Enabled fail2ban")
+        except subprocess.CalledProcessError:
+            pass
+
+        return actions
+
+    def _setup_auto_updates(self) -> list[str]:
+        """Enable automatic security updates."""
+        actions = []
+
+        if shutil.which("pacman"):
+            # Arch: install pacman-contrib for paccache, but auto-updates
+            # aren't standard on Arch. We'll just note it.
+            return ["Auto-updates: Arch detected — use `pacman -Syu` regularly"]
+
+        if shutil.which("apt-get"):
+            # Debian/Ubuntu: unattended-upgrades
+            try:
+                subprocess.run(
+                    ["apt-get", "install", "-y", "unattended-upgrades"],
+                    shell=False, check=True, capture_output=True, timeout=120,
+                )
+                subprocess.run(
+                    ["dpkg-reconfigure", "-plow", "unattended-upgrades"],
+                    shell=False, capture_output=True, timeout=30,
+                    env={**os.environ, "DEBIAN_FRONTEND": "noninteractive"},
+                )
+                actions.append("Enabled unattended-upgrades for security patches")
+            except subprocess.CalledProcessError:
+                pass
+
+        elif shutil.which("dnf"):
+            # Fedora/RHEL: dnf-automatic
+            try:
+                subprocess.run(
+                    ["dnf", "install", "-y", "dnf-automatic"],
+                    shell=False, check=True, capture_output=True, timeout=120,
+                )
+                subprocess.run(
+                    ["systemctl", "enable", "--now", "dnf-automatic-install.timer"],
+                    shell=False, check=True, capture_output=True, timeout=30,
+                )
+                actions.append("Enabled dnf-automatic for security patches")
+            except subprocess.CalledProcessError:
+                pass
+
+        return actions
+
+    def get_security_status(self) -> dict:
+        """Check current security posture and return status."""
+        status: dict[str, Any] = {
+            "ssh_hardened": False,
+            "kernel_hardened": False,
+            "fail2ban_active": False,
+            "fail2ban_bans": 0,
+            "firewall_active": False,
+            "ip_forwarding": False,
+            "auto_updates": False,
+            "open_ports": [],
+            "checks": [],
+        }
+
+        # Check SSH hardening
+        sshd_config = Path("/etc/ssh/sshd_config")
+        if sshd_config.exists():
+            try:
+                content = sshd_config.read_text()
+                root_disabled = "PermitRootLogin no" in content
+                max_auth = "MaxAuthTries 3" in content or "MaxAuthTries 2" in content
+                status["ssh_hardened"] = root_disabled and max_auth
+                if root_disabled:
+                    status["checks"].append({"name": "Root login disabled", "ok": True})
+                else:
+                    status["checks"].append({"name": "Root login disabled", "ok": False, "fix": "Set PermitRootLogin no in sshd_config"})
+                if max_auth:
+                    status["checks"].append({"name": "Auth attempts limited", "ok": True})
+                else:
+                    status["checks"].append({"name": "Auth attempts limited", "ok": False, "fix": "Set MaxAuthTries 3 in sshd_config"})
+            except OSError:
+                pass
+
+        # Check kernel hardening
+        hardening_file = Path("/etc/sysctl.d/98-wireseal-hardening.conf")
+        status["kernel_hardened"] = hardening_file.exists()
+        status["checks"].append({
+            "name": "Kernel security parameters",
+            "ok": hardening_file.exists(),
+            "fix": None if hardening_file.exists() else "Run wireseal with --harden flag",
+        })
+
+        # Check fail2ban
+        f2b_check = subprocess.run(
+            ["systemctl", "is-active", "fail2ban"],
+            shell=False, capture_output=True, timeout=5,
+        )
+        status["fail2ban_active"] = f2b_check.returncode == 0
+        status["checks"].append({
+            "name": "Fail2ban brute force protection",
+            "ok": f2b_check.returncode == 0,
+            "fix": None if f2b_check.returncode == 0 else "Install and enable fail2ban",
+        })
+
+        # Get fail2ban ban count
+        if status["fail2ban_active"]:
+            try:
+                result = subprocess.run(
+                    ["fail2ban-client", "status", "sshd"],
+                    shell=False, capture_output=True, text=True, timeout=5,
+                )
+                import re as _re
+                ban_match = _re.search(r"Currently banned:\s+(\d+)", result.stdout)
+                if ban_match:
+                    status["fail2ban_bans"] = int(ban_match.group(1))
+            except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired):
+                pass
+
+        # Check firewall
+        nft_check = subprocess.run(
+            ["nft", "list", "table", "inet", "wg_filter"],
+            shell=False, capture_output=True, timeout=5,
+        )
+        status["firewall_active"] = nft_check.returncode == 0
+        status["checks"].append({
+            "name": "WireSeal firewall (nftables)",
+            "ok": nft_check.returncode == 0,
+        })
+
+        # Check IP forwarding
+        try:
+            val = Path("/proc/sys/net/ipv4/ip_forward").read_text().strip()
+            status["ip_forwarding"] = val == "1"
+        except OSError:
+            pass
+        status["checks"].append({
+            "name": "IP forwarding enabled",
+            "ok": status["ip_forwarding"],
+        })
+
+        # Check firewalld (separate from nftables)
+        try:
+            fwd_check = subprocess.run(
+                ["systemctl", "is-active", "firewalld"],
+                shell=False, capture_output=True, timeout=5,
+            )
+            if fwd_check.returncode == 0:
+                status["checks"].append({"name": "Firewalld active", "ok": True})
+            # else: skip — not all systems use firewalld
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            pass
+
+        # Check auto-updates
+        auto_updates = (
+            Path("/etc/apt/apt.conf.d/20auto-upgrades").exists()
+            or Path("/etc/dnf/automatic.conf").exists()
+        )
+        status["auto_updates"] = auto_updates
+        status["checks"].append({
+            "name": "Automatic security updates",
+            "ok": auto_updates,
+            "fix": None if auto_updates else "Click Harden Server to enable",
+        })
+
+        # Check open ports (listening services)
+        try:
+            result = subprocess.run(
+                ["ss", "-tulnp"],
+                shell=False, capture_output=True, text=True, timeout=5,
+            )
+            ports = []
+            for line in result.stdout.splitlines()[1:]:
+                parts = line.split()
+                if len(parts) >= 5:
+                    addr_port = parts[4]
+                    port = addr_port.rsplit(":", 1)[-1] if ":" in addr_port else ""
+                    proto = parts[0].lower()
+                    process = parts[-1] if len(parts) > 5 else ""
+                    if port.isdigit():
+                        ports.append({"port": int(port), "proto": proto, "process": process})
+            # Deduplicate
+            seen = set()
+            unique_ports = []
+            for p in ports:
+                key = (p["port"], p["proto"])
+                if key not in seen:
+                    seen.add(key)
+                    unique_ports.append(p)
+            status["open_ports"] = sorted(unique_ports, key=lambda x: x["port"])
+        except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired):
+            pass
+
+        return status
 
     def enable_ip_forwarding(self) -> None:
         """Write /etc/sysctl.d/99-wireguard.conf and apply it immediately.

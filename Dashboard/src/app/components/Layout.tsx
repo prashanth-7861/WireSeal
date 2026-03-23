@@ -154,6 +154,7 @@ export function Layout() {
     { to: "/", label: "Dashboard", icon: Server, end: true },
     { to: "/clients", label: "Clients", icon: Monitor },
     { to: "/audit-log", label: "Audit Log", icon: ScrollText },
+    { to: "/security", label: "Security", icon: Shield },
     { to: "/settings", label: "Settings", icon: Settings },
     { to: "/about", label: "About", icon: Info },
   ];
