@@ -60,9 +60,24 @@ jobs:
           npm ci
           npm run build
 
-      - name: Install Linux WebKit (for pywebview GUI)
+      - name: Install Linux GTK/WebKit system deps (for pywebview GUI)
         if: runner.os == 'Linux'
-        run: sudo apt-get update -qq && sudo apt-get install -y libwebkit2gtk-4.1-dev || sudo apt-get install -y libwebkit2gtk-4.0-dev
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libgirepository1.0-dev \
+            gir1.2-webkit2-4.1 \
+            gir1.2-gtk-3.0 \
+            libcairo2-dev \
+            pkg-config \
+            || sudo apt-get install -y \
+              libwebkit2gtk-4.0-dev \
+              libgirepository1.0-dev \
+              gir1.2-webkit2-4.0 \
+              gir1.2-gtk-3.0 \
+              libcairo2-dev \
+              pkg-config
 
       - uses: actions/setup-python@v5
         with:
@@ -70,6 +85,10 @@ jobs:
 
       - name: Install dependencies
         run: pip install -e ".[dev]"
+
+      - name: Install PyGObject (Linux only — GTK bindings for pywebview)
+        if: runner.os == 'Linux'
+        run: pip install PyGObject
 
       - name: Build GUI binary
         run: pyinstaller wireseal.spec

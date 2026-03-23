@@ -33,6 +33,28 @@ _extra_datas = []
 if os.path.isdir(_webview_lib):
     _extra_datas.append((_webview_lib, os.path.join('webview', 'lib')))
 
+# Linux: collect GObject Introspection typelibs for PyGObject (gi)
+_extra_binaries = []
+if sys.platform == 'linux':
+    import subprocess
+    try:
+        # Collect all .typelib files needed by GTK/WebKit
+        typelib_dirs = [
+            '/usr/lib/girepository-1.0',
+            '/usr/lib/x86_64-linux-gnu/girepository-1.0',
+            '/usr/lib64/girepository-1.0',
+        ]
+        for td in typelib_dirs:
+            if os.path.isdir(td):
+                for f in os.listdir(td):
+                    if f.endswith('.typelib'):
+                        _extra_datas.append(
+                            (os.path.join(td, f), 'gi_typelibs')
+                        )
+                break  # use first found directory
+    except Exception:
+        pass
+
 a = Analysis(
     ['src/wireseal/main.py'],
     pathex=[],
@@ -51,6 +73,17 @@ a = Analysis(
         'webview.platforms.edgechromium',  # Windows (Edge WebView2 via pythonnet)
         'webview.platforms.cocoa',         # macOS (WKWebView)
         'webview.platforms.gtk',           # Linux (WebKit2GTK)
+        # PyGObject (gi) — required by pywebview GTK backend on Linux
+        'gi',
+        'gi.repository.Gtk',
+        'gi.repository.Gdk',
+        'gi.repository.GdkPixbuf',
+        'gi.repository.GLib',
+        'gi.repository.GObject',
+        'gi.repository.WebKit2',
+        'gi.repository.Gio',
+        'gi.repository.Pango',
+        'gi.repository.cairo',
         # pythonnet / clr_loader for EdgeChromium backend
         'clr',
         'clr_loader',
@@ -62,7 +95,7 @@ a = Analysis(
     ],
     hookspath=[],
     hooksconfig={},
-    runtime_hooks=[],
+    runtime_hooks=['hooks/hook-gi.py'] if sys.platform == 'linux' else [],
     excludes=[
         # Exclude heavy Qt — pywebview uses EdgeChromium (no Qt needed)
         'PySide6', 'PySide6.QtCore', 'PySide6.QtGui', 'PySide6.QtWidgets',
