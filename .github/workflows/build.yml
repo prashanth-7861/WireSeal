@@ -66,7 +66,7 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y \
             libwebkit2gtk-4.1-dev \
-            libgirepository1.0-dev \
+            libgirepository-2.0-dev \
             gir1.2-webkit2-4.1 \
             gir1.2-gtk-3.0 \
             libcairo2-dev \
