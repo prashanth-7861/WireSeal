@@ -103,7 +103,7 @@ Download the latest release from the
 |---|---|---|
 | **Debian / Ubuntu** | `wireseal_<ver>_amd64.deb` | `sudo apt install ./wireseal_<ver>_amd64.deb` |
 | **Fedora / RHEL / Rocky / Alma** | `wireseal-<ver>-1.x86_64.rpm` | `sudo dnf install ./wireseal-<ver>-1.x86_64.rpm` |
-| **Arch / Manjaro** | `wireseal-linux-x86_64` (raw binary) | See [Linux from script](#linux) below |
+| **Arch / Manjaro** | `WireSeal-linux-x86_64` + `wireseal-cli-linux-x86_64` | See [Linux](#linux) below |
 | **macOS arm64** | `wireseal-<ver>-macos-arm64.pkg` | Double-click or `sudo installer -pkg wireseal-<ver>-macos-arm64.pkg -target /` |
 | **Windows 10/11 x64** | `wireseal-<ver>-windows-x86_64-setup.exe` | Run as Administrator; adds `wireseal` to system `PATH` |
 
@@ -120,6 +120,21 @@ Supports Arch / Manjaro, Fedora / RHEL / Rocky / AlmaLinux, Debian / Ubuntu.
 [Releases page](https://github.com/prashanth-7861/WireSeal/releases/latest).
 The package installs the binary to `/usr/local/bin/wireseal` and declares
 `wireguard-tools` as a dependency.
+
+**GUI dependencies (required for the native desktop window):**
+
+```bash
+# Arch / Manjaro
+sudo pacman -S python-gobject webkit2gtk
+
+# Debian / Ubuntu
+sudo apt install python3-gi gir1.2-webkit2-4.1
+
+# Fedora / RHEL
+sudo dnf install python3-gobject webkit2gtk4.1
+```
+
+Without these, WireSeal falls back to opening the dashboard in your system browser.
 
 **Option B — installer script (all distros, including Arch):**
 

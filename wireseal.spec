@@ -33,27 +33,10 @@ _extra_datas = []
 if os.path.isdir(_webview_lib):
     _extra_datas.append((_webview_lib, os.path.join('webview', 'lib')))
 
-# Linux: collect GObject Introspection typelibs for PyGObject (gi)
-_extra_binaries = []
-if sys.platform == 'linux':
-    import subprocess
-    try:
-        # Collect all .typelib files needed by GTK/WebKit
-        typelib_dirs = [
-            '/usr/lib/girepository-1.0',
-            '/usr/lib/x86_64-linux-gnu/girepository-1.0',
-            '/usr/lib64/girepository-1.0',
-        ]
-        for td in typelib_dirs:
-            if os.path.isdir(td):
-                for f in os.listdir(td):
-                    if f.endswith('.typelib'):
-                        _extra_datas.append(
-                            (os.path.join(td, f), 'gi_typelibs')
-                        )
-                break  # use first found directory
-    except Exception:
-        pass
+# Linux: gi (PyGObject) is loaded from the SYSTEM at runtime via hooks/hook-gi.py.
+# Do NOT bundle gi or typelibs — they have C extensions linked to distro-specific
+# system libraries (libgirepository) that cause ABI mismatches across distros.
+# The user must install python-gobject + webkit2gtk from their package manager.
 
 a = Analysis(
     ['src/wireseal/main.py'],
@@ -73,17 +56,8 @@ a = Analysis(
         'webview.platforms.edgechromium',  # Windows (Edge WebView2 via pythonnet)
         'webview.platforms.cocoa',         # macOS (WKWebView)
         'webview.platforms.gtk',           # Linux (WebKit2GTK)
-        # PyGObject (gi) — required by pywebview GTK backend on Linux
-        'gi',
-        'gi.repository.Gtk',
-        'gi.repository.Gdk',
-        'gi.repository.GdkPixbuf',
-        'gi.repository.GLib',
-        'gi.repository.GObject',
-        'gi.repository.WebKit2',
-        'gi.repository.Gio',
-        'gi.repository.Pango',
-        'gi.repository.cairo',
+        # PyGObject (gi) — NOT bundled; loaded from system at runtime via
+        # hooks/hook-gi.py. User must install python-gobject + webkit2gtk.
         # pythonnet / clr_loader for EdgeChromium backend
         'clr',
         'clr_loader',
@@ -115,7 +89,16 @@ a = Analysis(
         'PIL.ImageQt',
         # Exclude nicegui and its heavy deps (installed but not used)
         'nicegui',
-    ],
+    ] + ([
+        # Linux: gi (PyGObject) must NOT be bundled — system gi is loaded at
+        # runtime by hooks/hook-gi.py. Bundled gi has C extensions linked to the
+        # build distro's libgirepository which breaks on other distros.
+        'gi', 'gi.repository', 'gi.repository.Gtk', 'gi.repository.Gdk',
+        'gi.repository.GdkPixbuf', 'gi.repository.GLib', 'gi.repository.GObject',
+        'gi.repository.WebKit2', 'gi.repository.Gio', 'gi.repository.Pango',
+        'gi.repository.cairo', 'gi.overrides', 'gi._gi', 'gi._gi_cairo',
+        'cairo',
+    ] if sys.platform == 'linux' else []),
     win_no_prefer_redirects=False,
     win_private_assemblies=False,
     cipher=block_cipher,

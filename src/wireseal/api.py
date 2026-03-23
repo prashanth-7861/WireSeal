@@ -1101,6 +1101,11 @@ def serve(host: str = "127.0.0.1", port: int = 8080, gui: bool = True) -> None:
     except Exception as exc:
         if not _quiet:
             print(f"[wireseal] GUI failed ({exc}) — falling back to system browser.")
+            if sys.platform == "linux":
+                print("[wireseal] Install GUI dependencies for a native window:")
+                print("[wireseal]   Arch:   sudo pacman -S python-gobject webkit2gtk")
+                print("[wireseal]   Debian: sudo apt install python3-gi gir1.2-webkit2-4.1")
+                print("[wireseal]   Fedora: sudo dnf install python3-gobject webkit2gtk4.1")
             print("[wireseal] Press Ctrl+C to stop.")
         webbrowser.open(url)
         try:
