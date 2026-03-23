@@ -726,20 +726,64 @@ def _h_client_qr(req: "_Handler", groups: tuple) -> dict:
 
     try:
         import qrcode
+        import qrcode.image.svg
+
         qr = qrcode.QRCode(error_correction=qrcode.constants.ERROR_CORRECT_L)
         qr.add_data(config_str)
         qr.make(fit=True)
-        img = qr.make_image(fill_color="black", back_color="white")
-        buf = io.BytesIO()
-        img.save(buf, format="PNG")
-        png_b64 = base64.b64encode(buf.getvalue()).decode()
+
+        # Try PNG first (needs Pillow), fall back to SVG (no deps)
+        try:
+            img = qr.make_image(fill_color="black", back_color="white")
+            buf = io.BytesIO()
+            img.save(buf, format="PNG")
+            png_b64 = base64.b64encode(buf.getvalue()).decode()
+            img_format = "png"
+        except Exception:
+            # Pillow not available — use SVG
+            img = qr.make_image(image_factory=qrcode.image.svg.SvgPathFillImage)
+            buf = io.BytesIO()
+            img.save(buf)
+            png_b64 = base64.b64encode(buf.getvalue()).decode()
+            img_format = "svg+xml"
     except ImportError:
         raise _ApiError("QR code generation unavailable — 'qrcode' package not installed", 500)
-    except Exception as exc:
+    except Exception:
         raise _ApiError("QR code generation failed.", 500)
 
     AuditLog(_AUDIT_PATH).log("export-qr", {"client": name})
-    return {"name": name, "qr_png_b64": png_b64}
+    return {"name": name, "qr_png_b64": png_b64, "format": img_format}
+
+
+def _h_client_config(req: "_Handler", groups: tuple) -> dict:
+    """Return the client WireGuard config as text for download."""
+    _require_unlocked()
+    name = (groups[0] if groups else "").strip()
+    if not name:
+        raise _ApiError("client name is required", 400)
+
+    with _lock:
+        vault      = _session["vault"]
+        passphrase = _session["passphrase"]
+
+    from wireseal.core.config_builder import ConfigBuilder
+    from wireseal.security.audit      import AuditLog
+
+    with vault.open(passphrase) as state:
+        if name not in state.clients:
+            raise _ApiError(f"Client '{name}' not found.", 404)
+        cdata = state.clients[name]
+        config_str = ConfigBuilder().render_client_config(
+            client_private_key=_extract(cdata["private_key"]),
+            client_ip=cdata["ip"],
+            dns_server=state.server["ip"],
+            server_public_key=_extract(state.server["public_key"]),
+            psk=_extract(cdata["psk"]),
+            server_endpoint=_resolve_client_endpoint(state.server),
+        )
+
+    AuditLog(_AUDIT_PATH).log("export-config", {"client": name})
+    return {"name": name, "config": config_str}
 
 
 def _h_audit_log(req: "_Handler", _groups: tuple) -> dict:
@@ -918,6 +962,7 @@ _ROUTES: list[tuple[str, re.Pattern, Any]] = [
     ("POST",   re.compile(r"^/api/clients$"),                _h_add_client),
     # QR must come before the generic DELETE so GET .../qr is matched first
     ("GET",    re.compile(r"^/api/clients/([^/]+)/qr$"),     _h_client_qr),
+    ("GET",    re.compile(r"^/api/clients/([^/]+)/config$"), _h_client_config),
     ("DELETE", re.compile(r"^/api/clients/([^/]+)$"),        _h_remove_client),
     ("GET",    re.compile(r"^/api/audit-log$"),              _h_audit_log),
     ("POST",   re.compile(r"^/api/change-passphrase$"),      _h_change_passphrase),

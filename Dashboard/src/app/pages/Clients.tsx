@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import {
   Plus, Monitor, Trash2, QrCode, X, AlertTriangle, CheckCircle, RefreshCw,
+  Download,
 } from "lucide-react";
 import { api, type Client } from "../api";
 
@@ -9,6 +10,7 @@ const QR_TTL = 60; // seconds before QR auto-dismisses
 interface QrPanel {
   name: string;
   qr: string;
+  format: string; // "png" or "svg+xml"
   expiresAt: number; // Date.now() + QR_TTL * 1000
 }
 
@@ -67,7 +69,7 @@ export function Clients() {
     try {
       const res = await api.clientQr(name);
       const expiresAt = Date.now() + QR_TTL * 1000;
-      setQrPanel({ name: res.name, qr: res.qr_png_b64, expiresAt });
+      setQrPanel({ name: res.name, qr: res.qr_png_b64, format: res.format || "png", expiresAt });
       startCountdown(expiresAt);
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : "Failed to load QR code");
@@ -113,6 +115,22 @@ export function Clients() {
       setTimeout(() => setSuccess(""), 4000);
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : "Failed to remove client");
+    }
+  };
+
+  // ── Download config ──────────────────────────────────────────────────────
+  const handleDownloadConfig = async (name: string) => {
+    try {
+      const res = await api.clientConfig(name);
+      const blob = new Blob([res.config], { type: "text/plain" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `${name}.conf`;
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : "Failed to download config");
     }
   };
 
@@ -207,6 +225,13 @@ export function Clients() {
                           <QrCode className="w-5 h-5" />
                         </button>
                         <button
+                          onClick={() => handleDownloadConfig(client.name)}
+                          className="text-green-600 hover:text-green-700 p-2 rounded-lg hover:bg-green-50 transition-colors"
+                          title="Download config file"
+                        >
+                          <Download className="w-5 h-5" />
+                        </button>
+                        <button
                           onClick={() => handleDelete(client.name)}
                           className="text-red-600 hover:text-red-700 p-2 rounded-lg hover:bg-red-50 transition-colors"
                           title="Remove client"
@@ -242,7 +267,7 @@ export function Clients() {
             {/* QR image */}
             <div className="p-4">
               <img
-                src={`data:image/png;base64,${qrPanel.qr}`}
+                src={`data:image/${qrPanel.format};base64,${qrPanel.qr}`}
                 alt={`QR code for ${qrPanel.name}`}
                 className="w-full rounded-lg border border-gray-100"
               />
@@ -280,6 +305,17 @@ export function Clients() {
               >
                 <RefreshCw className={`w-3.5 h-3.5 ${qrRefreshing ? "animate-spin" : ""}`} />
                 Regenerate
+              </button>
+            </div>
+
+            {/* Download config button */}
+            <div className="px-4 pb-4">
+              <button
+                onClick={() => handleDownloadConfig(qrPanel.name)}
+                className="w-full flex items-center justify-center gap-2 px-3 py-2 text-sm bg-green-600 text-white rounded-lg hover:bg-green-700 transition-colors"
+              >
+                <Download className="w-4 h-4" />
+                Download Config File
               </button>
             </div>
           </div>

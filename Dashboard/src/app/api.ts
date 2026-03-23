@@ -116,7 +116,10 @@ export const api = {
     _fetch<{ ok: boolean }>("DELETE", `/clients/${encodeURIComponent(name)}`),
 
   clientQr: (name: string) =>
-    _fetch<{ name: string; qr_png_b64: string }>("GET", `/clients/${encodeURIComponent(name)}/qr`),
+    _fetch<{ name: string; qr_png_b64: string; format?: string }>("GET", `/clients/${encodeURIComponent(name)}/qr`),
+
+  clientConfig: (name: string) =>
+    _fetch<{ name: string; config: string }>("GET", `/clients/${encodeURIComponent(name)}/config`),
 
   auditLog: () =>
     _fetch<{ entries: AuditEntry[] }>("GET", "/audit-log"),
