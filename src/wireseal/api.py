@@ -1172,7 +1172,8 @@ def _h_terminate(req: "_Handler", _groups: tuple) -> dict:
 
 
 def _h_fresh_start(req: "_Handler", _groups: tuple) -> dict:
-    _require_unlocked()
+    # NOTE: deliberately NOT requiring unlock — fresh start must work when
+    # the user has forgotten their passphrase or the vault is corrupt.
     body = req._json()
     if body.get("confirm") != "CONFIRM":
         raise _ApiError('Send {"confirm":"CONFIRM"} to proceed.', 400)
