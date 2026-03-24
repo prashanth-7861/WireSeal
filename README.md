@@ -15,13 +15,14 @@ is exposed.
 
 - [Features](#features)
 - [Installation](#installation)
-  - [Pre-built packages (recommended)](#pre-built-packages-recommended)
-  - [Linux (Arch / Fedora / Debian-Ubuntu)](#linux)
+  - [One-liner install (recommended)](#one-liner-install-recommended)
+  - [Pre-built binaries](#pre-built-binaries)
+  - [Linux](#linux)
   - [macOS](#macos)
   - [Windows](#windows)
   - [From Source (any platform)](#from-source)
 - [Quick Start](#quick-start)
-- [Adding an iPhone Client](#adding-an-iphone-client)
+- [Adding Clients](#adding-clients)
 - [File Access over VPN (SFTP)](#file-access-over-vpn-sftp)
 - [Commands Reference](#commands-reference)
 - [Web Dashboard (GUI)](#web-dashboard-gui)
@@ -129,29 +130,99 @@ Log into your router admin panel (usually `http://192.168.1.1` or
 > **AT&T routers:** Settings → Firewall → NAT/Gaming (or "Applications, Pinholes
 > and DMZ") → Add a custom rule with the values above.
 
-The Kali/Linux firewall (nftables), IP forwarding, and NAT masquerade are
-configured **automatically** by `wireseal init` — no manual `iptables` or
-`sysctl` changes needed.
+### 3. OS firewall must allow WireGuard traffic
+
+The install scripts and `wireseal init` configure this automatically, but if you
+need to do it manually:
+
+**Linux (firewalld):**
+
+```bash
+sudo firewall-cmd --add-port=51820/udp --permanent
+sudo firewall-cmd --reload
+```
+
+**Linux (nftables / iptables):**
+
+```bash
+# nftables (configured automatically by WireSeal)
+sudo nft add rule inet filter input udp dport 51820 accept
+
+# iptables (legacy)
+sudo iptables -A INPUT -p udp --dport 51820 -j ACCEPT
+```
+
+**Windows (Windows Firewall):**
+
+```powershell
+# PowerShell (Administrator)
+New-NetFirewallRule -Name "WireSeal-WG" -DisplayName "WireSeal WireGuard" `
+    -Direction Inbound -Protocol UDP -LocalPort 51820 -Action Allow
+```
+
+Or: Windows Security → Firewall → Advanced Settings → Inbound Rules → New Rule →
+Port → UDP 51820 → Allow.
+
+**macOS (pf firewall):**
+
+```bash
+# Add to /etc/pf.conf
+echo "pass in on en0 proto udp from any to any port 51820" | sudo tee -a /etc/pf.conf
+sudo pfctl -f /etc/pf.conf
+```
+
+> **Note:** The one-liner install scripts and `wireseal init` handle all firewall
+> rules, IP forwarding, and NAT masquerade **automatically** — no manual
+> configuration needed in most cases.
 
 ---
 
 ## Installation
 
-### Pre-built packages (recommended)
+### One-liner install (recommended)
 
-Download the latest release from the
-[Releases page](https://github.com/prashanth-7861/WireSeal/releases/latest).
+Copy-paste one command to download, install, and configure everything automatically.
 
-| Platform | Package | Install command |
+**Linux** (Arch / Manjaro / Debian / Ubuntu / Fedora / RHEL):
+
+```bash
+curl -LO https://github.com/prashanth-7861/WireSeal/releases/latest/download/wireseal-linux.sh
+chmod +x wireseal-linux.sh
+sudo ./wireseal-linux.sh
+```
+
+**macOS** (requires [Homebrew](https://brew.sh)):
+
+```bash
+curl -LO https://github.com/prashanth-7861/WireSeal/releases/latest/download/wireseal-macos.sh
+chmod +x wireseal-macos.sh
+./wireseal-macos.sh
+```
+
+**Windows** (run in Administrator PowerShell):
+
+```powershell
+Invoke-WebRequest -Uri https://github.com/prashanth-7861/WireSeal/releases/latest/download/wireseal-windows.ps1 -OutFile wireseal-windows.ps1
+.\wireseal-windows.ps1
+```
+
+Each script installs WireGuard, Python, all dependencies, configures the firewall,
+enables IP forwarding, and creates `wireseal` + `wireseal-gui` system commands.
+
+---
+
+### Pre-built binaries
+
+Download standalone binaries from the
+[Releases page](https://github.com/prashanth-7861/WireSeal/releases/latest) — no Python required.
+
+| Platform | Binary | Usage |
 |---|---|---|
-| **Debian / Ubuntu** | `wireseal_<ver>_amd64.deb` | `sudo apt install ./wireseal_<ver>_amd64.deb` |
-| **Fedora / RHEL / Rocky / Alma** | `wireseal-<ver>-1.x86_64.rpm` | `sudo dnf install ./wireseal-<ver>-1.x86_64.rpm` |
-| **Arch / Manjaro** | `WireSeal-linux-x86_64` + `wireseal-cli-linux-x86_64` | See [Linux](#linux) below |
-| **macOS arm64** | `wireseal-<ver>-macos-arm64.pkg` | Double-click or `sudo installer -pkg wireseal-<ver>-macos-arm64.pkg -target /` |
-| **Windows 10/11 x64** | `wireseal-<ver>-windows-x86_64-setup.exe` | Run as Administrator; adds `wireseal` to system `PATH` |
+| **Linux x86_64** | `WireSeal` (GUI) / `wireseal-cli` (CLI) | `chmod +x WireSeal && sudo ./WireSeal` |
+| **Windows x86_64** | `WireSeal.exe` (GUI) / `wireseal-cli.exe` (CLI) | Run as Administrator |
 
-Every release asset is accompanied by a `sha256sums.txt` checksum file and a
-Sigstore keyless signature (`.sigstore.json`). See [Verifying a Release](#verifying-a-release).
+Every release asset is accompanied by a `sha256sums.txt` checksum file.
+See [Verifying a Release](#verifying-a-release).
 
 ---
 
@@ -159,10 +230,10 @@ Sigstore keyless signature (`.sigstore.json`). See [Verifying a Release](#verify
 
 Supports Arch / Manjaro, Fedora / RHEL / Rocky / AlmaLinux, Debian / Ubuntu.
 
-**Option A — native package (Debian/Ubuntu and Fedora/RHEL):** download from the
+**Option A — one-liner** (recommended): see above.
+
+**Option B — pre-built binary:** download from the
 [Releases page](https://github.com/prashanth-7861/WireSeal/releases/latest).
-The package installs the binary to `/usr/local/bin/wireseal` and declares
-`wireguard-tools` as a dependency.
 
 **GUI dependencies (required for the native desktop window):**
 
@@ -179,7 +250,7 @@ sudo dnf install gobject-introspection webkit2gtk4.1
 
 Without these system libraries, WireSeal falls back to opening the dashboard in your system browser.
 
-**Option B — installer script (all distros, including Arch):**
+**Option C — from cloned repo:**
 
 ```bash
 git clone https://github.com/prashanth-7861/WireSeal.git
@@ -187,23 +258,20 @@ cd WireSeal
 sudo bash scripts/install-linux.sh
 ```
 
-The script:
-1. Installs `wireguard-tools` and `nftables` using your distro's package manager
-2. Creates a Python virtual environment in `.venv`
-3. Installs all dependencies with hash verification
-4. Writes `/usr/local/bin/wireseal` system wrapper
-5. Enables `nftables` via systemd
-6. Runs the test suite to confirm the installation
+The install script:
+1. Installs `wireguard-tools`, `nftables`, and `openssh` via your package manager
+2. Creates a Python virtual environment and installs all dependencies
+3. Writes `/usr/local/bin/wireseal` and `/usr/local/bin/wireseal-gui` wrappers
+4. Enables IP forwarding, opens firewalld port, starts SSH server
+5. Runs the test suite to confirm the installation
 
 ---
 
 ### macOS
 
-**Option A — .pkg installer:** download `wireseal-<ver>-macos-arm64.pkg` from the
-[Releases page](https://github.com/prashanth-7861/WireSeal/releases/latest) and
-double-click it. The wizard installs `wireseal` to `/usr/local/bin`.
+**Option A — one-liner** (recommended): see above.
 
-**Option B — installer script** (requires [Homebrew](https://brew.sh) and macOS 12+):
+**Option B — from cloned repo** (requires [Homebrew](https://brew.sh) and macOS 12+):
 
 ```bash
 git clone https://github.com/prashanth-7861/WireSeal.git
@@ -215,7 +283,6 @@ The script:
 1. Installs `wireguard-tools` and `wireguard-go` (userspace driver) via Homebrew
 2. Creates `.venv` and installs all dependencies
 3. Writes `/usr/local/bin/wireseal` (or `~/.local/bin/wireseal` if not writable)
-4. Runs the test suite
 
 > **Note:** For a GUI tunnel manager on macOS, install the
 > [WireGuard app](https://apps.apple.com/app/wireguard/id1451685025) from the Mac App Store
@@ -225,14 +292,13 @@ The script:
 
 ### Windows
 
-**Option A — NSIS installer (recommended):** download
-`wireseal-<ver>-windows-x86_64-setup.exe` from the
-[Releases page](https://github.com/prashanth-7861/WireSeal/releases/latest).
-Run it as Administrator — it installs `wireseal.exe` to
-`C:\Program Files\WireSeal` and adds that directory to the system `PATH`
-automatically.
+**Option A — one-liner** (recommended): see above.
 
-**Option B — installer script** (run from an **Administrator** PowerShell prompt):
+**Option B — pre-built binary:** download `WireSeal.exe` from the
+[Releases page](https://github.com/prashanth-7861/WireSeal/releases/latest).
+Run as Administrator.
+
+**Option C — from cloned repo** (run from an **Administrator** PowerShell prompt):
 
 ```powershell
 git clone https://github.com/prashanth-7861/WireSeal.git
@@ -243,12 +309,12 @@ Set-ExecutionPolicy Bypass -Scope Process -Force
 ```
 
 The script:
-1. Installs **WireGuard for Windows** (wintun kernel driver) via `winget`
+1. Installs **WireGuard for Windows** (wintun driver) and **Git** via `winget`
 2. Installs Python 3.13 via `winget` if no compatible version is found
 3. Creates `.venv` and installs all dependencies
-4. Writes `C:\Program Files\WireSeal\wireseal.cmd` and adds it to the system `PATH`
-5. Opens **UDP 51820** in Windows Firewall
-6. Runs the test suite
+4. Writes `wireseal.cmd` and `wireseal-gui.cmd` to `C:\Program Files\WireSeal\bin`
+5. Opens **UDP 51820** in Windows Firewall and enables IP forwarding
+6. Adds the install directory to the system `PATH`
 
 Open a **new** Administrator terminal after install for PATH changes to take effect.
 
@@ -306,30 +372,75 @@ on the command line or in any log.
 
 ---
 
-## Adding an iPhone Client
+## Adding Clients
 
-WireSeal generates a standard WireGuard config that works with the
-[WireGuard iOS app](https://apps.apple.com/app/wireguard/id1441195209).
+WireSeal generates standard WireGuard `.conf` files that work with any WireGuard client app.
 
-**On the server:**
+### On the server
 
 ```bash
-# Add a client named for the device
-sudo wireseal add-client my-iphone
+# Add a client (name it after the device for easy management)
+sudo wireseal add-client alice-phone
+sudo wireseal add-client bob-laptop
+sudo wireseal add-client home-tablet
 
-# Display a QR code in the terminal (auto-clears after 60 seconds)
-sudo wireseal show-qr my-iphone
+# Show QR code (best for mobile devices — auto-clears after 60s)
+sudo wireseal show-qr alice-phone
+
+# Export config file (best for desktops — transfer via USB, email, AirDrop, etc.)
+sudo wireseal export bob-laptop --output /tmp/bob-laptop.conf
 ```
 
-**On the iPhone:**
+### Client setup by platform
+
+| Platform | App | How to import |
+|---|---|---|
+| **iPhone / iPad** | [WireGuard for iOS](https://apps.apple.com/app/wireguard/id1441195209) | Tap **+** → **Create from QR code** → scan the terminal QR |
+| **Android** | [WireGuard for Android](https://play.google.com/store/apps/details?id=com.wireguard.android) | Tap **+** → **Scan from QR code**, or import `.conf` file |
+| **Windows** | [WireGuard for Windows](https://www.wireguard.com/install/) | **Add Tunnel** → **Import tunnel(s) from file** → select `.conf` |
+| **macOS** | [WireGuard on Mac App Store](https://apps.apple.com/app/wireguard/id1451685025) | **Import Tunnel(s) from File** or drag `.conf` onto the app |
+| **Linux** | `wireguard-tools` (CLI) | `sudo cp client.conf /etc/wireguard/wg0.conf && sudo wg-quick up wg0` |
+
+### iPhone / iPad (detailed)
 
 1. Install **WireGuard** from the App Store
 2. Tap **+** → **Create from QR code**
 3. Scan the QR code displayed in the terminal
-4. Give the tunnel a name (e.g. "Home VPN") and tap **Save**
+4. Name the tunnel (e.g. "Home VPN") → **Save**
 5. Toggle the tunnel on
 
-The iPhone will connect to the server. Verify on the server:
+### Android (detailed)
+
+1. Install **WireGuard** from Google Play
+2. Tap **+** → **Scan from QR code** (or **Import from file**)
+3. Scan the QR code or select the `.conf` file
+4. Name the tunnel → **Save**
+5. Toggle on
+
+### Windows / macOS (detailed)
+
+1. Install the WireGuard desktop app
+2. Export the config: `sudo wireseal export client-name --output /tmp/client.conf`
+3. Transfer the `.conf` file to the client machine (USB, AirDrop, secure file transfer)
+4. Open WireGuard → **Add Tunnel** → import the `.conf` file
+5. Click **Activate**
+
+### Linux client (detailed)
+
+```bash
+# Copy the exported config to the client machine
+scp user@server:/tmp/client.conf /etc/wireguard/wg0.conf
+
+# Start the tunnel
+sudo wg-quick up wg0
+
+# (Optional) Enable on boot
+sudo systemctl enable wg-quick@wg0
+```
+
+### Verify connection
+
+On the **server**, check that the client has connected:
 
 ```bash
 sudo wireseal status
@@ -337,14 +448,15 @@ sudo wireseal status
 sudo wg show
 ```
 
-**Export config to a file instead of QR (for manual transfer):**
+A successful connection shows a recent "latest handshake" timestamp and non-zero transfer bytes.
 
-```bash
-sudo wireseal export my-iphone --output /tmp/my-iphone.conf
-# Transfer the file to the iPhone via AirDrop, then import in the WireGuard app
-# Delete the exported file afterward:
-rm /tmp/my-iphone.conf
-```
+### Tips
+
+- **One client per device** — create a separate client for each device for proper key isolation
+- **Naming convention** — use descriptive names like `alice-iphone`, `bob-laptop`, `tablet-home`
+- **Delete exported files** — remove `.conf` files after importing: `rm /tmp/client.conf`
+- **QR for mobile, file for desktop** — QR codes are fastest for phones; `.conf` files are easier for computers
+- **Revoke lost devices** — if a device is lost: `sudo wireseal remove-client device-name`
 
 ---
 
