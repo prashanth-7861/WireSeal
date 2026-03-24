@@ -69,10 +69,31 @@ jobs:
         if: runner.os == 'Linux'
         run: pip install PyGObject
 
+      - name: Install pythonnet + pystray (Windows only — EdgeChromium backend for pywebview)
+        if: runner.os == 'Windows'
+        run: pip install pythonnet clr-loader pystray Pillow
+
       - name: Run unit tests before release build
         run: pytest --tb=short -q -m "not integration"
         env:
           WG_ENFORCE_TIMING: "1"
+
+      - name: Verify pywebview backend (Windows — EdgeChromium, Linux — GTK)
+        shell: bash
+        run: |
+          python -c "
+          import sys
+          if sys.platform == 'win32':
+              import clr_loader
+              print('clr_loader OK')
+              from webview.platforms import edgechromium
+              print('EdgeChromium backend OK')
+          elif sys.platform == 'linux':
+              import gi
+              print('PyGObject OK')
+          import webview
+          print('pywebview OK')
+          "
 
       - name: Build GUI binary (desktop app)
         run: pyinstaller wireseal.spec
