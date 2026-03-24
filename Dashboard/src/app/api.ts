@@ -37,7 +37,7 @@ async function _fetch<T>(
     // Vault got locked on the server (e.g. process restart) — broadcast so
     // the Dashboard can detect it and return to the Start Server screen.
     // Exempt /unlock and /init themselves to avoid a redirect loop on wrong passphrase.
-    if (res.status === 401 && path !== "/unlock" && path !== "/init") {
+    if (res.status === 401 && path !== "/unlock" && path !== "/init" && path !== "/fresh-start") {
       window.dispatchEvent(new CustomEvent(VAULT_LOCKED_EVENT));
     }
     throw new Error(err);

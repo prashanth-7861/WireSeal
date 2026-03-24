@@ -260,9 +260,15 @@ export function Layout() {
                   <li>Audit log history</li>
                 </ul>
               </div>
+              {authError && (
+                <div className="flex items-center gap-2 text-red-600 text-sm bg-red-50 border border-red-200 p-3 rounded-lg mb-4">
+                  <AlertCircle className="w-4 h-4 flex-shrink-0" />
+                  <span>{authError}</span>
+                </div>
+              )}
               <div className="flex gap-3">
                 <button
-                  onClick={() => setShowFreshStart(false)}
+                  onClick={() => { setShowFreshStart(false); setAuthError(""); }}
                   className="flex-1 px-4 py-2.5 border border-gray-300 rounded-lg hover:bg-gray-50 transition-colors"
                   disabled={freshStartLoading}
                 >
