@@ -395,7 +395,6 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
-      id-token: write
 
     steps:
       - name: Download all artifacts
@@ -412,25 +411,6 @@ jobs:
           cd dist/release
           sha256sum * > sha256sums.txt
           echo "=== sha256sums.txt ===" && cat sha256sums.txt
-
-      - name: Sign with Sigstore CLI (keyless)
-        run: |
-          pip install --quiet sigstore
-          cd dist/release
-          sigstore sign \
-            WireSeal-linux-x86_64 \
-            WireSeal-macos-arm64 \
-            WireSeal-windows-x86_64.exe \
-            wireseal-cli-linux-x86_64 \
-            wireseal-cli-macos-arm64 \
-            wireseal-cli-windows-x86_64.exe \
-            wireseal_*_amd64.deb \
-            wireseal-*-1.x86_64.rpm \
-            wireseal-*-linux-x86_64.tar.gz \
-            wireseal-*-macos-arm64.pkg \
-            wireseal-*-macos-arm64.tar.gz \
-            wireseal-*-windows-x86_64-setup.exe \
-            wireseal-*-windows-x86_64.zip
 
       - name: Upload all files to GitHub Release
         env:

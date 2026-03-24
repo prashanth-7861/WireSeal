@@ -224,7 +224,6 @@ Download standalone binaries from the
 | **Windows x86_64** | `WireSeal.exe` (GUI) / `wireseal-cli.exe` (CLI) | Run as Administrator |
 
 Every release asset is accompanied by a `sha256sums.txt` checksum file.
-See [Verifying a Release](#verifying-a-release).
 
 ---
 
@@ -619,23 +618,15 @@ Python may retain object headers briefly after wipe.
 
 ```bash
 # Download binary and checksum file
-curl -LO https://github.com/prashanth-7861/WireSeal/releases/latest/download/wireseal-linux-x86_64
+curl -LO https://github.com/prashanth-7861/WireSeal/releases/latest/download/WireSeal-linux-x86_64
 curl -LO https://github.com/prashanth-7861/WireSeal/releases/latest/download/sha256sums.txt
 
 # Verify SHA-256
 sha256sum -c sha256sums.txt --ignore-missing
 
-# Verify Sigstore signature (keyless — no stored private key)
-# Install cosign: https://docs.sigstore.dev/cosign/installation/
-cosign verify-blob \
-  --certificate wireseal-linux-x86_64.sigstore.json \
-  --certificate-identity-regexp "https://github.com/prashanth-7861/WireSeal" \
-  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
-  wireseal-linux-x86_64
-
 # Install
-chmod +x wireseal-linux-x86_64
-sudo mv wireseal-linux-x86_64 /usr/local/bin/wireseal
+chmod +x WireSeal-linux-x86_64
+sudo mv WireSeal-linux-x86_64 /usr/local/bin/wireseal
 ```
 
 ---
