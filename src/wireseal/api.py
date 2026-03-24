@@ -1424,6 +1424,42 @@ def serve(host: str = "127.0.0.1", port: int = 8080, gui: bool = True) -> None:
     server_thread = threading.Thread(target=server.serve_forever, daemon=True)
     server_thread.start()
 
+    # Start system tray icon (best-effort — runs even if pywebview fails)
+    _tray_thread = None
+    try:
+        from wireseal.tray import run_tray
+
+        def _tray_stop_server() -> None:
+            try:
+                from wireseal.platform.detect import get_adapter
+                adapter = get_adapter()
+                adapter.wg_down("wg0")
+            except Exception:
+                pass
+
+        def _tray_quit() -> None:
+            server.shutdown()
+
+        def _tray_status() -> str:
+            try:
+                from wireseal.platform.detect import get_adapter
+                adapter = get_adapter()
+                peers = adapter.wg_show("wg0")
+                if peers is None:
+                    return "Tunnel: stopped"
+                return f"Tunnel: running ({len(peers)} peers)"
+            except Exception:
+                return "Tunnel: unknown"
+
+        _tray_thread = run_tray(
+            dashboard_url=url,
+            on_stop=_tray_stop_server,
+            on_quit=_tray_quit,
+            status_getter=_tray_status,
+        )
+    except Exception:
+        pass  # Tray is optional — never block startup
+
     try:
         # On Linux, ensure GI_TYPELIB_PATH includes system typelib dirs.
         # PyInstaller's runtime hook sets it to only the bundled dir; append system paths.

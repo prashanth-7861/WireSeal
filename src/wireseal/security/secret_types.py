@@ -21,6 +21,7 @@ import hmac
 import sys
 
 from .secrets_wipe import wipe_bytes
+from .process_hardening import mark_buffer_nodump
 
 
 class SecretBytes:
@@ -42,6 +43,8 @@ class SecretBytes:
             self._data = data
         self._wiped = False
         self._mlock()
+        # SEC-06: Exclude secret buffer from core dumps (Linux MADV_DONTDUMP)
+        mark_buffer_nodump(self._data)
 
     # ------------------------------------------------------------------
     # Memory locking (best-effort, SEC-02)

@@ -16,6 +16,8 @@ dependencies = [
     "click>=8.3.1,<9",
     "qrcode[pil]>=7.4",
     "pywebview>=5.3,<7",
+    "pystray>=0.19,<1",
+    "Pillow>=10.0,<12",
 ]
 
 [project.optional-dependencies]

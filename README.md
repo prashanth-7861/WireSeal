@@ -82,6 +82,8 @@ is exposed.
     tracked via verbose SSH logging
 - **Stop Server** button on Dashboard to bring down the WireGuard tunnel
 - **Fresh Start** option on the welcome screen to wipe and reinitialize
+- **System tray icon** — background operation with menu: Open Dashboard, Stop Server,
+  live status (peer count), and Quit (cross-platform via pystray)
 
 ### File Access over VPN
 - **SFTP/SSH access** — OpenSSH server auto-installed during init; VPN clients can
@@ -557,6 +559,13 @@ and serialized only inside the AES-256-GCM vault.
 - All derived keys are held in mutable `bytearray` objects and zero-wiped immediately after use
 - `SecretBytes` blocks `pickle`, `repr`, `str`, `__hash__`, and `__eq__` to prevent accidental leaks
 - `mlock` is called on key buffers (best-effort; may fail without `CAP_IPC_LOCK`)
+- `MADV_DONTDUMP` marks secret buffers to exclude them from core dumps (Linux)
+
+**Process hardening (applied at startup):**
+- `RLIMIT_CORE=0` — prevents core dumps from being written
+- `PR_SET_DUMPABLE=0` (Linux) — blocks ptrace, /proc/pid/mem, /proc/pid/environ access
+- `PT_DENY_ATTACH` (macOS) — prevents debugger attachment
+- `SetErrorMode` (Windows) — suppresses crash dump dialogs
 
 **Passphrase input:**
 - `click.prompt(hide_input=True)` only — never a CLI flag, never an environment variable (CLI-02)
@@ -574,15 +583,18 @@ and serialized only inside the AES-256-GCM vault.
 
 ## Threat Model
 
-| | Protected? |
+| Threat | Protected? |
 |---|---|
-| Vault file at rest (disk stolen, no passphrase) | Yes |
-| WireGuard private keys | Yes — vault only |
-| Pre-shared keys | Yes — vault only |
-| DuckDNS token | Yes — vault only |
-| Memory forensics after wireseal exits | No — best-effort wipe only |
-| Kernel keyring / ptrace by root | No — out of scope |
-| Config files readable by root (`/etc/wireguard/*.conf`) | No — root-owned by design |
+| Vault file at rest (disk stolen, no passphrase) | **Yes** — dual-layer AEAD encryption |
+| WireGuard private keys | **Yes** — vault only, never on disk in plaintext |
+| Pre-shared keys | **Yes** — vault only |
+| DuckDNS token | **Yes** — vault only |
+| Core dump memory extraction | **Yes** — RLIMIT_CORE=0, MADV_DONTDUMP on secret buffers, PR_SET_DUMPABLE=0 |
+| Debugger attachment (ptrace) | **Yes** — PR_SET_DUMPABLE=0 (Linux), PT_DENY_ATTACH (macOS), blocks non-root ptrace |
+| /proc/pid/mem reads | **Yes** — PR_SET_DUMPABLE=0 hides /proc/pid/mem and /proc/pid/environ |
+| Memory forensics after wireseal exits | **Partial** — zero-random-zero wipe + mlock; CPython may retain object headers briefly |
+| Kernel keyring / ptrace by root | **No** — root can bypass all userspace protections |
+| Config files readable by root (`/etc/wireguard/*.conf`) | **No** — root-owned by design |
 
 ---
 

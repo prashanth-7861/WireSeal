@@ -50,6 +50,16 @@ if sys.platform == "win32":
 import click
 
 # ---------------------------------------------------------------------------
+# Process hardening — apply before any secrets are loaded.
+# Disables core dumps, ptrace, /proc/pid/mem access (best-effort).
+# ---------------------------------------------------------------------------
+try:
+    from wireseal.security.process_hardening import harden_process
+    harden_process()
+except Exception:
+    pass
+
+# ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
 
