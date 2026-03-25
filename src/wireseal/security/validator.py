@@ -335,11 +335,16 @@ def validate_client_config(config: dict[str, Any]) -> None:
     if not isinstance(addr, ipaddress.IPv4Address) or not _is_rfc1918(addr):
         raise ValueError(f"Field 'client_ip': '{config['ip']}' is not an RFC 1918 private address")
 
-    # DNS server (must be a valid IP)
-    try:
-        ipaddress.ip_address(config["dns_server"])
-    except ValueError as e:
-        raise ValueError(f"Field 'dns_server': invalid IP address '{config['dns_server']}' -- {e}") from None
+    # DNS server (single IP or comma-separated list like "1.1.1.1, 8.8.8.8")
+    dns_raw = config["dns_server"]
+    for dns_part in dns_raw.split(","):
+        dns_part = dns_part.strip()
+        if not dns_part:
+            continue
+        try:
+            ipaddress.ip_address(dns_part)
+        except ValueError as e:
+            raise ValueError(f"Field 'dns_server': invalid IP address '{dns_part}' -- {e}") from None
 
     # Server public key
     validate_wg_key(config["server_public_key"], "server_public_key")
