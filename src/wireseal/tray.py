@@ -119,7 +119,18 @@ def run_tray(
         menu=menu,
     )
 
-    tray_thread = threading.Thread(target=icon.run, daemon=True, name="wireseal-tray")
+    def _safe_run() -> None:
+        try:
+            icon.run()
+        except Exception as exc:
+            # D-Bus/session bus unavailable (e.g. running via sudo),
+            # AppIndicator missing, or headless environment — tray is optional.
+            import logging
+            logging.getLogger("wireseal.tray").debug(
+                "Tray icon unavailable: %s", exc
+            )
+
+    tray_thread = threading.Thread(target=_safe_run, daemon=True, name="wireseal-tray")
     tray_thread.start()
 
     return tray_thread

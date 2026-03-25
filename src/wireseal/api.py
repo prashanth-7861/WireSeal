@@ -471,6 +471,28 @@ def _h_unlock(req: "_Handler", _groups: tuple) -> dict:
             _session.update(vault=vault, passphrase=passphrase, cache=cache)
 
         AuditLog(_AUDIT_PATH).log("unlock-web", {})
+
+        # Auto-start WireGuard tunnel if config exists but tunnel is down
+        try:
+            wg_check = subprocess.run(
+                ["wg", "show", _WG_IFACE],
+                capture_output=True, timeout=5,
+                creationflags=_SP_FLAGS,
+            )
+            if wg_check.returncode != 0:
+                # Tunnel not running — try to bring it up
+                conf_path = Path("/etc/wireguard") / f"{_WG_IFACE}.conf"
+                if sys.platform == "win32":
+                    conf_path = Path(os.environ.get("PROGRAMDATA", r"C:\ProgramData")) / "WireGuard" / f"{_WG_IFACE}.conf"
+                if conf_path.exists():
+                    subprocess.run(
+                        ["wg-quick", "up", _WG_IFACE],
+                        capture_output=True, timeout=15,
+                        creationflags=_SP_FLAGS,
+                    )
+        except Exception:
+            pass  # Best-effort — don't block unlock
+
         return {"ok": True}
     finally:
         wipe_string(passphrase_str)
