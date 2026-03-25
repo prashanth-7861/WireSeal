@@ -154,10 +154,11 @@ LAUNCHER
     ok "Installed: /usr/local/bin/wireseal-gui (Desktop GUI)"
 }
 
-# ── Network setup (IP forwarding, SSH, firewalld) ────────────────────────
+# ── Network setup (IP forwarding, SSH, firewalld, nftables cleanup) ──────
 setup_network() {
-    # Enable IP forwarding
-    info "Enabling IP forwarding..."
+    info "Configuring network..."
+
+    # ── 1. IP forwarding (persistent) ──
     if [[ "$(cat /proc/sys/net/ipv4/ip_forward 2>/dev/null)" != "1" ]]; then
         sysctl -w net.ipv4.ip_forward=1 > /dev/null
         mkdir -p /etc/sysctl.d
@@ -168,31 +169,87 @@ setup_network() {
         ok "IP forwarding already enabled."
     fi
 
-    # Enable nftables
+    # ── 2. Clean up stale nftables rules that block traffic ──
+    # Previous versions used 'policy drop' on input which conflicts with firewalld
+    # and locks users out of SSH. Remove all wireseal nftables tables.
+    if command -v nft &>/dev/null; then
+        for table in "inet wg_filter" "inet wg_forward" "ip wg_nat"; do
+            nft delete table $table 2>/dev/null || true
+        done
+        # Also remove stale rules file
+        rm -f /etc/nftables.d/wireguard.nft 2>/dev/null
+        ok "Cleaned stale nftables rules."
+    fi
+
+    # ── 3. Enable nftables service ──
     if command -v systemctl &>/dev/null; then
         systemctl enable --now nftables 2>/dev/null || true
     fi
 
-    # Enable SSH server
+    # ── 4. Firewalld configuration ──
+    if command -v firewall-cmd &>/dev/null && firewall-cmd --state &>/dev/null 2>&1; then
+        info "Configuring firewalld..."
+
+        # Open WireGuard UDP port
+        if ! firewall-cmd --query-port=51820/udp &>/dev/null 2>&1; then
+            firewall-cmd --add-port=51820/udp --permanent &>/dev/null
+            ok "Firewalld: opened UDP 51820."
+        else
+            ok "Firewalld: UDP 51820 already open."
+        fi
+
+        # Enable masquerade for VPN NAT
+        if ! firewall-cmd --query-masquerade &>/dev/null 2>&1; then
+            firewall-cmd --add-masquerade --permanent &>/dev/null
+            ok "Firewalld: enabled masquerade (NAT)."
+        else
+            ok "Firewalld: masquerade already enabled."
+        fi
+
+        # Reload to apply permanent rules
+        firewall-cmd --reload &>/dev/null
+        ok "Firewalld configured."
+    else
+        warn "firewalld not running — nftables rules will be applied by wireseal init."
+    fi
+
+    # ── 5. SSH server ──
     info "Enabling SSH server..."
     if systemctl is-active sshd &>/dev/null || systemctl is-active ssh &>/dev/null; then
         ok "SSH server already running."
     else
-        systemctl enable --now sshd 2>/dev/null || systemctl enable --now ssh 2>/dev/null || warn "Could not start SSH server."
+        systemctl enable --now sshd 2>/dev/null || \
+        systemctl enable --now ssh 2>/dev/null || \
+        warn "Could not start SSH server."
         ok "SSH server started."
     fi
 
-    # Open WireGuard port in firewalld (if present)
-    if command -v firewall-cmd &>/dev/null && firewall-cmd --state &>/dev/null 2>&1; then
-        info "Opening UDP 51820 in firewalld..."
-        if ! firewall-cmd --query-port=51820/udp &>/dev/null 2>&1; then
-            firewall-cmd --add-port=51820/udp --permanent &>/dev/null
-            firewall-cmd --reload &>/dev/null
-            ok "Firewalld port 51820/udp opened."
+    # ── 6. Verify WireGuard tunnel (if already initialized) ──
+    if [[ -f /etc/wireguard/wg0.conf ]]; then
+        info "WireGuard config found. Checking tunnel..."
+        if ! wg show wg0 &>/dev/null; then
+            wg-quick up wg0 2>/dev/null && ok "WireGuard tunnel started." || warn "Could not start wg0 — run 'sudo wireseal init' first."
         else
-            ok "Firewalld port already open."
+            ok "WireGuard tunnel already running."
         fi
     fi
+
+    # ── 7. Network diagnostic summary ──
+    echo ""
+    info "Network status:"
+    echo -e "  IP forwarding:  $(cat /proc/sys/net/ipv4/ip_forward 2>/dev/null || echo '?')"
+    if command -v firewall-cmd &>/dev/null && firewall-cmd --state &>/dev/null 2>&1; then
+        echo -e "  Firewalld:      active"
+        echo -e "  UDP 51820:      $(firewall-cmd --query-port=51820/udp &>/dev/null && echo 'open' || echo 'CLOSED')"
+        echo -e "  Masquerade:     $(firewall-cmd --query-masquerade &>/dev/null && echo 'enabled' || echo 'DISABLED')"
+    else
+        echo -e "  Firewalld:      not running"
+    fi
+    echo -e "  SSH:            $(systemctl is-active sshd 2>/dev/null || systemctl is-active ssh 2>/dev/null || echo 'not running')"
+    if command -v wg &>/dev/null; then
+        echo -e "  WireGuard:      $(wg show wg0 &>/dev/null 2>&1 && echo 'running' || echo 'not running')"
+    fi
+    echo ""
 }
 
 # ── Main ──────────────────────────────────────────────────────────────────

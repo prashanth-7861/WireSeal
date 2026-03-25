@@ -40,6 +40,17 @@ _CRON_FILE = Path("/etc/cron.d/wireseal")
 _NFT_RULES_FILE = _NFTABLES_DIR / "wireguard.nft"
 
 
+def _has_firewalld() -> bool:
+    """Check if firewalld is installed and running."""
+    if shutil.which("firewall-cmd") is None:
+        return False
+    check = subprocess.run(
+        ["firewall-cmd", "--state"],
+        shell=False, capture_output=True,
+    )
+    return check.returncode == 0
+
+
 def _build_nftables_ruleset(
     pub_iface: str, wg_iface: str, wg_port: int
 ) -> str:
@@ -48,35 +59,61 @@ def _build_nftables_ruleset(
     Returns the exact string that will be written to the nft file and applied.
     The same function is used for both the generated rules and the expected
     template to ensure validate_firewall_rules comparison is always symmetric.
+
+    When firewalld is active, we ONLY add forward + NAT rules (no input chain)
+    because firewalld already manages input filtering. Adding a second input
+    chain with 'policy drop' would conflict with firewalld and block SSH,
+    HTTP, and all other traffic.
     """
-    return textwrap.dedent(f"""\
-        # MANAGED BY wireseal -- DO NOT EDIT MANUALLY
-        table inet wg_filter {{
-            chain input {{
-                type filter hook input priority 0; policy drop;
-                iif "lo" accept
-                iifname "{wg_iface}" accept
-                meta l4proto {{ icmp, ipv6-icmp }} accept
-                ct state {{ established, related }} accept
-                ct state invalid drop
-                iifname "{pub_iface}" udp dport {wg_port} ct state new limit rate over 5/second burst 10 packets drop
-                iifname "{pub_iface}" udp dport {wg_port} accept
+    firewalld_active = _has_firewalld()
+
+    if firewalld_active:
+        # firewalld handles input — only add forward + NAT for VPN traffic
+        return textwrap.dedent(f"""\
+            # MANAGED BY wireseal -- DO NOT EDIT MANUALLY
+            # firewalld detected: only forward + NAT rules (no input chain)
+            table inet wg_forward {{
+                chain forward {{
+                    type filter hook forward priority 0; policy drop;
+                    iifname "{wg_iface}" oifname "{pub_iface}" accept
+                    oifname "{wg_iface}" ct state {{ established, related }} accept
+                }}
             }}
 
-            chain forward {{
-                type filter hook forward priority 0; policy drop;
-                iifname "{wg_iface}" oifname "{pub_iface}" ct state new accept
-                ct state {{ established, related }} accept
+            table ip wg_nat {{
+                chain postrouting {{
+                    type nat hook postrouting priority 100; policy accept;
+                    iifname "{wg_iface}" oifname "{pub_iface}" masquerade
+                }}
             }}
-        }}
+        """)
+    else:
+        # No firewalld — we manage input filtering ourselves.
+        # Accept policy on input, with rate limiting on WG port.
+        # This avoids locking the user out of SSH.
+        return textwrap.dedent(f"""\
+            # MANAGED BY wireseal -- DO NOT EDIT MANUALLY
+            table inet wg_filter {{
+                chain input {{
+                    type filter hook input priority 0; policy accept;
+                    ct state invalid drop
+                    iifname "{pub_iface}" udp dport {wg_port} ct state new limit rate over 5/second burst 10 packets drop
+                }}
 
-        table ip wg_nat {{
-            chain postrouting {{
-                type nat hook postrouting priority 100; policy accept;
-                iifname "{wg_iface}" oifname "{pub_iface}" masquerade
+                chain forward {{
+                    type filter hook forward priority 0; policy drop;
+                    iifname "{wg_iface}" oifname "{pub_iface}" accept
+                    oifname "{wg_iface}" ct state {{ established, related }} accept
+                }}
             }}
-        }}
-    """)
+
+            table ip wg_nat {{
+                chain postrouting {{
+                    type nat hook postrouting priority 100; policy accept;
+                    iifname "{wg_iface}" oifname "{pub_iface}" masquerade
+                }}
+            }}
+        """)
 
 
 # ---------------------------------------------------------------------------
@@ -248,21 +285,14 @@ class LinuxAdapter(AbstractPlatformAdapter):
         # FW-03: validate generated rules against template before applying
         self.validate_firewall_rules(generated_rules, template_rules)
 
-        # Idempotency check: if wg_filter table already exists, compare rules
-        check = subprocess.run(
-            ["nft", "list", "table", "inet", "wg_filter"],
-            shell=False,
-            capture_output=True,
-        )
-        if check.returncode == 0:
-            # Table exists -- flush and re-apply (ensures we apply current rules)
+        # Idempotency: clean up any existing wireseal nftables tables
+        for table_family, table_name in [
+            ("inet", "wg_filter"),
+            ("inet", "wg_forward"),
+            ("ip", "wg_nat"),
+        ]:
             subprocess.run(
-                ["nft", "delete", "table", "inet", "wg_filter"],
-                shell=False,
-                capture_output=True,
-            )
-            subprocess.run(
-                ["nft", "delete", "table", "ip", "wg_nat"],
+                ["nft", "delete", "table", table_family, table_name],
                 shell=False,
                 capture_output=True,
             )
@@ -298,16 +328,16 @@ class LinuxAdapter(AbstractPlatformAdapter):
             wg_interface: WireGuard interface name (unused on Linux -- rules
                           are keyed by table name, not interface).
         """
-        subprocess.run(
-            ["nft", "delete", "table", "inet", "wg_filter"],
-            shell=False,
-            capture_output=True,
-        )
-        subprocess.run(
-            ["nft", "delete", "table", "ip", "wg_nat"],
-            shell=False,
-            capture_output=True,
-        )
+        for table_family, table_name in [
+            ("inet", "wg_filter"),
+            ("inet", "wg_forward"),
+            ("ip", "wg_nat"),
+        ]:
+            subprocess.run(
+                ["nft", "delete", "table", table_family, table_name],
+                shell=False,
+                capture_output=True,
+            )
         if _NFT_RULES_FILE.exists():
             _NFT_RULES_FILE.unlink()
 
