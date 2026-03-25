@@ -433,6 +433,16 @@ jobs:
           sha256sum * > sha256sums.txt
           echo "=== sha256sums.txt ===" && cat sha256sums.txt
 
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: scripts
+
+      - name: Copy install scripts to release
+        run: |
+          cp scripts/wireseal-linux.sh dist/release/
+          cp scripts/wireseal-macos.sh dist/release/
+          cp scripts/wireseal-windows.ps1 dist/release/
+
       - name: Upload all files to GitHub Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

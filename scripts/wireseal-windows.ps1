@@ -18,7 +18,7 @@
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$Version     = "0.3.5"
+$Version     = "0.3.7"
 $Repo        = "https://github.com/prashanth-7861/WireSeal.git"
 $InstallDir  = "$env:ProgramFiles\WireSeal"
 $VenvDir     = Join-Path $InstallDir '.venv'

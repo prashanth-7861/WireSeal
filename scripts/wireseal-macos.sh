@@ -9,7 +9,7 @@ set -euo pipefail
 #   chmod +x wireseal-macos.sh
 #   ./wireseal-macos.sh
 
-VERSION="0.3.5"
+VERSION="0.3.7"
 REPO="https://github.com/prashanth-7861/WireSeal.git"
 INSTALL_DIR="$HOME/.wireseal"
 VENV_DIR="$INSTALL_DIR/.venv"
