@@ -60,37 +60,26 @@ def _build_nftables_ruleset(
     The same function is used for both the generated rules and the expected
     template to ensure validate_firewall_rules comparison is always symmetric.
 
-    When firewalld is active, we ONLY add forward + NAT rules (no input chain)
-    because firewalld already manages input filtering. Adding a second input
-    chain with 'policy drop' would conflict with firewalld and block SSH,
-    HTTP, and all other traffic.
+    When firewalld is active, we return an EMPTY string because firewalld
+    manages ALL firewall rules (input, forward, NAT). Adding nftables rules
+    alongside firewalld causes conflicts — firewalld's chains and our chains
+    both evaluate independently, and 'policy drop' in either blocks traffic
+    the other intended to allow.
+
+    Without firewalld, we add forward + NAT rules with 'policy accept' on
+    input (to avoid locking out SSH) and rate limiting on the WG port.
     """
     firewalld_active = _has_firewalld()
 
     if firewalld_active:
-        # firewalld handles input — only add forward + NAT for VPN traffic
-        return textwrap.dedent(f"""\
-            # MANAGED BY wireseal -- DO NOT EDIT MANUALLY
-            # firewalld detected: only forward + NAT rules (no input chain)
-            table inet wg_forward {{
-                chain forward {{
-                    type filter hook forward priority 0; policy drop;
-                    iifname "{wg_iface}" oifname "{pub_iface}" accept
-                    oifname "{wg_iface}" ct state {{ established, related }} accept
-                }}
-            }}
-
-            table ip wg_nat {{
-                chain postrouting {{
-                    type nat hook postrouting priority 100; policy accept;
-                    iifname "{wg_iface}" oifname "{pub_iface}" masquerade
-                }}
-            }}
-        """)
+        # firewalld manages everything — do NOT add any nftables rules.
+        # We configure firewalld in open_firewalld_port() and
+        # _configure_firewalld_forwarding() instead.
+        return ""
     else:
-        # No firewalld — we manage input filtering ourselves.
-        # Accept policy on input, with rate limiting on WG port.
-        # This avoids locking the user out of SSH.
+        # No firewalld — we manage firewall ourselves via nftables.
+        # policy accept on forward to avoid blocking legitimate traffic.
+        # NAT masquerade for VPN clients to reach the internet.
         return textwrap.dedent(f"""\
             # MANAGED BY wireseal -- DO NOT EDIT MANUALLY
             table inet wg_filter {{
@@ -101,7 +90,7 @@ def _build_nftables_ruleset(
                 }}
 
                 chain forward {{
-                    type filter hook forward priority 0; policy drop;
+                    type filter hook forward priority 0; policy accept;
                     iifname "{wg_iface}" oifname "{pub_iface}" accept
                     oifname "{wg_iface}" ct state {{ established, related }} accept
                 }}
@@ -260,32 +249,19 @@ class LinuxAdapter(AbstractPlatformAdapter):
     def apply_firewall_rules(
         self, wg_port: int, wg_interface: str, subnet: str
     ) -> None:
-        """Apply deny-by-default nftables rules with rate limiting and NAT masquerade.
+        """Configure firewall for WireGuard: port, forwarding, and NAT.
 
-        Security properties enforced:
-          - FW-01: policy drop on input + forward chains; rate limit 5/s burst 10
-          - FW-02: NAT masquerade only on detected outbound interface (not globally)
-          - FW-03: Generated ruleset validated against expected template before apply
-          - Applied separately from PostUp/PostDown (locked decision)
-          - Idempotent: checks existing rules before applying
+        When firewalld is active, uses firewall-cmd exclusively (no nftables).
+        When firewalld is not active, applies nftables rules directly.
 
         Args:
             wg_port:       UDP port WireGuard listens on.
             wg_interface:  WireGuard interface name (e.g., wg0).
-            subnet:        WireGuard subnet in CIDR (unused in nftables rules directly,
-                           masquerade uses iifname match instead of subnet match).
+            subnet:        WireGuard subnet in CIDR.
         """
         pub_iface = self.detect_outbound_interface()
 
-        # Build generated rules and expected template from the same function
-        # to ensure FW-03 validation is always symmetric.
-        generated_rules = _build_nftables_ruleset(pub_iface, wg_interface, wg_port)
-        template_rules = _build_nftables_ruleset(pub_iface, wg_interface, wg_port)
-
-        # FW-03: validate generated rules against template before applying
-        self.validate_firewall_rules(generated_rules, template_rules)
-
-        # Idempotency: clean up any existing wireseal nftables tables
+        # Always clean up stale nftables tables from previous versions
         for table_family, table_name in [
             ("inet", "wg_filter"),
             ("inet", "wg_forward"),
@@ -293,31 +269,73 @@ class LinuxAdapter(AbstractPlatformAdapter):
         ]:
             subprocess.run(
                 ["nft", "delete", "table", table_family, table_name],
-                shell=False,
-                capture_output=True,
+                shell=False, capture_output=True,
             )
 
-        # Ensure /etc/nftables.d/ exists
+        if _has_firewalld():
+            # Use firewalld exclusively — no nftables rules
+            self._configure_firewalld_full(wg_port, wg_interface, pub_iface)
+            # Remove stale nftables rules file
+            if _NFT_RULES_FILE.exists():
+                _NFT_RULES_FILE.unlink()
+            return
+
+        # No firewalld — use nftables directly
+        generated_rules = _build_nftables_ruleset(pub_iface, wg_interface, wg_port)
+        if not generated_rules:
+            return
+
+        template_rules = _build_nftables_ruleset(pub_iface, wg_interface, wg_port)
+        self.validate_firewall_rules(generated_rules, template_rules)
+
         if not _NFTABLES_DIR.exists():
             _NFTABLES_DIR.mkdir(parents=True, mode=0o755, exist_ok=True)
 
-        # Write ruleset file atomically
         atomic_write(_NFT_RULES_FILE, generated_rules.encode("utf-8"), mode=0o644)
 
-        # Apply the rules
         try:
             subprocess.run(
                 ["nft", "-f", str(_NFT_RULES_FILE)],
-                shell=False,
-                check=True,
-                capture_output=True,
-                timeout=30,
+                shell=False, check=True, capture_output=True, timeout=30,
             )
         except subprocess.CalledProcessError as exc:
             stderr = exc.stderr.decode("utf-8", errors="replace") if exc.stderr else ""
-            raise SetupError(
-                f"Failed to apply nftables rules: {stderr}"
-            ) from exc
+            raise SetupError(f"Failed to apply nftables rules: {stderr}") from exc
+
+    def _configure_firewalld_full(
+        self, wg_port: int, wg_interface: str, pub_iface: str
+    ) -> None:
+        """Configure firewalld with all rules needed for WireGuard VPN.
+
+        Sets up: UDP port, masquerade (NAT), forwarding, and SSH access.
+        All rules are permanent and firewalld is reloaded at the end.
+        """
+        cmds: list[list[str]] = [
+            # Open WireGuard UDP port
+            ["firewall-cmd", "--add-port", f"{wg_port}/udp", "--permanent"],
+            # Enable masquerade for NAT (VPN clients reach internet)
+            ["firewall-cmd", "--add-masquerade", "--permanent"],
+            # Ensure SSH is allowed
+            ["firewall-cmd", "--add-service", "ssh", "--permanent"],
+            # Forward traffic from wg0 to public interface
+            ["firewall-cmd", "--direct", "--add-rule", "ipv4", "filter",
+             "FORWARD", "0", "-i", wg_interface, "-o", pub_iface, "-j", "ACCEPT",
+             "--permanent"],
+            # Allow established/related traffic back
+            ["firewall-cmd", "--direct", "--add-rule", "ipv4", "filter",
+             "FORWARD", "0", "-i", pub_iface, "-o", wg_interface,
+             "-m", "state", "--state", "RELATED,ESTABLISHED",
+             "-j", "ACCEPT", "--permanent"],
+        ]
+
+        for cmd in cmds:
+            subprocess.run(cmd, shell=False, capture_output=True, timeout=30)
+
+        # Reload to apply all permanent rules
+        subprocess.run(
+            ["firewall-cmd", "--reload"],
+            shell=False, capture_output=True, timeout=30,
+        )
 
     def remove_firewall_rules(self, wg_interface: str) -> None:
         """Remove all wireseal nftables tables and the drop-in rule file.
@@ -346,46 +364,44 @@ class LinuxAdapter(AbstractPlatformAdapter):
     # ------------------------------------------------------------------
 
     def open_firewalld_port(self, wg_port: int) -> None:
-        """Open WireGuard UDP port in firewalld if firewalld is active.
+        """Open WireGuard UDP port + masquerade + SSH in firewalld.
 
-        Without this, firewalld's filter_INPUT chain (priority filter+10) rejects
-        incoming WireGuard UDP packets even though wg_filter accepts them at
-        priority 0, because nftables evaluates both chains independently.
-
-        Idempotent: skips if firewalld is not running or port is already open.
+        Configures all firewalld rules needed for a working VPN.
+        Idempotent: skips if firewalld is not running.
         """
-        if shutil.which("firewall-cmd") is None:
+        if not _has_firewalld():
             return
 
-        # Check if firewalld is running
-        check = subprocess.run(
-            ["firewall-cmd", "--state"],
-            shell=False, capture_output=True,
-        )
-        if check.returncode != 0:
-            return  # firewalld not running
-
-        # Check if port is already open
-        check = subprocess.run(
-            ["firewall-cmd", "--query-port", f"{wg_port}/udp"],
-            shell=False, capture_output=True,
-        )
-        if check.returncode == 0:
-            return  # already open
-
         try:
-            subprocess.run(
-                ["firewall-cmd", "--add-port", f"{wg_port}/udp", "--permanent"],
-                shell=False, check=True, capture_output=True, timeout=30,
-            )
-            subprocess.run(
-                ["firewall-cmd", "--reload"],
-                shell=False, check=True, capture_output=True, timeout=30,
-            )
-        except subprocess.CalledProcessError as exc:
-            stderr = exc.stderr.decode("utf-8", errors="replace") if exc.stderr else ""
-            print(f"[wireseal] Warning: could not open firewalld port: {stderr}",
-                  file=sys.stderr)
+            pub_iface = self.detect_outbound_interface()
+        except Exception:
+            pub_iface = ""
+
+        # Apply all firewalld rules needed
+        cmds: list[list[str]] = [
+            ["firewall-cmd", "--add-port", f"{wg_port}/udp", "--permanent"],
+            ["firewall-cmd", "--add-masquerade", "--permanent"],
+            ["firewall-cmd", "--add-service", "ssh", "--permanent"],
+        ]
+
+        if pub_iface:
+            cmds += [
+                ["firewall-cmd", "--direct", "--add-rule", "ipv4", "filter",
+                 "FORWARD", "0", "-i", "wg0", "-o", pub_iface,
+                 "-j", "ACCEPT", "--permanent"],
+                ["firewall-cmd", "--direct", "--add-rule", "ipv4", "filter",
+                 "FORWARD", "0", "-i", pub_iface, "-o", "wg0",
+                 "-m", "state", "--state", "RELATED,ESTABLISHED",
+                 "-j", "ACCEPT", "--permanent"],
+            ]
+
+        for cmd in cmds:
+            subprocess.run(cmd, shell=False, capture_output=True, timeout=30)
+
+        subprocess.run(
+            ["firewall-cmd", "--reload"],
+            shell=False, capture_output=True, timeout=30,
+        )
 
     def ensure_sshd(self) -> None:
         """Ensure OpenSSH server is installed and running.
@@ -806,15 +822,32 @@ class LinuxAdapter(AbstractPlatformAdapter):
             except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired):
                 pass
 
-        # Check firewall
-        nft_check = subprocess.run(
-            ["nft", "list", "table", "inet", "wg_filter"],
-            shell=False, capture_output=True, timeout=5,
-        )
-        status["firewall_active"] = nft_check.returncode == 0
+        # Check firewall — firewalld OR nftables
+        firewall_ok = False
+        firewall_label = "WireSeal firewall"
+        if _has_firewalld():
+            # Check if our port is open in firewalld
+            port_check = subprocess.run(
+                ["firewall-cmd", "--query-port", "51820/udp"],
+                shell=False, capture_output=True, timeout=5,
+            )
+            masq_check = subprocess.run(
+                ["firewall-cmd", "--query-masquerade"],
+                shell=False, capture_output=True, timeout=5,
+            )
+            firewall_ok = port_check.returncode == 0 and masq_check.returncode == 0
+            firewall_label = "Firewalld (port + masquerade)"
+        else:
+            nft_check = subprocess.run(
+                ["nft", "list", "table", "inet", "wg_filter"],
+                shell=False, capture_output=True, timeout=5,
+            )
+            firewall_ok = nft_check.returncode == 0
+            firewall_label = "nftables firewall"
+        status["firewall_active"] = firewall_ok
         status["checks"].append({
-            "name": "WireSeal firewall (nftables)",
-            "ok": nft_check.returncode == 0,
+            "name": firewall_label,
+            "ok": firewall_ok,
         })
 
         # Check IP forwarding
