@@ -517,6 +517,254 @@ class MacOSAdapter(AbstractPlatformAdapter):
         raise SetupError("Cannot detect outbound network interface")
 
     # ------------------------------------------------------------------
+    # Network services (SSH, hardening, security status)
+    # ------------------------------------------------------------------
+
+    def ensure_sshd(self) -> None:
+        """Ensure SSH (Remote Login) is enabled on macOS.
+
+        Uses systemsetup to enable SSH. macOS ships with sshd built-in.
+        """
+        # Check if already enabled
+        result = subprocess.run(
+            ["systemsetup", "-getremotelogin"],
+            shell=False, capture_output=True, text=True, timeout=10,
+        )
+        if "On" in result.stdout:
+            return
+
+        subprocess.run(
+            ["systemsetup", "-setremotelogin", "on"],
+            shell=False, capture_output=True, timeout=10,
+        )
+
+    def open_firewalld_port(self, wg_port: int) -> None:
+        """Ensure pf firewall allows WireGuard and SSH traffic.
+
+        On macOS, the pf anchor already handles WireGuard.
+        This ensures SSH (port 22) is also allowed.
+        """
+        # macOS application firewall (socketfilterfw) — allow sshd
+        subprocess.run(
+            ["/usr/libexec/ApplicationFirewall/socketfilterfw", "--setglobalstate", "on"],
+            shell=False, capture_output=True,
+        )
+        sshd_path = shutil.which("sshd") or "/usr/sbin/sshd"
+        subprocess.run(
+            ["/usr/libexec/ApplicationFirewall/socketfilterfw", "--add", sshd_path],
+            shell=False, capture_output=True,
+        )
+        subprocess.run(
+            ["/usr/libexec/ApplicationFirewall/socketfilterfw", "--unblockapp", sshd_path],
+            shell=False, capture_output=True,
+        )
+
+    def harden_server(self) -> list[str]:
+        """Apply macOS-specific server hardening. Returns list of actions taken."""
+        actions: list[str] = []
+        actions += self._harden_ssh_macos()
+        actions += self._harden_macos_firewall()
+        return actions
+
+    def _harden_ssh_macos(self) -> list[str]:
+        """Harden SSH configuration on macOS."""
+        sshd_config = Path("/etc/ssh/sshd_config")
+        if not sshd_config.exists():
+            return []
+
+        try:
+            content = sshd_config.read_text(encoding="utf-8")
+        except OSError:
+            return []
+
+        actions = []
+        original = content
+
+        hardening = {
+            "PermitRootLogin": "no",
+            "MaxAuthTries": "3",
+            "LoginGraceTime": "30",
+            "PermitEmptyPasswords": "no",
+            "X11Forwarding": "no",
+            "ClientAliveInterval": "300",
+            "ClientAliveCountMax": "2",
+        }
+
+        for key, value in hardening.items():
+            pattern = re.compile(rf'^#?\s*{key}\s+.*$', re.MULTILINE)
+            replacement = f"{key} {value}"
+            if pattern.search(content):
+                new_content = pattern.sub(replacement, content, count=1)
+                if new_content != content:
+                    content = new_content
+                    actions.append(f"SSH: {key} -> {value}")
+            elif f"{key} {value}" not in content:
+                content += f"\n{key} {value}"
+                actions.append(f"SSH: {key} -> {value}")
+
+        if content != original:
+            try:
+                sshd_config.write_text(content, encoding="utf-8")
+                # Restart SSH on macOS
+                subprocess.run(
+                    ["launchctl", "stop", "com.openssh.sshd"],
+                    shell=False, capture_output=True,
+                )
+                subprocess.run(
+                    ["launchctl", "start", "com.openssh.sshd"],
+                    shell=False, capture_output=True,
+                )
+            except OSError:
+                pass
+
+        return actions
+
+    def _harden_macos_firewall(self) -> list[str]:
+        """Enable macOS application firewall + stealth mode."""
+        actions = []
+
+        # Enable application firewall
+        result = subprocess.run(
+            ["/usr/libexec/ApplicationFirewall/socketfilterfw", "--setglobalstate", "on"],
+            shell=False, capture_output=True, text=True,
+        )
+        if result.returncode == 0:
+            actions.append("Firewall: application firewall enabled")
+
+        # Enable stealth mode (don't respond to pings from unknown sources)
+        result = subprocess.run(
+            ["/usr/libexec/ApplicationFirewall/socketfilterfw", "--setstealthmode", "on"],
+            shell=False, capture_output=True, text=True,
+        )
+        if result.returncode == 0:
+            actions.append("Firewall: stealth mode enabled")
+
+        return actions
+
+    def get_security_status(self) -> dict:
+        """Check current macOS security posture."""
+        from typing import Any
+        status: dict[str, Any] = {
+            "ssh_hardened": False,
+            "kernel_hardened": False,
+            "fail2ban_active": False,
+            "fail2ban_bans": 0,
+            "firewall_active": False,
+            "ip_forwarding": False,
+            "auto_updates": False,
+            "open_ports": [],
+            "checks": [],
+        }
+
+        # Check SSH hardening
+        sshd_config = Path("/etc/ssh/sshd_config")
+        if sshd_config.exists():
+            try:
+                content = sshd_config.read_text()
+                root_disabled = "PermitRootLogin no" in content
+                max_auth = "MaxAuthTries 3" in content or "MaxAuthTries 2" in content
+                status["ssh_hardened"] = root_disabled and max_auth
+                status["checks"].append({
+                    "name": "Root login disabled",
+                    "ok": root_disabled,
+                    "fix": None if root_disabled else "Set PermitRootLogin no",
+                })
+                status["checks"].append({
+                    "name": "Auth attempts limited",
+                    "ok": max_auth,
+                    "fix": None if max_auth else "Set MaxAuthTries 3",
+                })
+            except OSError:
+                pass
+
+        # Check macOS application firewall
+        result = subprocess.run(
+            ["/usr/libexec/ApplicationFirewall/socketfilterfw", "--getglobalstate"],
+            shell=False, capture_output=True, text=True,
+        )
+        fw_on = result.returncode == 0 and "enabled" in result.stdout.lower()
+        status["firewall_active"] = fw_on
+        status["checks"].append({
+            "name": "macOS Application Firewall",
+            "ok": fw_on,
+            "fix": None if fw_on else "Click Harden Server to enable",
+        })
+
+        # Check stealth mode
+        result = subprocess.run(
+            ["/usr/libexec/ApplicationFirewall/socketfilterfw", "--getstealthmode"],
+            shell=False, capture_output=True, text=True,
+        )
+        stealth_on = result.returncode == 0 and "enabled" in result.stdout.lower()
+        status["checks"].append({
+            "name": "Stealth mode (hide from scans)",
+            "ok": stealth_on,
+            "fix": None if stealth_on else "Click Harden Server to enable",
+        })
+
+        # Check pf firewall (WireGuard anchor)
+        result = subprocess.run(
+            ["pfctl", "-a", self._PF_ANCHOR, "-sr"],
+            shell=False, capture_output=True, text=True,
+        )
+        pf_active = result.returncode == 0 and result.stdout.strip() != ""
+        status["checks"].append({
+            "name": "pf firewall (WireGuard rules)",
+            "ok": pf_active,
+        })
+
+        # Check IP forwarding
+        result = subprocess.run(
+            ["/usr/sbin/sysctl", "-n", "net.inet.ip.forwarding"],
+            shell=False, capture_output=True, text=True,
+        )
+        status["ip_forwarding"] = result.stdout.strip() == "1"
+        status["checks"].append({
+            "name": "IP forwarding enabled",
+            "ok": status["ip_forwarding"],
+        })
+
+        # Check auto-updates
+        result = subprocess.run(
+            ["defaults", "read", "/Library/Preferences/com.apple.SoftwareUpdate", "AutomaticDownload"],
+            shell=False, capture_output=True, text=True,
+        )
+        auto_up = result.stdout.strip() == "1"
+        status["auto_updates"] = auto_up
+        status["checks"].append({
+            "name": "Automatic software updates",
+            "ok": auto_up,
+            "fix": None if auto_up else "Enable in System Settings > Software Update",
+        })
+
+        # Check open ports
+        try:
+            result = subprocess.run(
+                ["lsof", "-iTCP", "-sTCP:LISTEN", "-n", "-P"],
+                shell=False, capture_output=True, text=True, timeout=10,
+            )
+            ports = []
+            seen = set()
+            for line in result.stdout.splitlines()[1:]:
+                parts = line.split()
+                if len(parts) >= 9:
+                    addr = parts[8]
+                    if ":" in addr:
+                        port_str = addr.rsplit(":", 1)[-1]
+                        if port_str.isdigit():
+                            port = int(port_str)
+                            process = parts[0]
+                            key = (port, "tcp")
+                            if key not in seen:
+                                seen.add(key)
+                                ports.append({"port": port, "proto": "tcp", "process": process})
+            status["open_ports"] = sorted(ports, key=lambda x: x["port"])[:50]
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError):
+            pass
+
+        return status
+
+    # ------------------------------------------------------------------
     # Internal: system user management
     # ------------------------------------------------------------------
 

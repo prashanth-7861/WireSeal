@@ -184,6 +184,21 @@ if (-not (Get-NetFirewallRule -Name $RuleName -ErrorAction SilentlyContinue)) {
     Write-Ok "Firewall rule already exists."
 }
 
+# ── SSH Firewall Rule ────────────────────────────────────────────────────
+$SshRule = 'WireSeal-SSH-TCP-22'
+if (-not (Get-NetFirewallRule -Name $SshRule -ErrorAction SilentlyContinue)) {
+    New-NetFirewallRule -Name $SshRule `
+        -DisplayName 'WireSeal SSH (TCP 22)' `
+        -Direction Inbound `
+        -Protocol TCP `
+        -LocalPort 22 `
+        -Action Allow `
+        -Profile Any | Out-Null
+    Write-Ok "Firewall rule added: TCP 22 (SSH) inbound."
+} else {
+    Write-Ok "SSH firewall rule already exists."
+}
+
 # ── Enable IP forwarding (routing) ────────────────────────────────────────
 $ipFwd = (Get-NetIPInterface -AddressFamily IPv4 | Where-Object { $_.Forwarding -eq 'Enabled' })
 if (-not $ipFwd) {
@@ -195,6 +210,55 @@ if (-not $ipFwd) {
 } else {
     Write-Ok "IP forwarding already enabled."
 }
+
+# ── Enable OpenSSH Server ────────────────────────────────────────────────
+Write-Info "Checking OpenSSH Server..."
+$sshCap = Get-WindowsCapability -Online -Name 'OpenSSH.Server*' -ErrorAction SilentlyContinue
+if ($sshCap -and $sshCap.State -ne 'Installed') {
+    Write-Info "Installing OpenSSH Server..."
+    Add-WindowsCapability -Online -Name 'OpenSSH.Server~~~~0.0.1.0' -ErrorAction SilentlyContinue | Out-Null
+    Write-Ok "OpenSSH Server installed."
+} else {
+    Write-Ok "OpenSSH Server already installed."
+}
+
+# Start and enable sshd
+$sshdStatus = Get-Service -Name sshd -ErrorAction SilentlyContinue
+if ($sshdStatus) {
+    if ($sshdStatus.Status -ne 'Running') {
+        Set-Service -Name sshd -StartupType Automatic
+        Start-Service sshd -ErrorAction SilentlyContinue
+        Write-Ok "SSH server started."
+    } else {
+        Write-Ok "SSH server already running."
+    }
+} else {
+    Write-Warn "sshd service not found. OpenSSH may need a restart to activate."
+}
+
+# ── NAT for VPN subnet ───────────────────────────────────────────────────
+$existingNat = Get-NetNat -Name 'wireseal-nat' -ErrorAction SilentlyContinue
+if (-not $existingNat) {
+    Write-Info "Configuring NAT for VPN subnet..."
+    try {
+        New-NetNat -Name 'wireseal-nat' -InternalIPInterfaceAddressPrefix '10.0.0.0/24' -ErrorAction Stop | Out-Null
+        Write-Ok "NAT configured for 10.0.0.0/24."
+    } catch {
+        Write-Warn "NAT setup skipped (may be configured during wireseal init)."
+    }
+} else {
+    Write-Ok "NAT already configured."
+}
+
+# ── Network Doctor Summary ───────────────────────────────────────────────
+Write-Host ""
+Write-Info "Network Status:"
+Write-Host "  IP Forwarding: $( if ((Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters' -Name IPEnableRouter -ErrorAction SilentlyContinue).IPEnableRouter -eq 1) { 'enabled' } else { 'DISABLED' } )"
+Write-Host "  Firewall UDP 51820: $( if (Get-NetFirewallRule -Name $RuleName -ErrorAction SilentlyContinue) { 'open' } else { 'CLOSED' } )"
+Write-Host "  Firewall TCP 22: $( if (Get-NetFirewallRule -Name $SshRule -ErrorAction SilentlyContinue) { 'open' } else { 'CLOSED' } )"
+Write-Host "  SSH Server: $( if ($sshdStatus -and $sshdStatus.Status -eq 'Running') { 'running' } else { 'not running' } )"
+Write-Host "  NAT: $( if (Get-NetNat -Name 'wireseal-nat' -ErrorAction SilentlyContinue) { 'active' } else { 'not configured' } )"
+Write-Host ""
 
 # ── Done ──────────────────────────────────────────────────────────────────
 Write-Host ""

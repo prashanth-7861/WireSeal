@@ -971,7 +971,7 @@ def _h_session_summary(req: "_Handler", _groups: tuple) -> dict:
 
 
 def _h_security_status(req: "_Handler", _groups: tuple) -> dict:
-    """Return server security posture."""
+    """Return server security posture (cross-platform)."""
     _require_unlocked()
     _empty: dict = {
         "ssh_hardened": False, "kernel_hardened": False,
@@ -979,28 +979,28 @@ def _h_security_status(req: "_Handler", _groups: tuple) -> dict:
         "firewall_active": False, "ip_forwarding": False,
         "auto_updates": False, "open_ports": [], "checks": [],
     }
-    if sys.platform == "win32":
-        return _empty
     try:
-        from wireseal.platform.linux import LinuxAdapter
-        adapter = LinuxAdapter()
-        return adapter.get_security_status()
+        from wireseal.platform.detect import get_adapter
+        adapter = get_adapter()
+        if hasattr(adapter, "get_security_status"):
+            return adapter.get_security_status()
+        return _empty
     except Exception:
         return _empty
 
 
 def _h_harden_server(req: "_Handler", _groups: tuple) -> dict:
-    """Apply server hardening."""
+    """Apply server hardening (cross-platform)."""
     _require_unlocked()
-    if sys.platform == "win32":
-        return {"ok": True, "actions": ["Hardening not available on Windows"]}
     try:
-        from wireseal.platform.linux import LinuxAdapter
-        adapter = LinuxAdapter()
-        actions = adapter.harden_server()
-        from wireseal.security.audit import AuditLog
-        AuditLog(_AUDIT_PATH).log("harden-server", {"actions_count": len(actions)})
-        return {"ok": True, "actions": actions}
+        from wireseal.platform.detect import get_adapter
+        adapter = get_adapter()
+        if hasattr(adapter, "harden_server"):
+            actions = adapter.harden_server()
+            from wireseal.security.audit import AuditLog
+            AuditLog(_AUDIT_PATH).log("harden-server", {"actions_count": len(actions)})
+            return {"ok": True, "actions": actions}
+        return {"ok": True, "actions": ["Hardening not available on this platform"]}
     except Exception as exc:
         return {"ok": False, "actions": [], "error": str(exc)}
 

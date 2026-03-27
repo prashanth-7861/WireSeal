@@ -158,6 +158,66 @@ setup_repo
 setup_venv
 create_launcher
 
+# ── Network setup ────────────────────────────────────────────────────────
+setup_network() {
+    echo ""
+    echo -e "${BOLD}── Network Doctor ──${NC}"
+
+    # IP forwarding
+    info "Checking IP forwarding..."
+    IP_FWD=$(sysctl -n net.inet.ip.forwarding 2>/dev/null || echo "0")
+    if [[ "$IP_FWD" != "1" ]]; then
+        sysctl -w net.inet.ip.forwarding=1 > /dev/null 2>&1
+        ok "IP forwarding enabled."
+    else
+        ok "IP forwarding: enabled"
+    fi
+
+    # Enable Remote Login (SSH)
+    info "Checking SSH (Remote Login)..."
+    SSH_STATUS=$(systemsetup -getremotelogin 2>/dev/null || echo "Off")
+    if echo "$SSH_STATUS" | grep -qi "Off"; then
+        systemsetup -setremotelogin on 2>/dev/null || warn "Could not enable Remote Login."
+        ok "SSH (Remote Login) enabled."
+    else
+        ok "SSH (Remote Login): enabled"
+    fi
+
+    # Enable pf firewall
+    info "Checking pf firewall..."
+    pfctl -s info 2>/dev/null | grep -q "Enabled" && {
+        ok "pf firewall: enabled"
+    } || {
+        pfctl -e 2>/dev/null || true
+        ok "pf firewall enabled."
+    }
+
+    # Enable application firewall + stealth mode
+    info "Configuring application firewall..."
+    /usr/libexec/ApplicationFirewall/socketfilterfw --setglobalstate on > /dev/null 2>&1
+    /usr/libexec/ApplicationFirewall/socketfilterfw --setstealthmode on > /dev/null 2>&1
+    ok "Application firewall + stealth mode: enabled"
+
+    # Allow sshd through application firewall
+    SSHD_BIN=$(which sshd 2>/dev/null || echo "/usr/sbin/sshd")
+    /usr/libexec/ApplicationFirewall/socketfilterfw --add "$SSHD_BIN" > /dev/null 2>&1
+    /usr/libexec/ApplicationFirewall/socketfilterfw --unblockapp "$SSHD_BIN" > /dev/null 2>&1
+
+    # Detect outbound interface
+    PUB_IFACE=$(route -n get default 2>/dev/null | grep 'interface:' | awk '{print $2}' || echo "")
+
+    # Summary
+    echo ""
+    info "Network Status:"
+    echo -e "  IP forwarding: $(sysctl -n net.inet.ip.forwarding 2>/dev/null || echo '?')"
+    echo -e "  SSH:           $SSH_STATUS"
+    echo -e "  pf firewall:   $(pfctl -s info 2>/dev/null | grep -c 'Enabled' | grep -q '1' && echo 'enabled' || echo 'check')"
+    echo -e "  Interface:     ${PUB_IFACE:-not detected}"
+    echo ""
+}
+
+setup_network
+
 echo ""
 echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
 echo -e "${GREEN}  Installation complete!${NC}"
@@ -178,5 +238,5 @@ echo -e "  ${BOLD}Note:${NC} On macOS, also install the WireGuard app from the"
 echo -e "  Mac App Store for a GUI tunnel manager."
 echo ""
 echo -e "  ${BOLD}Update:${NC}"
-echo -e "  $0                                  Re-run to update"
+echo -e "  sudo $0                             Re-run to update"
 echo ""

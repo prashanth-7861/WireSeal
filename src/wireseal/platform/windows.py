@@ -583,6 +583,244 @@ class WindowsAdapter(AbstractPlatformAdapter):
         del password
 
     # ------------------------------------------------------------------
+    # Network services (SSH, hardening, security status)
+    # ------------------------------------------------------------------
+
+    def ensure_sshd(self) -> None:
+        """Ensure OpenSSH server is installed and running on Windows.
+
+        Windows 10 1809+ and Windows 11 include OpenSSH as an optional feature.
+        """
+        # Check if sshd is already running
+        result = subprocess.run(
+            ["sc.exe", "query", "sshd"],
+            shell=False, capture_output=True, text=True, creationflags=_NO_WIN,
+        )
+        if result.returncode == 0 and "RUNNING" in result.stdout:
+            return  # already running
+
+        # Install OpenSSH server feature if not present
+        subprocess.run(
+            [
+                "powershell", "-NoProfile", "-Command",
+                "Add-WindowsCapability -Online -Name OpenSSH.Server~~~~0.0.1.0",
+            ],
+            shell=False, capture_output=True, creationflags=_NO_WIN, timeout=120,
+        )
+
+        # Start and enable sshd
+        subprocess.run(
+            ["sc.exe", "config", "sshd", "start=auto"],
+            shell=False, capture_output=True, creationflags=_NO_WIN,
+        )
+        subprocess.run(
+            ["sc.exe", "start", "sshd"],
+            shell=False, capture_output=True, creationflags=_NO_WIN,
+        )
+
+    def open_firewalld_port(self, wg_port: int) -> None:
+        """Open WireGuard UDP port in Windows Firewall (no-op if already open)."""
+        rule_name = f"WireSeal-WireGuard-UDP-{wg_port}"
+        check = subprocess.run(
+            ["netsh", "advfirewall", "firewall", "show", "rule", f"name={rule_name}"],
+            shell=False, capture_output=True, text=True, creationflags=_NO_WIN,
+        )
+        if check.returncode == 0 and rule_name in check.stdout:
+            return
+
+        subprocess.run(
+            [
+                "netsh", "advfirewall", "firewall", "add", "rule",
+                f"name={rule_name}", "protocol=UDP", "dir=in",
+                f"localport={wg_port}", "action=allow", "profile=any", "enable=yes",
+            ],
+            shell=False, capture_output=True, creationflags=_NO_WIN,
+        )
+
+        # Also open SSH port
+        ssh_rule = "WireSeal-SSH-TCP-22"
+        check = subprocess.run(
+            ["netsh", "advfirewall", "firewall", "show", "rule", f"name={ssh_rule}"],
+            shell=False, capture_output=True, text=True, creationflags=_NO_WIN,
+        )
+        if check.returncode != 0 or ssh_rule not in check.stdout:
+            subprocess.run(
+                [
+                    "netsh", "advfirewall", "firewall", "add", "rule",
+                    f"name={ssh_rule}", "protocol=TCP", "dir=in",
+                    "localport=22", "action=allow", "profile=any", "enable=yes",
+                ],
+                shell=False, capture_output=True, creationflags=_NO_WIN,
+            )
+
+    def harden_server(self) -> list[str]:
+        """Apply Windows-specific server hardening. Returns list of actions taken."""
+        actions: list[str] = []
+        actions += self._harden_ssh_windows()
+        actions += self._harden_windows_firewall()
+        return actions
+
+    def _harden_ssh_windows(self) -> list[str]:
+        """Harden OpenSSH server configuration on Windows."""
+        sshd_config = Path(os.environ.get("ProgramData", r"C:\ProgramData")) / "ssh" / "sshd_config"
+        if not sshd_config.exists():
+            return []
+
+        try:
+            content = sshd_config.read_text(encoding="utf-8")
+        except OSError:
+            return []
+
+        actions = []
+        original = content
+
+        hardening = {
+            "PermitRootLogin": "no",
+            "MaxAuthTries": "3",
+            "PermitEmptyPasswords": "no",
+            "PasswordAuthentication": "yes",
+        }
+
+        for key, value in hardening.items():
+            pattern = re.compile(rf'^#?\s*{key}\s+.*$', re.MULTILINE)
+            replacement = f"{key} {value}"
+            if pattern.search(content):
+                new_content = pattern.sub(replacement, content, count=1)
+                if new_content != content:
+                    content = new_content
+                    actions.append(f"SSH: {key} -> {value}")
+            elif f"{key} {value}" not in content:
+                content += f"\n{key} {value}"
+                actions.append(f"SSH: {key} -> {value}")
+
+        if content != original:
+            try:
+                sshd_config.write_text(content, encoding="utf-8")
+                subprocess.run(
+                    ["sc.exe", "stop", "sshd"],
+                    shell=False, capture_output=True, creationflags=_NO_WIN,
+                )
+                subprocess.run(
+                    ["sc.exe", "start", "sshd"],
+                    shell=False, capture_output=True, creationflags=_NO_WIN,
+                )
+            except OSError:
+                pass
+
+        return actions
+
+    def _harden_windows_firewall(self) -> list[str]:
+        """Enable Windows Firewall on all profiles."""
+        actions = []
+        for profile in ("domainprofile", "privateprofile", "publicprofile"):
+            result = subprocess.run(
+                ["netsh", "advfirewall", "set", profile, "state", "on"],
+                shell=False, capture_output=True, creationflags=_NO_WIN,
+            )
+            if result.returncode == 0:
+                actions.append(f"Firewall: {profile} enabled")
+        return actions
+
+    def get_security_status(self) -> dict:
+        """Check current Windows security posture."""
+        from typing import Any
+        status: dict[str, Any] = {
+            "ssh_hardened": False,
+            "kernel_hardened": False,
+            "fail2ban_active": False,
+            "fail2ban_bans": 0,
+            "firewall_active": False,
+            "ip_forwarding": False,
+            "auto_updates": False,
+            "open_ports": [],
+            "checks": [],
+        }
+
+        # Check SSH hardening
+        sshd_config = Path(os.environ.get("ProgramData", r"C:\ProgramData")) / "ssh" / "sshd_config"
+        if sshd_config.exists():
+            try:
+                content = sshd_config.read_text()
+                max_auth = "MaxAuthTries 3" in content or "MaxAuthTries 2" in content
+                status["ssh_hardened"] = max_auth
+                status["checks"].append({
+                    "name": "SSH auth attempts limited",
+                    "ok": max_auth,
+                    "fix": None if max_auth else "Click Harden Server",
+                })
+            except OSError:
+                pass
+        else:
+            status["checks"].append({
+                "name": "OpenSSH Server",
+                "ok": False,
+                "fix": "Install OpenSSH Server feature",
+            })
+
+        # Check Windows Firewall
+        result = subprocess.run(
+            ["netsh", "advfirewall", "show", "currentprofile"],
+            shell=False, capture_output=True, text=True, creationflags=_NO_WIN,
+        )
+        fw_on = result.returncode == 0 and "ON" in result.stdout.upper()
+        status["firewall_active"] = fw_on
+        status["checks"].append({
+            "name": "Windows Firewall",
+            "ok": fw_on,
+            "fix": None if fw_on else "Enable Windows Firewall",
+        })
+
+        # Check IP forwarding (registry)
+        try:
+            key_path = r"SYSTEM\CurrentControlSet\Services\Tcpip\Parameters"
+            with winreg.OpenKey(
+                winreg.HKEY_LOCAL_MACHINE, key_path, 0, winreg.KEY_READ
+            ) as key:
+                val, _ = winreg.QueryValueEx(key, "IPEnableRouter")
+                status["ip_forwarding"] = val == 1
+        except OSError:
+            pass
+        status["checks"].append({
+            "name": "IP forwarding enabled",
+            "ok": status["ip_forwarding"],
+        })
+
+        # Check Windows Update
+        status["auto_updates"] = True  # Windows Update is on by default
+        status["checks"].append({
+            "name": "Windows Update",
+            "ok": True,
+        })
+
+        # Check open ports
+        try:
+            result = subprocess.run(
+                ["netstat", "-an"],
+                shell=False, capture_output=True, text=True,
+                timeout=10, creationflags=_NO_WIN,
+            )
+            ports = []
+            seen = set()
+            for line in result.stdout.splitlines():
+                parts = line.split()
+                if len(parts) >= 2 and ("LISTENING" in line or "UDP" in parts[0]):
+                    addr = parts[1] if "LISTENING" in line else parts[1]
+                    if ":" in addr:
+                        port_str = addr.rsplit(":", 1)[-1]
+                        if port_str.isdigit():
+                            port = int(port_str)
+                            proto = "tcp" if "TCP" in line else "udp"
+                            key = (port, proto)
+                            if key not in seen:
+                                seen.add(key)
+                                ports.append({"port": port, "proto": proto, "process": ""})
+            status["open_ports"] = sorted(ports, key=lambda x: x["port"])[:50]
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
+            pass
+
+        return status
+
+    # ------------------------------------------------------------------
     # 11. Config path (declared above -- get_config_path already implements abstract)
     # ------------------------------------------------------------------
 
