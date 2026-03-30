@@ -1342,7 +1342,9 @@ class _Handler(BaseHTTPRequestHandler):
                 except _ApiError as exc:
                     self._send({"error": str(exc)}, exc.status)
                 except Exception as exc:
-                    self._send({"error": "Internal server error."}, 500)
+                    import traceback
+                    traceback.print_exc()
+                    self._send({"error": f"Internal server error: {exc}"}, 500)
                 return
         self._send({"error": "Not found"}, 404)
 
