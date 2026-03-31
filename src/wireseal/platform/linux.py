@@ -273,6 +273,27 @@ class LinuxAdapter(AbstractPlatformAdapter):
             )
 
         if _has_firewalld():
+            # CRITICAL: Remove default 'inet filter' table if it has 'policy drop'.
+            # Many distros (EndeavourOS, Arch) ship a default nftables config with
+            # 'policy drop' on input that blocks ALL traffic except SSH. This table
+            # evaluates at priority 0, BEFORE firewalld's tables (priority +10),
+            # dropping WireGuard UDP packets before firewalld can accept them.
+            try:
+                check = subprocess.run(
+                    ["nft", "list", "chain", "inet", "filter", "input"],
+                    shell=False, capture_output=True, timeout=5,
+                )
+                if check.returncode == 0 and b"policy drop" in check.stdout:
+                    subprocess.run(
+                        ["nft", "delete", "table", "inet", "filter"],
+                        shell=False, capture_output=True, timeout=5,
+                    )
+                    print("[wireseal] Removed conflicting 'inet filter' table "
+                          "(policy drop blocked WireGuard traffic).",
+                          file=sys.stderr)
+            except Exception:
+                pass
+
             # Use firewalld exclusively — no nftables rules
             self._configure_firewalld_full(wg_port, wg_interface, pub_iface)
             # Remove stale nftables rules file

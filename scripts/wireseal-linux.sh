@@ -295,15 +295,45 @@ else
     ok "IP forwarding: enabled"
 fi
 
-# ── 7b. Clean ALL stale nftables rules ──────────────────────────────────
-info "Cleaning stale nftables rules..."
+# ── 7b. Clean ALL stale/conflicting nftables rules ─────────────────────
+info "Cleaning conflicting nftables rules..."
 if command -v nft &>/dev/null; then
-    # Delete ALL wireseal-managed tables (old and new names)
+    # Delete wireseal-managed tables (old and new names)
     for table in "inet wg_filter" "inet wg_forward" "ip wg_nat"; do
         nft delete table $table 2>/dev/null && warn "Removed stale table: $table" || true
     done
+
+    # CRITICAL: Delete the default 'inet filter' table if it has 'policy drop'
+    # on input. Many distros (EndeavourOS, Arch) ship a default nftables config
+    # with 'policy drop' that blocks ALL inbound traffic except SSH. This
+    # conflicts with firewalld (which manages its own rules) and blocks
+    # WireGuard UDP packets even when firewalld has port 51820 open.
+    # The 'inet filter' table evaluates at priority 0, BEFORE firewalld's
+    # tables at priority +10, so it drops packets before firewalld sees them.
+    if [[ "$FIREWALL_SYSTEM" == "firewalld" ]]; then
+        if nft list table inet filter &>/dev/null 2>&1; then
+            # Check if it has policy drop on input
+            if nft list chain inet filter input 2>/dev/null | grep -q "policy drop"; then
+                nft delete table inet filter 2>/dev/null
+                fixed "Removed conflicting 'inet filter' table (policy drop) — firewalld manages firewall rules."
+            fi
+        fi
+    fi
+
     # Remove stale rules file that gets reloaded by nftables.service on boot
     rm -f /etc/nftables.d/wireguard.nft 2>/dev/null
+
+    # Prevent the default nftables config from restoring the rogue table on reboot
+    if [[ -f /etc/nftables.conf ]] && grep -q "policy drop" /etc/nftables.conf 2>/dev/null; then
+        if [[ "$FIREWALL_SYSTEM" == "firewalld" ]]; then
+            # Back up and replace with empty config — firewalld handles everything
+            cp /etc/nftables.conf /etc/nftables.conf.bak.wireseal 2>/dev/null
+            echo '#!/usr/sbin/nft -f' > /etc/nftables.conf
+            echo '# Cleared by WireSeal — firewalld manages all firewall rules' >> /etc/nftables.conf
+            fixed "Cleared /etc/nftables.conf (was restoring 'policy drop' on reboot)."
+        fi
+    fi
+
     ok "nftables: clean (no conflicting rules)"
 fi
 
