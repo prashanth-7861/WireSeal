@@ -1396,8 +1396,14 @@ class _Handler(BaseHTTPRequestHandler):
         # The dashboard is served from the same origin so no CORS header
         # is strictly needed, but dev tools / local testing may use
         # 127.0.0.1 or localhost interchangeably.
+        # When bound to 0.0.0.0 (headless/Pi), also allow the server's
+        # actual IP so LAN browsers can reach the dashboard.
         origin = self.headers.get("Origin", "")
         _allowed = {"http://127.0.0.1", "http://localhost"}
+        # Also allow the IP:port the client connected to (covers LAN access)
+        host_header = self.headers.get("Host", "")
+        if host_header:
+            _allowed.add(f"http://{host_header.split(':')[0]}")
         if any(origin == a or origin.startswith(a + ":") for a in _allowed):
             self.send_header("Access-Control-Allow-Origin", origin)
         # No header at all for unknown origins — browser will block.
@@ -1513,9 +1519,20 @@ def serve(host: str = "127.0.0.1", port: int = 8080, gui: bool = True) -> None:
     gui=True  (default): opens a native pywebview desktop window.
     gui=False (headless): binds the server and blocks; no window opened.
     Falls back to the system browser if pywebview is unavailable.
+
+    On Linux, if gui=True but no DISPLAY/WAYLAND_DISPLAY is set (headless
+    server, SSH session, Raspberry Pi), automatically falls back to headless.
     """
     import threading
     import webbrowser
+
+    # Auto-detect headless Linux (SSH, no display, Raspberry Pi, etc.)
+    if gui and sys.platform == "linux":
+        has_display = os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")
+        if not has_display:
+            print("[wireseal] No display detected — switching to headless mode.")
+            print(f"[wireseal] Open http://{host}:{port}/ in your browser.")
+            gui = False
 
     server = ThreadingHTTPServer((host, port), _Handler)
     url = f"http://{host}:{port}/"
@@ -1586,6 +1603,7 @@ def serve(host: str = "127.0.0.1", port: int = 8080, gui: bool = True) -> None:
                 "/usr/lib64/girepository-1.0",
                 "/usr/lib/x86_64-linux-gnu/girepository-1.0",
                 "/usr/lib/aarch64-linux-gnu/girepository-1.0",
+                "/usr/lib/arm-linux-gnueabihf/girepository-1.0",
             ]
             existing = os.environ.get("GI_TYPELIB_PATH", "")
             extra = [d for d in _sys_typelib_dirs if os.path.isdir(d) and d not in existing]

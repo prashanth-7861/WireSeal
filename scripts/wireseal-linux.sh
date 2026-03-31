@@ -203,7 +203,40 @@ find_python() {
     return 1
 }
 
-PYTHON=$(find_python) || { err "Python 3.12–3.14 not found. Install it and re-run."; exit 1; }
+PYTHON=$(find_python)
+if [[ -z "$PYTHON" ]]; then
+    warn "Python 3.12–3.14 not found — attempting to install..."
+    case "$DISTRO" in
+        debian)
+            # Raspberry Pi OS / Debian Bookworm ships 3.11. Install 3.12+ from deadsnakes or source.
+            if command -v add-apt-repository &>/dev/null; then
+                add-apt-repository -y ppa:deadsnakes/ppa 2>/dev/null || true
+                apt-get update -qq
+                apt-get install -y python3.12 python3.12-venv python3.12-dev 2>&1 | tail -3
+            else
+                # Raspberry Pi OS doesn't have add-apt-repository.
+                # Try installing from bookworm-backports or build instructions.
+                info "Trying bookworm-backports for Python 3.12..."
+                echo "deb http://deb.debian.org/debian bookworm-backports main" > /etc/apt/sources.list.d/backports.list 2>/dev/null || true
+                apt-get update -qq
+                apt-get install -y -t bookworm-backports python3.12 python3.12-venv python3.12-dev 2>&1 | tail -3 || {
+                    err "Could not install Python 3.12 automatically."
+                    info "On Raspberry Pi OS, install Python 3.12+ manually:"
+                    info "  sudo apt install build-essential libssl-dev zlib1g-dev libffi-dev"
+                    info "  wget https://www.python.org/ftp/python/3.12.8/Python-3.12.8.tgz"
+                    info "  tar xf Python-3.12.8.tgz && cd Python-3.12.8"
+                    info "  ./configure --enable-optimizations && make -j\$(nproc) && sudo make altinstall"
+                    exit 1
+                }
+            fi
+            ;;
+        arch)   pacman -S --needed --noconfirm python 2>&1 | tail -1 ;;
+        fedora) dnf install -y python3.12 2>&1 | tail -1 ;;
+        *)      err "Cannot auto-install Python 3.12+ on $DISTRO."; exit 1 ;;
+    esac
+    PYTHON=$(find_python) || { err "Python 3.12–3.14 still not found after install attempt."; exit 1; }
+    fixed "Installed Python 3.12+"
+fi
 ok "Python: $PYTHON ($($PYTHON --version))"
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -256,11 +289,20 @@ chmod +x /usr/local/bin/wireseal
 
 cat > /usr/local/bin/wireseal-gui << 'LAUNCHER'
 #!/usr/bin/env bash
-exec /opt/wireseal/.venv/bin/python -c "
-import sys; sys.path.insert(0, '/opt/wireseal/src')
-from wireseal.api import serve
-serve()
-"
+# WireSeal Dashboard launcher
+# Preserves DISPLAY/WAYLAND_DISPLAY for GUI when run via sudo.
+# Auto-detects headless (SSH, no display, Raspberry Pi) and switches to --no-gui.
+
+# If run via sudo, inherit the real user's display for GUI
+if [[ -n "${SUDO_USER:-}" ]]; then
+    # Preserve display vars so pywebview/browser can open a window
+    export DISPLAY="${DISPLAY:-}"
+    export WAYLAND_DISPLAY="${WAYLAND_DISPLAY:-}"
+    export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u "$SUDO_USER")}"
+    export DBUS_SESSION_BUS_ADDRESS="${DBUS_SESSION_BUS_ADDRESS:-unix:path=$XDG_RUNTIME_DIR/bus}"
+fi
+
+exec /opt/wireseal/.venv/bin/python -m wireseal.main serve "$@"
 LAUNCHER
 chmod +x /usr/local/bin/wireseal-gui
 
