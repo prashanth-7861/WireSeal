@@ -188,6 +188,9 @@ export const api = {
   changePassphrase: (current: string, newPass: string) =>
     _fetch<{ ok: boolean }>("POST", "/change-passphrase", { current, new: newPass }),
 
+  startServer: () =>
+    _fetch<{ ok: boolean; note?: string }>("POST", "/start"),
+
   terminate: () =>
     _fetch<{ ok: boolean }>("POST", "/terminate"),
 

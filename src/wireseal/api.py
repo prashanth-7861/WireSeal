@@ -1197,6 +1197,52 @@ def _h_change_passphrase(req: "_Handler", _groups: tuple) -> dict:
         wipe_string(new_str)
 
 
+def _h_start_server(req: "_Handler", _groups: tuple) -> dict:
+    """Start the WireGuard tunnel (wg-quick up)."""
+    _require_unlocked()
+    from wireseal.security.audit import AuditLog
+
+    # Check if already running
+    check = subprocess.run(
+        ["ip", "link", "show", _WG_IFACE] if sys.platform != "win32"
+        else ["sc.exe", "query", f"WireGuardTunnel${_WG_IFACE}"],
+        capture_output=True, timeout=5,
+    )
+
+    if sys.platform == "win32":
+        if b"RUNNING" in (check.stdout or b""):
+            return {"ok": True, "note": "already running"}
+        wg_exe = Path(r"C:\Program Files\WireGuard\wireguard.exe")
+        from wireseal.platform.detect import get_adapter
+        config_path = get_adapter().get_config_path(_WG_IFACE)
+        if wg_exe.exists() and config_path.exists():
+            subprocess.run(
+                [str(wg_exe), "/installtunnelservice", str(config_path)],
+                check=False, capture_output=True, timeout=15,
+                creationflags=_SP_FLAGS,
+            )
+            AuditLog(_AUDIT_PATH).log("start", {"interface": _WG_IFACE})
+            return {"ok": True}
+        raise _ApiError("WireGuard not found or no config.", 500)
+
+    # Linux/macOS
+    if check.returncode == 0:
+        return {"ok": True, "note": "already running"}
+
+    try:
+        result = subprocess.run(
+            ["wg-quick", "up", _WG_IFACE],
+            check=False, capture_output=True, timeout=30,
+        )
+        if result.returncode == 0:
+            AuditLog(_AUDIT_PATH).log("start", {"interface": _WG_IFACE})
+            return {"ok": True}
+        err = result.stderr.decode("utf-8", errors="replace")
+        raise _ApiError(f"Failed to start: {err}", 500)
+    except FileNotFoundError:
+        raise _ApiError("wg-quick not found — is WireGuard installed?", 500)
+
+
 def _h_terminate(req: "_Handler", _groups: tuple) -> dict:
     _require_unlocked()
     from wireseal.security.audit import AuditLog
@@ -1328,6 +1374,7 @@ _ROUTES: list[tuple[str, re.Pattern, Any]] = [
     ("GET",    re.compile(r"^/api/security-status$"),        _h_security_status),
     ("POST",   re.compile(r"^/api/harden-server$"),          _h_harden_server),
     ("POST",   re.compile(r"^/api/change-passphrase$"),      _h_change_passphrase),
+    ("POST",   re.compile(r"^/api/start$"),                  _h_start_server),
     ("POST",   re.compile(r"^/api/terminate$"),              _h_terminate),
     ("POST",   re.compile(r"^/api/fresh-start$"),            _h_fresh_start),
     ("POST",   re.compile(r"^/api/update-endpoint$"),        _h_update_endpoint),
