@@ -293,13 +293,24 @@ cat > /usr/local/bin/wireseal-gui << 'LAUNCHER'
 # Preserves DISPLAY/WAYLAND_DISPLAY for GUI when run via sudo.
 # Auto-detects headless (SSH, no display, Raspberry Pi) and switches to --no-gui.
 
-# If run via sudo, inherit the real user's display for GUI
+# If run via sudo, inherit the real user's display and auth for GUI
 if [[ -n "${SUDO_USER:-}" ]]; then
-    # Preserve display vars so pywebview/browser can open a window
+    SUDO_UID=$(id -u "$SUDO_USER")
     export DISPLAY="${DISPLAY:-}"
     export WAYLAND_DISPLAY="${WAYLAND_DISPLAY:-}"
-    export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u "$SUDO_USER")}"
+    export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$SUDO_UID}"
     export DBUS_SESSION_BUS_ADDRESS="${DBUS_SESSION_BUS_ADDRESS:-unix:path=$XDG_RUNTIME_DIR/bus}"
+
+    # Copy the real user's Xauthority so root can access their X display
+    SUDO_HOME=$(eval echo "~$SUDO_USER")
+    if [[ -z "${XAUTHORITY:-}" ]]; then
+        if [[ -f "$SUDO_HOME/.Xauthority" ]]; then
+            export XAUTHORITY="$SUDO_HOME/.Xauthority"
+        elif [[ -f "$XDG_RUNTIME_DIR/.mutter-Xwaylandauth."* ]] 2>/dev/null; then
+            # GNOME Wayland puts Xauth here
+            export XAUTHORITY="$(ls "$XDG_RUNTIME_DIR/.mutter-Xwaylandauth."* 2>/dev/null | head -1)"
+        fi
+    fi
 fi
 
 exec /opt/wireseal/.venv/bin/python -m wireseal.main serve "$@"
