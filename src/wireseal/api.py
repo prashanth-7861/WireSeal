@@ -554,10 +554,12 @@ def _h_status(req: "_Handler", _groups: tuple) -> dict:
     peers: list[dict] = []
     try:
         result = subprocess.run(
-            ["wg", "show"], capture_output=True, text=True, timeout=5,
+            ["wg", "show", _WG_IFACE], capture_output=True, text=True, timeout=5,
             creationflags=_SP_FLAGS,
         )
-        if result.returncode == 0:
+        # wg show <iface> returns 0 only if the interface exists and is active.
+        # wg show (no args) returns 0 even with no interfaces.
+        if result.returncode == 0 and result.stdout.strip():
             running = True
             peers = _parse_wg_show(result.stdout)
     except (FileNotFoundError, subprocess.TimeoutExpired):
@@ -567,7 +569,7 @@ def _h_status(req: "_Handler", _groups: tuple) -> dict:
     if not running and sys.platform == "win32":
         try:
             sc_result = subprocess.run(
-                ["sc.exe", "query", "WireGuardTunnel$wg0"],
+                ["sc.exe", "query", f"WireGuardTunnel${_WG_IFACE}"],
                 capture_output=True, text=True, timeout=5,
                 creationflags=_SP_FLAGS,
             )
