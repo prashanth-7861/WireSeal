@@ -342,35 +342,43 @@ info "Configuring firewall ($FIREWALL_SYSTEM)..."
 
 case "$FIREWALL_SYSTEM" in
     firewalld)
-        # Open WireGuard UDP port
-        if ! firewall-cmd --query-port=${WG_PORT}/udp &>/dev/null 2>&1; then
-            firewall-cmd --add-port=${WG_PORT}/udp --permanent &>/dev/null
-            fixed "Firewalld: opened UDP $WG_PORT"
-        else
-            ok "Firewalld: UDP $WG_PORT open"
-        fi
+        info "Configuring firewalld zones + policy..."
 
-        # Enable masquerade (NAT for VPN clients)
-        if ! firewall-cmd --query-masquerade &>/dev/null 2>&1; then
-            firewall-cmd --add-masquerade --permanent &>/dev/null
-            fixed "Firewalld: enabled masquerade (NAT)"
-        else
-            ok "Firewalld: masquerade enabled"
-        fi
+        # ── Public zone: WireGuard port + SSH + masquerade ──
+        firewall-cmd --zone=public --add-port=${WG_PORT}/udp --permanent &>/dev/null
+        firewall-cmd --zone=public --add-masquerade --permanent &>/dev/null
+        firewall-cmd --zone=public --add-service=ssh --permanent &>/dev/null
+        firewall-cmd --zone=public --add-rich-rule='rule family="ipv4" source address="10.0.0.0/24" accept' --permanent &>/dev/null
+        ok "Firewalld: public zone — UDP $WG_PORT, SSH, masquerade, VPN subnet"
 
-        # Allow forwarding from wg0 to public interface
-        # This is needed for VPN traffic to reach the internet
-        if [[ -n "$PUB_IFACE" ]]; then
-            firewall-cmd --direct --add-rule ipv4 filter FORWARD 0 \
-                -i "$WG_IFACE" -o "$PUB_IFACE" -j ACCEPT --permanent 2>/dev/null || true
-            firewall-cmd --direct --add-rule ipv4 filter FORWARD 0 \
-                -i "$PUB_IFACE" -o "$WG_IFACE" -m state --state RELATED,ESTABLISHED \
-                -j ACCEPT --permanent 2>/dev/null || true
-        fi
+        # ── Trusted zone: add wg0 (accepts all VPN traffic) ──
+        firewall-cmd --zone=trusted --add-interface=${WG_IFACE} --permanent &>/dev/null
+        ok "Firewalld: trusted zone — $WG_IFACE"
 
-        # Reload to apply all permanent rules
+        # ── Policy: trusted→public forwarding (VPN clients → internet) ──
+        # Without this policy, VPN clients can reach the server but NOT
+        # the internet. Firewalld does NOT forward between zones by default.
+        # Uses policies (firewalld 0.9+) instead of --direct rules which
+        # fail on nftables-based iptables (Arch, Fedora 39+).
+        if ! firewall-cmd --permanent --info-policy=wg-internet &>/dev/null 2>&1; then
+            firewall-cmd --permanent --new-policy=wg-internet &>/dev/null
+            fixed "Firewalld: created wg-internet policy"
+        fi
+        firewall-cmd --permanent --policy=wg-internet --add-ingress-zone=trusted &>/dev/null
+        firewall-cmd --permanent --policy=wg-internet --add-egress-zone=public &>/dev/null
+        firewall-cmd --permanent --policy=wg-internet --set-target=ACCEPT &>/dev/null
+        ok "Firewalld: wg-internet policy — trusted→public ACCEPT"
+
+        # ── Reload ──
         firewall-cmd --reload &>/dev/null
         ok "Firewalld: all rules applied and reloaded"
+
+        # ── Verify ──
+        info "Firewalld status:"
+        echo -e "    UDP $WG_PORT:    $(firewall-cmd --zone=public --query-port=${WG_PORT}/udp &>/dev/null && echo 'open' || echo 'CLOSED')"
+        echo -e "    Masquerade:  $(firewall-cmd --zone=public --query-masquerade &>/dev/null && echo 'enabled' || echo 'DISABLED')"
+        echo -e "    wg0 zone:    $(firewall-cmd --get-zone-of-interface=${WG_IFACE} 2>/dev/null || echo 'not assigned')"
+        echo -e "    Policy:      $(firewall-cmd --info-policy=wg-internet &>/dev/null 2>&1 && echo 'wg-internet active' || echo 'MISSING')"
         ;;
 
     ufw)

@@ -328,35 +328,62 @@ class LinuxAdapter(AbstractPlatformAdapter):
     ) -> None:
         """Configure firewalld with all rules needed for WireGuard VPN.
 
-        Sets up: UDP port, masquerade (NAT), forwarding, and SSH access.
-        All rules are permanent and firewalld is reloaded at the end.
-        """
-        cmds: list[list[str]] = [
-            # Open WireGuard UDP port
-            ["firewall-cmd", "--add-port", f"{wg_port}/udp", "--permanent"],
-            # Enable masquerade for NAT (VPN clients reach internet)
-            ["firewall-cmd", "--add-masquerade", "--permanent"],
-            # Ensure SSH is allowed
-            ["firewall-cmd", "--add-service", "ssh", "--permanent"],
-            # Forward traffic from wg0 to public interface
-            ["firewall-cmd", "--direct", "--add-rule", "ipv4", "filter",
-             "FORWARD", "0", "-i", wg_interface, "-o", pub_iface, "-j", "ACCEPT",
-             "--permanent"],
-            # Allow established/related traffic back
-            ["firewall-cmd", "--direct", "--add-rule", "ipv4", "filter",
-             "FORWARD", "0", "-i", pub_iface, "-o", wg_interface,
-             "-m", "state", "--state", "RELATED,ESTABLISHED",
-             "-j", "ACCEPT", "--permanent"],
-        ]
+        Sets up:
+          1. UDP port for WireGuard on the public zone
+          2. wg0 interface in the trusted zone (accepts all VPN traffic)
+          3. Masquerade on public zone (NAT for VPN clients)
+          4. A firewalld policy for inter-zone forwarding (trusted→public)
+             This is required because firewalld does NOT forward between zones
+             by default — without a policy, VPN clients can reach the server
+             but NOT the internet.
+          5. SSH access on the public zone
+          6. Rich rule to accept VPN subnet traffic
 
-        for cmd in cmds:
+        Uses firewalld policies instead of --direct rules because --direct
+        rules fail on distros using nftables-based iptables (Arch, Fedora 39+).
+        """
+        def _run(cmd: list[str]) -> None:
             subprocess.run(cmd, shell=False, capture_output=True, timeout=30)
 
-        # Reload to apply all permanent rules
-        subprocess.run(
-            ["firewall-cmd", "--reload"],
-            shell=False, capture_output=True, timeout=30,
+        # ── 1. Public zone: open WireGuard port + SSH + masquerade ──
+        _run(["firewall-cmd", "--zone=public",
+              "--add-port", f"{wg_port}/udp", "--permanent"])
+        _run(["firewall-cmd", "--zone=public",
+              "--add-masquerade", "--permanent"])
+        _run(["firewall-cmd", "--zone=public",
+              "--add-service", "ssh", "--permanent"])
+
+        # Accept traffic from VPN subnet on the public zone
+        _run(["firewall-cmd", "--zone=public", "--add-rich-rule",
+              'rule family="ipv4" source address="10.0.0.0/24" accept',
+              "--permanent"])
+
+        # ── 2. Trusted zone: add wg0 interface ──
+        # The trusted zone has target=ACCEPT, so all traffic from wg0 is allowed
+        _run(["firewall-cmd", "--zone=trusted",
+              "--add-interface", wg_interface, "--permanent"])
+
+        # ── 3. Firewalld policy: trusted→public forwarding ──
+        # Without this, VPN clients can reach the server but NOT the internet.
+        # Firewalld policies handle inter-zone traffic (added in firewalld 0.9+).
+        # Check if the policy already exists
+        check = subprocess.run(
+            ["firewall-cmd", "--permanent", "--info-policy=wg-internet"],
+            shell=False, capture_output=True, timeout=10,
         )
+        if check.returncode != 0:
+            # Create the policy
+            _run(["firewall-cmd", "--permanent", "--new-policy=wg-internet"])
+
+        _run(["firewall-cmd", "--permanent", "--policy=wg-internet",
+              "--add-ingress-zone=trusted"])
+        _run(["firewall-cmd", "--permanent", "--policy=wg-internet",
+              "--add-egress-zone=public"])
+        _run(["firewall-cmd", "--permanent", "--policy=wg-internet",
+              "--set-target=ACCEPT"])
+
+        # ── 4. Reload to apply all permanent rules ──
+        _run(["firewall-cmd", "--reload"])
 
     def remove_firewall_rules(self, wg_interface: str) -> None:
         """Remove all wireseal nftables tables and the drop-in rule file.
@@ -385,9 +412,10 @@ class LinuxAdapter(AbstractPlatformAdapter):
     # ------------------------------------------------------------------
 
     def open_firewalld_port(self, wg_port: int) -> None:
-        """Open WireGuard UDP port + masquerade + SSH in firewalld.
+        """Configure all firewalld rules needed for a working VPN.
 
-        Configures all firewalld rules needed for a working VPN.
+        Delegates to _configure_firewalld_full which uses firewalld policies
+        (not --direct rules) for cross-zone forwarding.
         Idempotent: skips if firewalld is not running.
         """
         if not _has_firewalld():
@@ -398,26 +426,7 @@ class LinuxAdapter(AbstractPlatformAdapter):
         except Exception:
             pub_iface = ""
 
-        # Apply all firewalld rules needed
-        cmds: list[list[str]] = [
-            ["firewall-cmd", "--add-port", f"{wg_port}/udp", "--permanent"],
-            ["firewall-cmd", "--add-masquerade", "--permanent"],
-            ["firewall-cmd", "--add-service", "ssh", "--permanent"],
-        ]
-
-        if pub_iface:
-            cmds += [
-                ["firewall-cmd", "--direct", "--add-rule", "ipv4", "filter",
-                 "FORWARD", "0", "-i", "wg0", "-o", pub_iface,
-                 "-j", "ACCEPT", "--permanent"],
-                ["firewall-cmd", "--direct", "--add-rule", "ipv4", "filter",
-                 "FORWARD", "0", "-i", pub_iface, "-o", "wg0",
-                 "-m", "state", "--state", "RELATED,ESTABLISHED",
-                 "-j", "ACCEPT", "--permanent"],
-            ]
-
-        for cmd in cmds:
-            subprocess.run(cmd, shell=False, capture_output=True, timeout=30)
+        self._configure_firewalld_full(wg_port, "wg0", pub_iface)
 
         subprocess.run(
             ["firewall-cmd", "--reload"],
