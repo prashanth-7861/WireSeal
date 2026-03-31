@@ -204,9 +204,14 @@ def _resolve_client_endpoint(server_state: dict) -> str:
     return f"{server_state['ip']}:{port}"
 
 
-def _reload_wireguard(interface: str = "wg0") -> None:
-    """Reload WireGuard interface. Windows: sc.exe / wireguard.exe service.
-    Unix: wg syncconf or wg-quick up."""
+def _reload_wireguard(interface: str = "wg0") -> str:
+    """Reload WireGuard interface. Returns empty string on success, error message on failure.
+
+    Strategy:
+      1. Try wg syncconf (hot-reload, no disconnect)
+      2. If syncconf fails, fall back to wg-quick down/up (brief disconnect)
+      3. If both fail, return the error message
+    """
     if sys.platform == "win32":
         _no_win = subprocess.CREATE_NO_WINDOW
         svc = f"WireGuardTunnel${interface}"
@@ -232,7 +237,12 @@ def _reload_wireguard(interface: str = "wg0") -> None:
                 ["sc.exe", "start", svc],
                 check=False, capture_output=True, timeout=10, creationflags=_no_win,
             )
-        return
+        return ""
+
+    import tempfile
+    from wireseal.platform.detect import get_adapter
+    adapter = get_adapter()
+    config_path = adapter.get_config_path(interface)
 
     # Check if interface is up
     check = subprocess.run(
@@ -240,36 +250,63 @@ def _reload_wireguard(interface: str = "wg0") -> None:
         capture_output=True, timeout=5,
     )
     if check.returncode != 0:
-        subprocess.run(
+        # Interface not up — bring it up
+        result = subprocess.run(
             ["wg-quick", "up", interface],
-            shell=False, check=True, capture_output=True,
+            shell=False, check=False, capture_output=True, timeout=30,
         )
-        return
+        if result.returncode != 0:
+            err = result.stderr.decode("utf-8", errors="replace")
+            print(f"[wireseal] wg-quick up failed: {err}", file=sys.stderr)
+            return f"wg-quick up failed: {err}"
+        return ""
 
-    import tempfile
-    from wireseal.platform.detect import get_adapter
-    adapter = get_adapter()
-    config_path = adapter.get_config_path(interface)
-    strip_result = subprocess.run(
-        ["wg-quick", "strip", str(config_path)],
-        shell=False, check=True, capture_output=True,
-    )
-    with tempfile.NamedTemporaryFile(
-        suffix=".conf", mode="wb", delete=False
-    ) as tmp:
-        tmp.write(strip_result.stdout)
-        tmp_path = tmp.name
+    # Interface is up — try syncconf (hot reload, no disconnect)
+    sync_err = ""
     try:
-        os.chmod(tmp_path, 0o600)
-        subprocess.run(
-            ["wg", "syncconf", interface, tmp_path],
-            shell=False, check=True, capture_output=True,
+        strip_result = subprocess.run(
+            ["wg-quick", "strip", str(config_path)],
+            shell=False, check=True, capture_output=True, timeout=10,
         )
-    finally:
+        with tempfile.NamedTemporaryFile(
+            suffix=".conf", mode="wb", delete=False
+        ) as tmp:
+            tmp.write(strip_result.stdout)
+            tmp_path = tmp.name
         try:
-            os.unlink(tmp_path)
-        except OSError:
-            pass
+            os.chmod(tmp_path, 0o600)
+            result = subprocess.run(
+                ["wg", "syncconf", interface, tmp_path],
+                shell=False, check=False, capture_output=True, timeout=10,
+            )
+            if result.returncode == 0:
+                return ""  # Success
+            sync_err = result.stderr.decode("utf-8", errors="replace")
+            print(f"[wireseal] wg syncconf failed: {sync_err}", file=sys.stderr)
+        finally:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+    except Exception as exc:
+        sync_err = str(exc)
+        print(f"[wireseal] wg syncconf exception: {exc}", file=sys.stderr)
+
+    # Fallback: full restart (brief disconnect but guarantees config is loaded)
+    print("[wireseal] Falling back to wg-quick down/up...", file=sys.stderr)
+    subprocess.run(
+        ["wg-quick", "down", interface],
+        shell=False, check=False, capture_output=True, timeout=15,
+    )
+    result = subprocess.run(
+        ["wg-quick", "up", interface],
+        shell=False, check=False, capture_output=True, timeout=30,
+    )
+    if result.returncode == 0:
+        return ""  # Fallback succeeded
+    err = result.stderr.decode("utf-8", errors="replace")
+    print(f"[wireseal] wg-quick up fallback failed: {err}", file=sys.stderr)
+    return f"WireGuard reload failed: {sync_err}; fallback: {err}"
 
 
 # ---------------------------------------------------------------------------
@@ -685,14 +722,16 @@ def _h_add_client(req: "_Handler", _groups: tuple) -> dict:
             server_port=state.server["port"],
             clients=peers,
         )
-        wg_warning = None
+        wg_warning = ""
         try:
             adapter = get_adapter()
             adapter.check_privileges()
             adapter.deploy_config(server_config)
-            _reload_wireguard()
+            wg_warning = _reload_wireguard()
         except Exception as exc:
-            wg_warning = True
+            import traceback
+            traceback.print_exc()
+            wg_warning = f"WireGuard setup failed: {exc}"
 
         state.clients[name] = {
             "private_key": priv_key_str,
@@ -712,7 +751,7 @@ def _h_add_client(req: "_Handler", _groups: tuple) -> dict:
 
     result: dict = {"name": name, "ip": allocated_ip}
     if wg_warning:
-        result["warning"] = "Client added to vault but WireGuard reload failed (admin privileges required)."
+        result["warning"] = wg_warning
     return result
 
 
@@ -759,9 +798,13 @@ def _h_remove_client(req: "_Handler", groups: tuple) -> dict:
             adapter = get_adapter()
             adapter.check_privileges()
             adapter.deploy_config(server_config)
-            _reload_wireguard()
-        except Exception:
-            pass  # best-effort: client is removed from vault regardless
+            reload_err = _reload_wireguard()
+            if reload_err:
+                print(f"[wireseal] remove-client reload warning: {reload_err}",
+                      file=sys.stderr)
+        except Exception as exc:
+            print(f"[wireseal] remove-client reload failed: {exc}",
+                  file=sys.stderr)
 
         pool = IPPool(state.ip_pool["subnet"])
         pool.load_state(state.ip_pool.get("allocated", {}))
