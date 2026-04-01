@@ -290,42 +290,33 @@ chmod +x /usr/local/bin/wireseal
 cat > /usr/local/bin/wireseal-gui << 'LAUNCHER'
 #!/usr/bin/env bash
 # WireSeal Dashboard launcher
-# Preserves DISPLAY/WAYLAND_DISPLAY for GUI when run via sudo.
-# Auto-detects headless (SSH, no display, Raspberry Pi) and switches to --no-gui.
+# If run via 'sudo wireseal-gui', automatically re-executes with 'sudo -E'
+# to preserve the user's display environment (DISPLAY, WAYLAND_DISPLAY,
+# XAUTHORITY, DBUS, etc.) so the GUI can open on their desktop.
+# Auto-detects headless (SSH, no display) and switches to --no-gui.
 
-# If run via sudo, inherit the real user's display and auth for GUI
-if [[ -n "${SUDO_USER:-}" ]]; then
+# If run via plain 'sudo' (without -E), re-exec with -E to preserve env
+if [[ $EUID -eq 0 && -n "${SUDO_USER:-}" && -z "${WIRESEAL_ENV_OK:-}" ]]; then
+    export WIRESEAL_ENV_OK=1
+    # Ensure XDG_RUNTIME_DIR is set for the real user
     SUDO_UID=$(id -u "$SUDO_USER")
-    export DISPLAY="${DISPLAY:-}"
-    export WAYLAND_DISPLAY="${WAYLAND_DISPLAY:-}"
     export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$SUDO_UID}"
     export DBUS_SESSION_BUS_ADDRESS="${DBUS_SESSION_BUS_ADDRESS:-unix:path=$XDG_RUNTIME_DIR/bus}"
 
-    # Find Xauthority — needed for root to open windows on the user's display.
-    # Different desktop environments store it in different places:
-    SUDO_HOME=$(eval echo "~$SUDO_USER")
+    # Find Xauthority if not already set
     if [[ -z "${XAUTHORITY:-}" ]]; then
-        # 1. Standard X11 location (~/.Xauthority)
-        if [[ -f "$SUDO_HOME/.Xauthority" ]]; then
-            export XAUTHORITY="$SUDO_HOME/.Xauthority"
-        # 2. KDE Plasma Wayland (XWayland auth in runtime dir)
-        elif compgen -G "$XDG_RUNTIME_DIR/xauth_*" > /dev/null 2>&1; then
-            export XAUTHORITY="$(ls -t "$XDG_RUNTIME_DIR"/xauth_* 2>/dev/null | head -1)"
-        # 3. KDE may also use server-specific files like .xauth*
-        elif compgen -G "$XDG_RUNTIME_DIR/.xauth*" > /dev/null 2>&1; then
-            export XAUTHORITY="$(ls -t "$XDG_RUNTIME_DIR"/.xauth* 2>/dev/null | head -1)"
-        # 4. GNOME Wayland (.mutter-Xwaylandauth.*)
-        elif compgen -G "$XDG_RUNTIME_DIR/.mutter-Xwaylandauth."* > /dev/null 2>&1; then
-            export XAUTHORITY="$(ls -t "$XDG_RUNTIME_DIR"/.mutter-Xwaylandauth.* 2>/dev/null | head -1)"
-        # 5. SDDM may put it in /tmp
-        elif compgen -G "/tmp/xauth-$SUDO_UID-*" > /dev/null 2>&1; then
-            export XAUTHORITY="$(ls -t /tmp/xauth-${SUDO_UID}-* 2>/dev/null | head -1)"
-        fi
-    fi
-
-    # Last resort: grant root access to the display via xhost
-    if [[ -n "${DISPLAY:-}" ]] && command -v xhost &>/dev/null; then
-        su - "$SUDO_USER" -c "DISPLAY=$DISPLAY xhost +si:localuser:root" 2>/dev/null || true
+        SUDO_HOME=$(eval echo "~$SUDO_USER")
+        for candidate in \
+            "$SUDO_HOME/.Xauthority" \
+            "$XDG_RUNTIME_DIR"/xauth_* \
+            "$XDG_RUNTIME_DIR"/.xauth* \
+            "$XDG_RUNTIME_DIR"/.mutter-Xwaylandauth.* \
+            /tmp/xauth-${SUDO_UID}-*; do
+            if [[ -f "$candidate" ]]; then
+                export XAUTHORITY="$candidate"
+                break
+            fi
+        done
     fi
 fi
 
@@ -803,9 +794,9 @@ if ! $WG_RUNNING; then
     echo -e "  ${CYAN}1.${NC} sudo wireseal init                  ${DIM}# Create server + vault${NC}"
     echo -e "  ${CYAN}2.${NC} sudo wireseal add-client myphone     ${DIM}# Add a VPN client${NC}"
     echo -e "  ${CYAN}3.${NC} sudo wireseal show-qr myphone        ${DIM}# Scan QR on phone${NC}"
-    echo -e "  ${CYAN}4.${NC} sudo wireseal-gui                    ${DIM}# Open web dashboard${NC}"
+    echo -e "  ${CYAN}4.${NC} sudo -E wireseal-gui                 ${DIM}# Open web dashboard${NC}"
 else
-    echo -e "  ${CYAN}Dashboard:${NC}  sudo wireseal-gui"
+    echo -e "  ${CYAN}Dashboard:${NC}  sudo -E wireseal-gui"
     echo -e "  ${CYAN}Add client:${NC} sudo wireseal add-client myphone"
     echo -e "  ${CYAN}Show QR:${NC}    sudo wireseal show-qr myphone"
     echo -e "  ${CYAN}Status:${NC}     sudo wireseal status"
