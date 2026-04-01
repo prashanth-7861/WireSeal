@@ -113,6 +113,19 @@ class _ApiError(Exception):
         self.status = status
 
 
+def _sudo(cmd: list[str]) -> list[str]:
+    """Prepend 'sudo' to a command when not running as root on Linux/macOS.
+
+    This allows the GUI to run as the regular user (so it can access the
+    display) while elevating only for WireGuard / network commands.
+    """
+    if sys.platform == "win32":
+        return cmd
+    if os.geteuid() == 0:
+        return cmd
+    return ["sudo", "-n"] + cmd  # -n = non-interactive (no password prompt)
+
+
 def _require_unlocked() -> None:
     if _session["vault"] is None:
         raise _ApiError("Vault is locked. POST /api/unlock first.", 401)
@@ -246,13 +259,13 @@ def _reload_wireguard(interface: str = "wg0") -> str:
 
     # Check if interface is up
     check = subprocess.run(
-        ["ip", "link", "show", interface],
+        _sudo(["ip", "link", "show", interface]),
         capture_output=True, timeout=5,
     )
     if check.returncode != 0:
         # Interface not up — bring it up
         result = subprocess.run(
-            ["wg-quick", "up", interface],
+            _sudo(["wg-quick", "up", interface]),
             shell=False, check=False, capture_output=True, timeout=30,
         )
         if result.returncode != 0:
@@ -265,7 +278,7 @@ def _reload_wireguard(interface: str = "wg0") -> str:
     sync_err = ""
     try:
         strip_result = subprocess.run(
-            ["wg-quick", "strip", str(config_path)],
+            _sudo(["wg-quick", "strip", str(config_path)]),
             shell=False, check=True, capture_output=True, timeout=10,
         )
         with tempfile.NamedTemporaryFile(
@@ -276,7 +289,7 @@ def _reload_wireguard(interface: str = "wg0") -> str:
         try:
             os.chmod(tmp_path, 0o600)
             result = subprocess.run(
-                ["wg", "syncconf", interface, tmp_path],
+                _sudo(["wg", "syncconf", interface, tmp_path]),
                 shell=False, check=False, capture_output=True, timeout=10,
             )
             if result.returncode == 0:
@@ -295,11 +308,11 @@ def _reload_wireguard(interface: str = "wg0") -> str:
     # Fallback: full restart (brief disconnect but guarantees config is loaded)
     print("[wireseal] Falling back to wg-quick down/up...", file=sys.stderr)
     subprocess.run(
-        ["wg-quick", "down", interface],
+        _sudo(["wg-quick", "down", interface]),
         shell=False, check=False, capture_output=True, timeout=15,
     )
     result = subprocess.run(
-        ["wg-quick", "up", interface],
+        _sudo(["wg-quick", "up", interface]),
         shell=False, check=False, capture_output=True, timeout=30,
     )
     if result.returncode == 0:
@@ -512,7 +525,7 @@ def _h_unlock(req: "_Handler", _groups: tuple) -> dict:
         # Auto-start WireGuard tunnel if config exists but tunnel is down
         try:
             wg_check = subprocess.run(
-                ["wg", "show", _WG_IFACE],
+                _sudo(["wg", "show", _WG_IFACE]),
                 capture_output=True, timeout=5,
                 creationflags=_SP_FLAGS,
             )
@@ -523,7 +536,7 @@ def _h_unlock(req: "_Handler", _groups: tuple) -> dict:
                     conf_path = Path(os.environ.get("PROGRAMDATA", r"C:\ProgramData")) / "WireGuard" / f"{_WG_IFACE}.conf"
                 if conf_path.exists():
                     subprocess.run(
-                        ["wg-quick", "up", _WG_IFACE],
+                        _sudo(["wg-quick", "up", _WG_IFACE]),
                         capture_output=True, timeout=15,
                         creationflags=_SP_FLAGS,
                     )
@@ -554,7 +567,7 @@ def _h_status(req: "_Handler", _groups: tuple) -> dict:
     peers: list[dict] = []
     try:
         result = subprocess.run(
-            ["wg", "show", _WG_IFACE], capture_output=True, text=True, timeout=5,
+            _sudo(["wg", "show", _WG_IFACE]), capture_output=True, text=True, timeout=5,
             creationflags=_SP_FLAGS,
         )
         # wg show <iface> returns 0 only if the interface exists and is active.
@@ -1206,7 +1219,7 @@ def _h_start_server(req: "_Handler", _groups: tuple) -> dict:
 
     # Check if already running
     check = subprocess.run(
-        ["ip", "link", "show", _WG_IFACE] if sys.platform != "win32"
+        _sudo(["ip", "link", "show", _WG_IFACE]) if sys.platform != "win32"
         else ["sc.exe", "query", f"WireGuardTunnel${_WG_IFACE}"],
         capture_output=True, timeout=5,
     )
@@ -1233,7 +1246,7 @@ def _h_start_server(req: "_Handler", _groups: tuple) -> dict:
 
     try:
         result = subprocess.run(
-            ["wg-quick", "up", _WG_IFACE],
+            _sudo(["wg-quick", "up", _WG_IFACE]),
             check=False, capture_output=True, timeout=30,
         )
         if result.returncode == 0:
@@ -1270,7 +1283,7 @@ def _h_terminate(req: "_Handler", _groups: tuple) -> dict:
     # Linux/macOS: use wg-quick down
     try:
         subprocess.run(
-            ["wg-quick", "down", _WG_IFACE],
+            _sudo(["wg-quick", "down", _WG_IFACE]),
             check=True, capture_output=True, timeout=15,
         )
         AuditLog(_AUDIT_PATH).log("terminate", {"interface": _WG_IFACE})
@@ -1306,7 +1319,7 @@ def _h_fresh_start(req: "_Handler", _groups: tuple) -> dict:
                 pass
     else:
         try:
-            subprocess.run(["wg-quick", "down", _WG_IFACE], check=False, capture_output=True, timeout=10)
+            subprocess.run(_sudo(["wg-quick", "down", _WG_IFACE]), check=False, capture_output=True, timeout=10)
         except Exception:
             pass
 

@@ -301,15 +301,31 @@ if [[ -n "${SUDO_USER:-}" ]]; then
     export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$SUDO_UID}"
     export DBUS_SESSION_BUS_ADDRESS="${DBUS_SESSION_BUS_ADDRESS:-unix:path=$XDG_RUNTIME_DIR/bus}"
 
-    # Copy the real user's Xauthority so root can access their X display
+    # Find Xauthority — needed for root to open windows on the user's display.
+    # Different desktop environments store it in different places:
     SUDO_HOME=$(eval echo "~$SUDO_USER")
     if [[ -z "${XAUTHORITY:-}" ]]; then
+        # 1. Standard X11 location (~/.Xauthority)
         if [[ -f "$SUDO_HOME/.Xauthority" ]]; then
             export XAUTHORITY="$SUDO_HOME/.Xauthority"
-        elif [[ -f "$XDG_RUNTIME_DIR/.mutter-Xwaylandauth."* ]] 2>/dev/null; then
-            # GNOME Wayland puts Xauth here
-            export XAUTHORITY="$(ls "$XDG_RUNTIME_DIR/.mutter-Xwaylandauth."* 2>/dev/null | head -1)"
+        # 2. KDE Plasma Wayland (XWayland auth in runtime dir)
+        elif compgen -G "$XDG_RUNTIME_DIR/xauth_*" > /dev/null 2>&1; then
+            export XAUTHORITY="$(ls -t "$XDG_RUNTIME_DIR"/xauth_* 2>/dev/null | head -1)"
+        # 3. KDE may also use server-specific files like .xauth*
+        elif compgen -G "$XDG_RUNTIME_DIR/.xauth*" > /dev/null 2>&1; then
+            export XAUTHORITY="$(ls -t "$XDG_RUNTIME_DIR"/.xauth* 2>/dev/null | head -1)"
+        # 4. GNOME Wayland (.mutter-Xwaylandauth.*)
+        elif compgen -G "$XDG_RUNTIME_DIR/.mutter-Xwaylandauth."* > /dev/null 2>&1; then
+            export XAUTHORITY="$(ls -t "$XDG_RUNTIME_DIR"/.mutter-Xwaylandauth.* 2>/dev/null | head -1)"
+        # 5. SDDM may put it in /tmp
+        elif compgen -G "/tmp/xauth-$SUDO_UID-*" > /dev/null 2>&1; then
+            export XAUTHORITY="$(ls -t /tmp/xauth-${SUDO_UID}-* 2>/dev/null | head -1)"
         fi
+    fi
+
+    # Last resort: grant root access to the display via xhost
+    if [[ -n "${DISPLAY:-}" ]] && command -v xhost &>/dev/null; then
+        su - "$SUDO_USER" -c "DISPLAY=$DISPLAY xhost +si:localuser:root" 2>/dev/null || true
     fi
 fi
 
@@ -319,6 +335,28 @@ chmod +x /usr/local/bin/wireseal-gui
 
 ok "Installed: /usr/local/bin/wireseal (CLI)"
 ok "Installed: /usr/local/bin/wireseal-gui (Dashboard)"
+
+# ── Sudoers rule for non-root GUI mode ──────────────────────────────────
+# Allows `wireseal-gui` to run as the regular user while elevating only
+# wg/wg-quick/ip commands via passwordless sudo.
+info "Setting up sudoers rule for WireGuard commands..."
+WG_BIN=$(command -v wg 2>/dev/null || echo "/usr/bin/wg")
+WG_QUICK_BIN=$(command -v wg-quick 2>/dev/null || echo "/usr/bin/wg-quick")
+IP_BIN=$(command -v ip 2>/dev/null || echo "/usr/sbin/ip")
+SUDOERS_FILE="/etc/sudoers.d/wireseal"
+cat > "$SUDOERS_FILE" << SUDOERS
+# WireSeal: allow all users to run WireGuard commands without password.
+# This lets the dashboard GUI run as a regular user while managing tunnels.
+ALL ALL=(root) NOPASSWD: $WG_BIN, $WG_QUICK_BIN, $IP_BIN
+SUDOERS
+chmod 0440 "$SUDOERS_FILE"
+# Validate syntax — remove if invalid to prevent locking out sudo
+if ! visudo -c -f "$SUDOERS_FILE" &>/dev/null; then
+    rm -f "$SUDOERS_FILE"
+    warn "Sudoers rule invalid — removed. Run wireseal-gui with sudo instead."
+else
+    ok "Sudoers: passwordless wg/wg-quick/ip for all users"
+fi
 
 # ═══════════════════════════════════════════════════════════════════════════
 # 7. NETWORK DOCTOR — diagnose and fix every networking issue
