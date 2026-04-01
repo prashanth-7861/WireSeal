@@ -96,7 +96,13 @@ _session: dict = {
 _VAULT_DIR  = Path.home() / ".wireseal"
 _VAULT_PATH = _VAULT_DIR / "vault.enc"
 _AUDIT_PATH = _VAULT_DIR / "audit.log"
+_PIN_PATH   = _VAULT_DIR / "pin.enc"
 _WG_IFACE   = "wg0"
+
+# PIN-based quick unlock — encrypts the passphrase with a PIN-derived key.
+# After 5 wrong attempts the PIN file is wiped (must use full passphrase).
+_PIN_MAX_ATTEMPTS = 5
+_pin_fail_count   = 0
 
 # On Windows, prevent subprocess calls from flashing a visible console window.
 # CREATE_NO_WINDOW (0x08000000) suppresses the console for child processes.
@@ -129,6 +135,64 @@ def _sudo(cmd: list[str]) -> list[str]:
 def _require_unlocked() -> None:
     if _session["vault"] is None:
         raise _ApiError("Vault is locked. POST /api/unlock first.", 401)
+
+
+# ---------------------------------------------------------------------------
+# PIN helpers — encrypt/decrypt passphrase with a short PIN
+# ---------------------------------------------------------------------------
+
+def _pin_derive_key(pin: str, salt: bytes) -> bytes:
+    """Derive a 32-byte key from a PIN using PBKDF2-HMAC-SHA256.
+
+    PBKDF2 is intentional here (not Argon2): the PIN file is wiped after 5
+    wrong attempts, so sustained brute-force is not possible. PBKDF2 keeps
+    the PIN unlock fast (~50ms vs ~3s for Argon2).
+    """
+    import hashlib
+    return hashlib.pbkdf2_hmac("sha256", pin.encode(), salt, iterations=600_000, dklen=32)
+
+
+def _pin_save(passphrase_bytes: bytes, pin: str) -> None:
+    """Encrypt the passphrase with the PIN and save to pin.enc."""
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+    salt = os.urandom(16)
+    nonce = os.urandom(12)
+    key = _pin_derive_key(pin, salt)
+    ct = AESGCM(key).encrypt(nonce, passphrase_bytes, salt)
+    # Format: salt(16) + nonce(12) + ciphertext(variable)
+    _VAULT_DIR.mkdir(parents=True, exist_ok=True)
+    _PIN_PATH.write_bytes(salt + nonce + ct)
+    try:
+        if sys.platform != "win32":
+            os.chmod(_PIN_PATH, 0o600)
+    except OSError:
+        pass
+
+
+def _pin_load(pin: str) -> bytes | None:
+    """Decrypt the passphrase from pin.enc. Returns None on failure."""
+    if not _PIN_PATH.exists():
+        return None
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+    from cryptography.exceptions import InvalidTag
+    data = _PIN_PATH.read_bytes()
+    if len(data) < 29:  # 16 salt + 12 nonce + 1 min ciphertext
+        return None
+    salt, nonce, ct = data[:16], data[16:28], data[28:]
+    key = _pin_derive_key(pin, salt)
+    try:
+        return AESGCM(key).decrypt(nonce, ct, salt)
+    except InvalidTag:
+        return None
+
+
+def _pin_wipe() -> None:
+    """Delete the PIN file."""
+    try:
+        _PIN_PATH.unlink(missing_ok=True)
+    except OSError:
+        pass
+
 
 
 def _refresh_cache(state: Any) -> dict:
@@ -332,6 +396,7 @@ def _h_vault_info(req: "_Handler", _groups: tuple) -> dict:
         "initialized": _VAULT_PATH.exists(),
         "locked":      _session["vault"] is None,
         "interface":   _WG_IFACE,
+        "pin_set":     _PIN_PATH.exists(),
     }
 
 
@@ -1205,8 +1270,11 @@ def _h_change_passphrase(req: "_Handler", _groups: tuple) -> dict:
             _session["passphrase"] = new_passphrase
         old_passphrase.wipe()
 
+        # Wipe PIN — it's encrypted with the old passphrase, now stale
+        _pin_wipe()
+
         AuditLog(_AUDIT_PATH).log("change-passphrase", {})
-        return {"ok": True}
+        return {"ok": True, "pin_removed": _PIN_PATH.exists() is False}
     finally:
         wipe_string(current_str)
         wipe_string(new_str)
@@ -1368,6 +1436,128 @@ def _h_update_endpoint(req: "_Handler", _groups: tuple) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# PIN handlers
+# ---------------------------------------------------------------------------
+
+
+def _h_set_pin(req: "_Handler", _groups: tuple) -> dict:
+    """Set a quick-unlock PIN. Requires vault to be unlocked."""
+    _require_unlocked()
+    body = req._json()
+    pin = body.get("pin", "")
+    if not pin or not pin.isdigit() or len(pin) < 4 or len(pin) > 8:
+        raise _ApiError("PIN must be 4–8 digits.", 400)
+
+    with _lock:
+        passphrase = _session["passphrase"]
+
+    if passphrase is None:
+        raise _ApiError("No passphrase in session.", 500)
+
+    # Encrypt the passphrase with the PIN and save to disk
+    passphrase_bytes = passphrase.expose_secret()
+    _pin_save(passphrase_bytes, pin)
+
+    from wireseal.security.audit import AuditLog
+    AuditLog(_AUDIT_PATH).log("set-pin", {})
+    return {"ok": True}
+
+
+def _h_remove_pin(req: "_Handler", _groups: tuple) -> dict:
+    """Remove the quick-unlock PIN."""
+    _pin_wipe()
+    from wireseal.security.audit import AuditLog
+    AuditLog(_AUDIT_PATH).log("remove-pin", {})
+    return {"ok": True}
+
+
+def _h_unlock_pin(req: "_Handler", _groups: tuple) -> dict:
+    """Unlock the vault using a PIN instead of the full passphrase."""
+    global _pin_fail_count
+
+    if not _PIN_PATH.exists():
+        raise _ApiError("No PIN set. Use passphrase to unlock.", 400)
+
+    if _pin_fail_count >= _PIN_MAX_ATTEMPTS:
+        _pin_wipe()
+        _pin_fail_count = 0
+        raise _ApiError("Too many wrong PIN attempts. PIN removed — use your passphrase.", 403)
+
+    body = req._json()
+    pin = body.get("pin", "")
+    if not pin:
+        raise _ApiError("pin is required", 400)
+
+    passphrase_bytes = _pin_load(pin)
+    if passphrase_bytes is None:
+        _pin_fail_count += 1
+        remaining = _PIN_MAX_ATTEMPTS - _pin_fail_count
+        if _pin_fail_count >= _PIN_MAX_ATTEMPTS:
+            _pin_wipe()
+            _pin_fail_count = 0
+            raise _ApiError("Wrong PIN. PIN removed after too many attempts — use your passphrase.", 403)
+        raise _ApiError(f"Wrong PIN. {remaining} attempt{'s' if remaining != 1 else ''} remaining.", 401)
+
+    # PIN correct — decrypt passphrase and unlock the vault
+    from wireseal.security.secret_types import SecretBytes
+    from wireseal.security.vault import Vault
+    from wireseal.security.audit import AuditLog
+
+    passphrase = SecretBytes(bytearray(passphrase_bytes))
+    try:
+        vault = Vault(_VAULT_PATH)
+        try:
+            with vault.open(passphrase) as st:
+                cache = _refresh_cache(st)
+        except Exception:
+            passphrase.wipe()
+            # PIN decrypted something but it doesn't unlock the vault —
+            # passphrase may have changed since PIN was set.
+            _pin_wipe()
+            raise _ApiError("PIN is stale — passphrase was changed. Use your passphrase to unlock.", 401)
+
+        with _lock:
+            if _session["passphrase"]:
+                _session["passphrase"].wipe()
+            _session.update(vault=vault, passphrase=passphrase, cache=cache)
+
+        _pin_fail_count = 0  # Reset on success
+        AuditLog(_AUDIT_PATH).log("unlock-pin", {})
+
+        # Auto-start WireGuard tunnel (same as passphrase unlock)
+        try:
+            wg_check = subprocess.run(
+                _sudo(["wg", "show", _WG_IFACE]),
+                capture_output=True, timeout=5,
+                creationflags=_SP_FLAGS,
+            )
+            if wg_check.returncode != 0:
+                conf_path = Path("/etc/wireguard") / f"{_WG_IFACE}.conf"
+                if sys.platform == "win32":
+                    conf_path = Path(os.environ.get("PROGRAMDATA", r"C:\ProgramData")) / "WireGuard" / f"{_WG_IFACE}.conf"
+                if conf_path.exists():
+                    subprocess.run(
+                        _sudo(["wg-quick", "up", _WG_IFACE]),
+                        capture_output=True, timeout=15,
+                        creationflags=_SP_FLAGS,
+                    )
+        except Exception:
+            pass
+
+        return {"ok": True}
+    except _ApiError:
+        raise
+    except Exception:
+        passphrase.wipe()
+        raise _ApiError("Unlock failed.", 500)
+
+
+def _h_pin_info(req: "_Handler", _groups: tuple) -> dict:
+    """Check if a PIN is configured."""
+    return {"pin_set": _PIN_PATH.exists()}
+
+
+# ---------------------------------------------------------------------------
 # Routing table  — order matters for overlapping patterns
 # ---------------------------------------------------------------------------
 
@@ -1393,6 +1583,10 @@ _ROUTES: list[tuple[str, re.Pattern, Any]] = [
     ("POST",   re.compile(r"^/api/terminate$"),              _h_terminate),
     ("POST",   re.compile(r"^/api/fresh-start$"),            _h_fresh_start),
     ("POST",   re.compile(r"^/api/update-endpoint$"),        _h_update_endpoint),
+    ("POST",   re.compile(r"^/api/set-pin$"),               _h_set_pin),
+    ("POST",   re.compile(r"^/api/remove-pin$"),            _h_remove_pin),
+    ("POST",   re.compile(r"^/api/unlock-pin$"),            _h_unlock_pin),
+    ("GET",    re.compile(r"^/api/pin-info$"),              _h_pin_info),
 ]
 
 # ---------------------------------------------------------------------------

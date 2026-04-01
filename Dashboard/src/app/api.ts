@@ -51,6 +51,7 @@ export interface VaultInfo {
   initialized: boolean;
   locked: boolean;
   interface: string;
+  pin_set: boolean;
 }
 
 export interface Peer {
@@ -199,4 +200,16 @@ export const api = {
 
   updateEndpoint: (endpoint?: string) =>
     _fetch<{ ok: boolean; endpoint: string }>("POST", "/update-endpoint", { endpoint }),
+
+  setPin: (pin: string) =>
+    _fetch<{ ok: boolean }>("POST", "/set-pin", { pin }),
+
+  removePin: () =>
+    _fetch<{ ok: boolean }>("POST", "/remove-pin"),
+
+  unlockPin: (pin: string) =>
+    _fetch<{ ok: boolean }>("POST", "/unlock-pin", { pin }),
+
+  pinInfo: () =>
+    _fetch<{ pin_set: boolean }>("GET", "/pin-info"),
 };

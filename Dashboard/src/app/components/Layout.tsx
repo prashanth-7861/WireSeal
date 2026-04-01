@@ -1,9 +1,10 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { NavLink, Outlet, useNavigate } from "react-router";
 import {
   Server, ScrollText, Monitor, Settings, LogOut, Info,
   Lock, Play, Eye, EyeOff, AlertCircle, CheckCircle,
   Shield, Sparkles, Wifi, WifiOff, Circle, RotateCcw,
+  KeyRound, Hash, ArrowLeft, Trash2,
 } from "lucide-react";
 import { api, VAULT_LOCKED_EVENT, type Status } from "../api";
 
@@ -21,6 +22,20 @@ export function Layout() {
   const [showPw, setShowPw] = useState(false);
   const [authError, setAuthError] = useState("");
   const [authLoading, setAuthLoading] = useState(false);
+
+  // PIN state
+  const [pinSet, setPinSet] = useState(false);
+  const [unlockMode, setUnlockMode] = useState<"pin" | "passphrase">("pin");
+  const [pin, setPin] = useState(["", "", "", "", "", ""]);
+  const [pinLength, setPinLength] = useState(6);
+  const pinRefs = useRef<(HTMLInputElement | null)[]>([]);
+
+  // PIN setup dialog (shown after successful unlock)
+  const [showPinSetup, setShowPinSetup] = useState(false);
+  const [newPin, setNewPin] = useState("");
+  const [confirmPin, setConfirmPin] = useState("");
+  const [pinSetupError, setPinSetupError] = useState("");
+  const [pinSetupLoading, setPinSetupLoading] = useState(false);
 
   // Post-init success
   const [initResult, setInitResult] = useState<{
@@ -43,6 +58,8 @@ export function Layout() {
       } else {
         setVaultState("unlocked");
       }
+      setPinSet(info.pin_set ?? false);
+      setUnlockMode(info.pin_set ? "pin" : "passphrase");
     } catch {
       setVaultState("locked");
     }
@@ -53,7 +70,7 @@ export function Layout() {
   // ── Server status polling (for sidebar indicator) ──────────────────────────
   useEffect(() => {
     if (vaultState !== "unlocked") { setApiOnline(false); setServerStatus(null); return; }
-    setApiOnline(true); // if vault is unlocked, API server is reachable
+    setApiOnline(true);
     const poll = async () => {
       try {
         const s = await api.status();
@@ -61,7 +78,6 @@ export function Layout() {
         setApiOnline(true);
       } catch {
         setServerStatus(null);
-        // Don't set apiOnline=false here — the API may still be up, just vault locked
       }
     };
     poll();
@@ -80,13 +96,87 @@ export function Layout() {
     return () => window.removeEventListener(VAULT_LOCKED_EVENT, handler);
   }, []);
 
+  // ── PIN input handlers ───────────────────────────────────────────────────
+  const handlePinChange = (index: number, value: string) => {
+    if (!/^\d*$/.test(value)) return;
+    const newPinArr = [...pin];
+    newPinArr[index] = value.slice(-1);
+    setPin(newPinArr);
+    setAuthError("");
+
+    if (value && index < pinLength - 1) {
+      pinRefs.current[index + 1]?.focus();
+    }
+
+    // Auto-submit when all digits are filled
+    const fullPin = newPinArr.join("");
+    if (fullPin.length === pinLength && newPinArr.every(d => d !== "")) {
+      handlePinUnlock(fullPin);
+    }
+  };
+
+  const handlePinKeyDown = (index: number, e: React.KeyboardEvent) => {
+    if (e.key === "Backspace" && !pin[index] && index > 0) {
+      pinRefs.current[index - 1]?.focus();
+    }
+  };
+
+  const handlePinPaste = (e: React.ClipboardEvent) => {
+    e.preventDefault();
+    const pasted = e.clipboardData.getData("text").replace(/\D/g, "").slice(0, pinLength);
+    if (pasted.length > 0) {
+      const newPinArr = [...pin];
+      for (let i = 0; i < pinLength; i++) {
+        newPinArr[i] = pasted[i] || "";
+      }
+      setPin(newPinArr);
+      if (pasted.length === pinLength) {
+        handlePinUnlock(pasted);
+      } else {
+        pinRefs.current[pasted.length]?.focus();
+      }
+    }
+  };
+
+  const handlePinUnlock = async (pinValue: string) => {
+    setAuthLoading(true);
+    setAuthError("");
+    try {
+      await api.unlockPin(pinValue);
+      setVaultState("unlocked");
+      setPin(["", "", "", "", "", ""]);
+      navigate("/");
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : "Wrong PIN";
+      setAuthError(msg);
+      setPin(["", "", "", "", "", ""]);
+      pinRefs.current[0]?.focus();
+      // If PIN was removed (too many attempts), switch to passphrase mode
+      if (msg.includes("removed") || msg.includes("passphrase")) {
+        setPinSet(false);
+        setUnlockMode("passphrase");
+      }
+    } finally {
+      setAuthLoading(false);
+    }
+  };
+
   // ── Auth handlers ─────────────────────────────────────────────────────────
   const openStartDialog = () => {
-    setPassphraseMode(vaultState === "uninitialized" ? "setup" : "unlock");
-    setPassphrase("");
-    setConfirmPassphrase("");
-    setAuthError("");
-    setShowPassphrase(true);
+    if (vaultState === "locked" && pinSet) {
+      setUnlockMode("pin");
+      setPin(["", "", "", "", "", ""]);
+      setAuthError("");
+      setShowPassphrase(true);
+      setTimeout(() => pinRefs.current[0]?.focus(), 100);
+    } else {
+      setUnlockMode("passphrase");
+      setPassphraseMode(vaultState === "uninitialized" ? "setup" : "unlock");
+      setPassphrase("");
+      setConfirmPassphrase("");
+      setAuthError("");
+      setShowPassphrase(true);
+    }
   };
 
   const handleAuth = async (e: React.FormEvent) => {
@@ -115,6 +205,11 @@ export function Layout() {
       setShowPassphrase(false);
       setVaultState("unlocked");
       navigate("/");
+
+      // Offer PIN setup if no PIN is set yet
+      if (!pinSet) {
+        setTimeout(() => setShowPinSetup(true), 500);
+      }
     } catch (err: unknown) {
       setAuthError(err instanceof Error ? err.message : "Authentication failed");
     } finally {
@@ -124,9 +219,33 @@ export function Layout() {
     }
   };
 
+  const handlePinSetup = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setPinSetupError("");
+
+    if (!newPin || !newPin.match(/^\d{4,8}$/)) {
+      setPinSetupError("PIN must be 4–8 digits"); return;
+    }
+    if (newPin !== confirmPin) {
+      setPinSetupError("PINs do not match"); return;
+    }
+
+    setPinSetupLoading(true);
+    try {
+      await api.setPin(newPin);
+      setPinSet(true);
+      setShowPinSetup(false);
+      setNewPin("");
+      setConfirmPin("");
+    } catch (err: unknown) {
+      setPinSetupError(err instanceof Error ? err.message : "Failed to set PIN");
+    } finally {
+      setPinSetupLoading(false);
+    }
+  };
+
   const handleLock = async () => {
     try { await api.lock(); } catch { /* ignore */ }
-    // Clear any client-side persisted data that bypasses vault encryption
     try { localStorage.removeItem("vault_users"); } catch { /* ignore */ }
     setVaultState("locked");
     setInitResult(null);
@@ -143,6 +262,7 @@ export function Layout() {
       await api.freshStart();
       setShowFreshStart(false);
       setVaultState("uninitialized");
+      setPinSet(false);
     } catch (err: unknown) {
       setAuthError(err instanceof Error ? err.message : "Fresh start failed");
     } finally {
@@ -207,7 +327,9 @@ export function Layout() {
             <p className="text-blue-300/50 max-w-sm mx-auto text-sm leading-relaxed">
               {vaultState === "uninitialized"
                 ? "Create a vault passphrase to encrypt your keys and configs. Everything is secured with dual-layer AEAD encryption."
-                : "Unlock the vault with your passphrase to start managing your WireGuard network."}
+                : pinSet
+                  ? "Enter your PIN to quickly unlock and start."
+                  : "Unlock the vault with your passphrase to start managing your WireGuard network."}
             </p>
           </div>
 
@@ -216,8 +338,8 @@ export function Layout() {
             onClick={openStartDialog}
             className="flex items-center gap-3 px-8 py-3.5 bg-blue-600 text-white text-lg font-medium rounded-xl hover:bg-blue-500 transition-all shadow-lg shadow-blue-600/30 hover:shadow-blue-500/40 hover:scale-[1.02] active:scale-[0.98]"
           >
-            <Play className="w-6 h-6" />
-            {vaultState === "uninitialized" ? "Get Started" : "Unlock & Start"}
+            {vaultState === "uninitialized" ? <Play className="w-6 h-6" /> : pinSet ? <KeyRound className="w-6 h-6" /> : <Play className="w-6 h-6" />}
+            {vaultState === "uninitialized" ? "Get Started" : pinSet ? "Enter PIN" : "Unlock & Start"}
           </button>
 
           {/* Fresh Start option */}
@@ -279,103 +401,260 @@ export function Layout() {
                   disabled={freshStartLoading}
                   className="flex-1 bg-red-600 text-white px-4 py-2.5 rounded-lg hover:bg-red-700 transition-colors disabled:opacity-60"
                 >
-                  {freshStartLoading ? "Resetting…" : "Confirm Fresh Start"}
+                  {freshStartLoading ? "Resetting..." : "Confirm Fresh Start"}
                 </button>
               </div>
             </div>
           </div>
         )}
 
-        {/* Passphrase dialog */}
+        {/* Unlock dialog — PIN or Passphrase */}
         {showPassphrase && (
           <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
             <div className="bg-white rounded-xl shadow-2xl p-8 w-full max-w-md mx-4">
+              {/* PIN unlock mode */}
+              {unlockMode === "pin" && vaultState === "locked" && (
+                <>
+                  <div className="flex items-center gap-3 mb-6">
+                    <div className="w-12 h-12 bg-blue-100 rounded-full flex items-center justify-center">
+                      <KeyRound className="w-6 h-6 text-blue-700" />
+                    </div>
+                    <div>
+                      <h2 className="text-xl font-semibold text-gray-900">Quick Unlock</h2>
+                      <p className="text-sm text-gray-500">Enter your PIN to unlock</p>
+                    </div>
+                  </div>
+
+                  {/* PIN input boxes */}
+                  <div className="flex justify-center gap-3 mb-6" onPaste={handlePinPaste}>
+                    {pin.slice(0, pinLength).map((digit, i) => (
+                      <input
+                        key={i}
+                        ref={(el) => { pinRefs.current[i] = el; }}
+                        type="password"
+                        inputMode="numeric"
+                        maxLength={1}
+                        value={digit}
+                        onChange={(e) => handlePinChange(i, e.target.value)}
+                        onKeyDown={(e) => handlePinKeyDown(i, e)}
+                        disabled={authLoading}
+                        className="w-12 h-14 text-center text-2xl font-bold border-2 border-gray-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all"
+                        autoFocus={i === 0}
+                      />
+                    ))}
+                  </div>
+
+                  {authLoading && (
+                    <div className="flex items-center justify-center gap-2 text-blue-600 text-sm mb-4">
+                      <div className="w-4 h-4 border-2 border-blue-400/40 border-t-blue-400 rounded-full animate-spin" />
+                      <span>Unlocking...</span>
+                    </div>
+                  )}
+
+                  {authError && (
+                    <div className="flex items-center gap-2 text-red-600 text-sm bg-red-50 p-3 rounded-lg mb-4">
+                      <AlertCircle className="w-4 h-4 flex-shrink-0" />
+                      <span>{authError}</span>
+                    </div>
+                  )}
+
+                  <div className="flex gap-3">
+                    <button
+                      type="button"
+                      onClick={() => { setShowPassphrase(false); setAuthError(""); setPin(["", "", "", "", "", ""]); }}
+                      className="flex-1 px-4 py-2.5 border border-gray-300 rounded-lg hover:bg-gray-50 transition-colors"
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => { setUnlockMode("passphrase"); setPassphraseMode("unlock"); setAuthError(""); }}
+                      className="flex-1 px-4 py-2.5 border border-gray-300 rounded-lg hover:bg-gray-50 transition-colors text-sm flex items-center justify-center gap-2"
+                    >
+                      <Lock className="w-4 h-4" />
+                      Use Passphrase
+                    </button>
+                  </div>
+                </>
+              )}
+
+              {/* Passphrase unlock/setup mode */}
+              {(unlockMode === "passphrase" || vaultState === "uninitialized") && (
+                <>
+                  <div className="flex items-center gap-3 mb-6">
+                    <div className="w-12 h-12 bg-blue-100 rounded-full flex items-center justify-center">
+                      <Lock className="w-6 h-6 text-blue-700" />
+                    </div>
+                    <div>
+                      <h2 className="text-xl font-semibold text-gray-900">
+                        {passphraseMode === "setup" ? "Initialize Vault" : "Unlock Vault"}
+                      </h2>
+                      <p className="text-sm text-gray-500">
+                        {passphraseMode === "setup"
+                          ? "Create a passphrase to encrypt your vault"
+                          : "Enter your passphrase to unlock and start"}
+                      </p>
+                    </div>
+                  </div>
+
+                  <form onSubmit={handleAuth} className="space-y-4">
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700 mb-2">Passphrase</label>
+                      <div className="relative">
+                        <input
+                          type={showPw ? "text" : "password"}
+                          value={passphrase}
+                          onChange={(e) => setPassphrase(e.target.value)}
+                          className="w-full px-4 py-2.5 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                          placeholder={passphraseMode === "setup" ? "Min. 12 characters" : "Enter your passphrase"}
+                          autoFocus
+                          disabled={authLoading}
+                        />
+                        <button
+                          type="button"
+                          onClick={() => setShowPw(!showPw)}
+                          className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600"
+                        >
+                          {showPw ? <EyeOff className="w-5 h-5" /> : <Eye className="w-5 h-5" />}
+                        </button>
+                      </div>
+                    </div>
+
+                    {passphraseMode === "setup" && (
+                      <div>
+                        <label className="block text-sm font-medium text-gray-700 mb-2">Confirm Passphrase</label>
+                        <input
+                          type={showPw ? "text" : "password"}
+                          value={confirmPassphrase}
+                          onChange={(e) => setConfirmPassphrase(e.target.value)}
+                          className="w-full px-4 py-2.5 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                          placeholder="Confirm passphrase"
+                          disabled={authLoading}
+                        />
+                      </div>
+                    )}
+
+                    {authError && (
+                      <div className="flex items-center gap-2 text-red-600 text-sm bg-red-50 p-3 rounded-lg">
+                        <AlertCircle className="w-4 h-4 flex-shrink-0" />
+                        <span>{authError}</span>
+                      </div>
+                    )}
+
+                    <div className="flex gap-3 pt-1">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          if (pinSet && vaultState === "locked") {
+                            setUnlockMode("pin");
+                            setAuthError("");
+                            setPin(["", "", "", "", "", ""]);
+                            setTimeout(() => pinRefs.current[0]?.focus(), 100);
+                          } else {
+                            setShowPassphrase(false); setAuthError(""); setPassphrase(""); setConfirmPassphrase("");
+                          }
+                        }}
+                        className="flex-1 px-4 py-2.5 border border-gray-300 rounded-lg hover:bg-gray-50 transition-colors flex items-center justify-center gap-2"
+                        disabled={authLoading}
+                      >
+                        {pinSet && vaultState === "locked" ? (
+                          <><ArrowLeft className="w-4 h-4" /> Back to PIN</>
+                        ) : "Cancel"}
+                      </button>
+                      <button
+                        type="submit"
+                        disabled={authLoading}
+                        className="flex-1 bg-blue-600 text-white px-4 py-2.5 rounded-lg hover:bg-blue-700 transition-colors disabled:opacity-60 flex items-center justify-center gap-2"
+                      >
+                        <Play className="w-4 h-4" />
+                        {authLoading
+                          ? (passphraseMode === "setup" ? "Initializing..." : "Starting...")
+                          : (passphraseMode === "setup" ? "Initialize & Start" : "Start Server")}
+                      </button>
+                    </div>
+
+                    {passphraseMode === "setup" && (
+                      <p className="text-xs text-gray-400 text-center">
+                        Your passphrase encrypts all vault data using dual-layer AEAD encryption. It cannot be recovered.
+                      </p>
+                    )}
+                  </form>
+                </>
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* PIN setup dialog (after successful passphrase unlock, if no PIN set) */}
+        {showPinSetup && (
+          <div className="fixed inset-0 bg-black/30 flex items-center justify-center z-50">
+            <div className="bg-white rounded-xl shadow-2xl p-8 w-full max-w-md mx-4">
               <div className="flex items-center gap-3 mb-6">
-                <div className="w-12 h-12 bg-blue-100 rounded-full flex items-center justify-center">
-                  <Lock className="w-6 h-6 text-blue-700" />
+                <div className="w-12 h-12 bg-green-100 rounded-full flex items-center justify-center">
+                  <KeyRound className="w-6 h-6 text-green-700" />
                 </div>
                 <div>
-                  <h2 className="text-xl font-semibold text-gray-900">
-                    {passphraseMode === "setup" ? "Initialize Vault" : "Unlock Vault"}
-                  </h2>
-                  <p className="text-sm text-gray-500">
-                    {passphraseMode === "setup"
-                      ? "Create a passphrase to encrypt your vault"
-                      : "Enter your passphrase to unlock and start"}
-                  </p>
+                  <h2 className="text-xl font-semibold text-gray-900">Set a Quick Unlock PIN</h2>
+                  <p className="text-sm text-gray-500">Skip the passphrase next time</p>
                 </div>
               </div>
 
-              <form onSubmit={handleAuth} className="space-y-4">
+              <form onSubmit={handlePinSetup} className="space-y-4">
                 <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-2">Passphrase</label>
-                  <div className="relative">
-                    <input
-                      type={showPw ? "text" : "password"}
-                      value={passphrase}
-                      onChange={(e) => setPassphrase(e.target.value)}
-                      className="w-full px-4 py-2.5 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-                      placeholder={passphraseMode === "setup" ? "Min. 12 characters" : "Enter your passphrase"}
-                      autoFocus
-                      disabled={authLoading}
-                    />
-                    <button
-                      type="button"
-                      onClick={() => setShowPw(!showPw)}
-                      className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600"
-                    >
-                      {showPw ? <EyeOff className="w-5 h-5" /> : <Eye className="w-5 h-5" />}
-                    </button>
-                  </div>
+                  <label className="block text-sm font-medium text-gray-700 mb-2">PIN (4-8 digits)</label>
+                  <input
+                    type="password"
+                    inputMode="numeric"
+                    value={newPin}
+                    onChange={(e) => { if (/^\d*$/.test(e.target.value) && e.target.value.length <= 8) setNewPin(e.target.value); }}
+                    className="w-full px-4 py-2.5 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent text-center text-xl tracking-[0.5em]"
+                    placeholder="Enter PIN"
+                    autoFocus
+                    disabled={pinSetupLoading}
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-2">Confirm PIN</label>
+                  <input
+                    type="password"
+                    inputMode="numeric"
+                    value={confirmPin}
+                    onChange={(e) => { if (/^\d*$/.test(e.target.value) && e.target.value.length <= 8) setConfirmPin(e.target.value); }}
+                    className="w-full px-4 py-2.5 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent text-center text-xl tracking-[0.5em]"
+                    placeholder="Confirm PIN"
+                    disabled={pinSetupLoading}
+                  />
                 </div>
 
-                {passphraseMode === "setup" && (
-                  <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-2">Confirm Passphrase</label>
-                    <input
-                      type={showPw ? "text" : "password"}
-                      value={confirmPassphrase}
-                      onChange={(e) => setConfirmPassphrase(e.target.value)}
-                      className="w-full px-4 py-2.5 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-                      placeholder="Confirm passphrase"
-                      disabled={authLoading}
-                    />
-                  </div>
-                )}
-
-                {authError && (
+                {pinSetupError && (
                   <div className="flex items-center gap-2 text-red-600 text-sm bg-red-50 p-3 rounded-lg">
                     <AlertCircle className="w-4 h-4 flex-shrink-0" />
-                    <span>{authError}</span>
+                    <span>{pinSetupError}</span>
                   </div>
                 )}
 
                 <div className="flex gap-3 pt-1">
                   <button
                     type="button"
-                    onClick={() => { setShowPassphrase(false); setAuthError(""); setPassphrase(""); setConfirmPassphrase(""); }}
+                    onClick={() => { setShowPinSetup(false); setNewPin(""); setConfirmPin(""); setPinSetupError(""); }}
                     className="flex-1 px-4 py-2.5 border border-gray-300 rounded-lg hover:bg-gray-50 transition-colors"
-                    disabled={authLoading}
+                    disabled={pinSetupLoading}
                   >
-                    Cancel
+                    Skip
                   </button>
                   <button
                     type="submit"
-                    disabled={authLoading}
-                    className="flex-1 bg-blue-600 text-white px-4 py-2.5 rounded-lg hover:bg-blue-700 transition-colors disabled:opacity-60 flex items-center justify-center gap-2"
+                    disabled={pinSetupLoading || newPin.length < 4}
+                    className="flex-1 bg-green-600 text-white px-4 py-2.5 rounded-lg hover:bg-green-700 transition-colors disabled:opacity-60 flex items-center justify-center gap-2"
                   >
-                    <Play className="w-4 h-4" />
-                    {authLoading
-                      ? (passphraseMode === "setup" ? "Initializing…" : "Starting…")
-                      : (passphraseMode === "setup" ? "Initialize & Start" : "Start Server")}
+                    <KeyRound className="w-4 h-4" />
+                    {pinSetupLoading ? "Setting..." : "Set PIN"}
                   </button>
                 </div>
 
-                {passphraseMode === "setup" && (
-                  <p className="text-xs text-gray-400 text-center">
-                    Your passphrase encrypts all vault data using dual-layer AEAD encryption. It cannot be recovered.
-                  </p>
-                )}
+                <p className="text-xs text-gray-400 text-center">
+                  Your PIN encrypts the passphrase locally for quick access. After 5 wrong attempts, the PIN is removed.
+                </p>
               </form>
             </div>
           </div>
@@ -435,6 +714,30 @@ export function Layout() {
             <span className={`text-xs font-medium ${serverStatus?.running ? "text-green-600" : "text-gray-400"}`}>
               {serverStatus?.running ? "Running" : "Stopped"}
             </span>
+          </div>
+          {/* PIN indicator */}
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              <KeyRound className={`w-3 h-3 ${pinSet ? "text-green-500" : "text-gray-400"}`} />
+              <span className="text-xs text-gray-500">Quick PIN</span>
+            </div>
+            {pinSet ? (
+              <button
+                onClick={async () => { await api.removePin(); setPinSet(false); }}
+                className="text-xs text-red-500 hover:text-red-600 flex items-center gap-1 transition-colors"
+                title="Remove PIN"
+              >
+                <Trash2 className="w-3 h-3" />
+                Remove
+              </button>
+            ) : (
+              <button
+                onClick={() => setShowPinSetup(true)}
+                className="text-xs text-blue-500 hover:text-blue-600 transition-colors"
+              >
+                Set PIN
+              </button>
+            )}
           </div>
         </div>
 
@@ -504,6 +807,81 @@ export function Layout() {
         )}
         <Outlet />
       </main>
+
+      {/* PIN setup dialog (available while unlocked) */}
+      {showPinSetup && (
+        <div className="fixed inset-0 bg-black/30 flex items-center justify-center z-50">
+          <div className="bg-white rounded-xl shadow-2xl p-8 w-full max-w-md mx-4">
+            <div className="flex items-center gap-3 mb-6">
+              <div className="w-12 h-12 bg-green-100 rounded-full flex items-center justify-center">
+                <KeyRound className="w-6 h-6 text-green-700" />
+              </div>
+              <div>
+                <h2 className="text-xl font-semibold text-gray-900">Set a Quick Unlock PIN</h2>
+                <p className="text-sm text-gray-500">Skip the passphrase next time</p>
+              </div>
+            </div>
+
+            <form onSubmit={handlePinSetup} className="space-y-4">
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-2">PIN (4-8 digits)</label>
+                <input
+                  type="password"
+                  inputMode="numeric"
+                  value={newPin}
+                  onChange={(e) => { if (/^\d*$/.test(e.target.value) && e.target.value.length <= 8) setNewPin(e.target.value); }}
+                  className="w-full px-4 py-2.5 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent text-center text-xl tracking-[0.5em]"
+                  placeholder="Enter PIN"
+                  autoFocus
+                  disabled={pinSetupLoading}
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-2">Confirm PIN</label>
+                <input
+                  type="password"
+                  inputMode="numeric"
+                  value={confirmPin}
+                  onChange={(e) => { if (/^\d*$/.test(e.target.value) && e.target.value.length <= 8) setConfirmPin(e.target.value); }}
+                  className="w-full px-4 py-2.5 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent text-center text-xl tracking-[0.5em]"
+                  placeholder="Confirm PIN"
+                  disabled={pinSetupLoading}
+                />
+              </div>
+
+              {pinSetupError && (
+                <div className="flex items-center gap-2 text-red-600 text-sm bg-red-50 p-3 rounded-lg">
+                  <AlertCircle className="w-4 h-4 flex-shrink-0" />
+                  <span>{pinSetupError}</span>
+                </div>
+              )}
+
+              <div className="flex gap-3 pt-1">
+                <button
+                  type="button"
+                  onClick={() => { setShowPinSetup(false); setNewPin(""); setConfirmPin(""); setPinSetupError(""); }}
+                  className="flex-1 px-4 py-2.5 border border-gray-300 rounded-lg hover:bg-gray-50 transition-colors"
+                  disabled={pinSetupLoading}
+                >
+                  {pinSet ? "Cancel" : "Skip"}
+                </button>
+                <button
+                  type="submit"
+                  disabled={pinSetupLoading || newPin.length < 4}
+                  className="flex-1 bg-green-600 text-white px-4 py-2.5 rounded-lg hover:bg-green-700 transition-colors disabled:opacity-60 flex items-center justify-center gap-2"
+                >
+                  <KeyRound className="w-4 h-4" />
+                  {pinSetupLoading ? "Setting..." : "Set PIN"}
+                </button>
+              </div>
+
+              <p className="text-xs text-gray-400 text-center">
+                Your PIN encrypts the passphrase locally for quick access. After 5 wrong attempts, the PIN is removed.
+              </p>
+            </form>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
