@@ -6,6 +6,7 @@ import { AuditLog } from "./pages/AuditLog";
 import { Security } from "./pages/Security";
 import { Settings } from "./pages/Settings";
 import { About } from "./pages/About";
+import { Admin } from "./pages/Admin";
 
 export const router = createBrowserRouter([
   {
@@ -17,6 +18,7 @@ export const router = createBrowserRouter([
       { path: "audit-log", Component: AuditLog },
       { path: "security", Component: Security },
       { path: "settings", Component: Settings },
+      { path: "admin", Component: Admin },
       { path: "about", Component: About },
     ],
   },

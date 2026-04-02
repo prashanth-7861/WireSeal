@@ -118,6 +118,25 @@ export interface SecurityStatus {
   checks: SecurityCheck[];
 }
 
+export interface AdminStatus {
+  active: boolean;
+  expires_in: number;
+}
+
+export interface ServiceInfo {
+  unit: string;
+  load: string;
+  active: string;
+  sub: string;
+  description: string;
+}
+
+export interface ExecResult {
+  returncode: number;
+  stdout: string;
+  stderr: string;
+}
+
 export interface SessionSummary {
   sessions: {
     start: string;
@@ -220,4 +239,31 @@ export const api = {
 
   pinInfo: () =>
     _fetch<{ pin_set: boolean }>("GET", "/pin-info"),
+
+  // ── Admin mode ────────────────────────────────────────────────────────────
+  adminAuthenticate: (password: string) =>
+    _fetch<{ ok: boolean; expires_in: number }>("POST", "/admin/authenticate", { password }),
+
+  adminDeactivate: () =>
+    _fetch<{ ok: boolean }>("POST", "/admin/deactivate"),
+
+  adminStatus: () =>
+    _fetch<AdminStatus>("GET", "/admin/status"),
+
+  adminExec: (cmd: string[], stdin = "", timeout = 30) =>
+    _fetch<ExecResult>("POST", "/admin/exec", { cmd, stdin, timeout }),
+
+  adminServices: () =>
+    _fetch<{ services: ServiceInfo[]; note?: string }>("GET", "/admin/services"),
+
+  adminServiceAction: (name: string, action: string) =>
+    _fetch<ExecResult & { ok: boolean }>(
+      "POST", `/admin/services/${encodeURIComponent(name)}/${encodeURIComponent(action)}`
+    ),
+
+  adminReadFile: (path: string) =>
+    _fetch<{ path: string; content: string }>("POST", "/admin/file/read", { path }),
+
+  adminWriteFile: (path: string, content: string) =>
+    _fetch<{ ok: boolean; path: string }>("POST", "/admin/file/write", { path, content }),
 };

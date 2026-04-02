@@ -4,7 +4,7 @@ import {
   Server, ScrollText, Monitor, Settings, LogOut, Info,
   Lock, Play, Eye, EyeOff, AlertCircle, CheckCircle,
   Shield, Sparkles, Wifi, WifiOff, Circle, RotateCcw,
-  KeyRound, Hash, ArrowLeft, Trash2,
+  KeyRound, Hash, ArrowLeft, Trash2, ShieldAlert, Timer,
 } from "lucide-react";
 import { api, VAULT_LOCKED_EVENT, type Status } from "../api";
 
@@ -85,12 +85,29 @@ export function Layout() {
     return () => clearInterval(id);
   }, [vaultState]);
 
-  // Listen for 401 events from any page's API calls
+  // ── Admin status polling ──────────────────────────────────────────────────
+  useEffect(() => {
+    if (vaultState !== "unlocked") { setAdminActive(false); setAdminExpiresIn(0); return; }
+    const poll = async () => {
+      try {
+        const s = await api.adminStatus();
+        setAdminActive(s.active);
+        setAdminExpiresIn(s.expires_in);
+        if (!s.active) navigate("/");   // redirect away from /admin if expired
+      } catch { /* ignore */ }
+    };
+    poll();
+    const id = window.setInterval(poll, 30_000);
+    return () => clearInterval(id);
+  }, [vaultState, navigate]);
+
+  // ── Listen for 401 events from any page's API calls ───────────────────────
   useEffect(() => {
     const handler = () => {
       try { localStorage.removeItem("vault_users"); } catch { /* ignore */ }
       setVaultState("locked");
       setInitResult(null);
+      setAdminActive(false);
     };
     window.addEventListener(VAULT_LOCKED_EVENT, handler);
     return () => window.removeEventListener(VAULT_LOCKED_EVENT, handler);
@@ -244,13 +261,49 @@ export function Layout() {
     }
   };
 
+  const handleAdminAuth = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setAdminAuthError("");
+    setAdminAuthLoading(true);
+    try {
+      const res = await api.adminAuthenticate(adminPassword);
+      setAdminActive(true);
+      setAdminExpiresIn(res.expires_in);
+      setShowAdminAuth(false);
+      setAdminPassword("");
+      navigate("/admin");
+    } catch (err) {
+      setAdminAuthError(err instanceof Error ? err.message : "Authentication failed");
+    } finally {
+      setAdminPassword("");
+      setAdminAuthLoading(false);
+    }
+  };
+
+  const handleAdminDeactivate = async () => {
+    try { await api.adminDeactivate(); } catch { /* ignore */ }
+    setAdminActive(false);
+    setAdminExpiresIn(0);
+    navigate("/");
+  };
+
   const handleLock = async () => {
     try { await api.lock(); } catch { /* ignore */ }
     try { localStorage.removeItem("vault_users"); } catch { /* ignore */ }
+    setAdminActive(false);
     setVaultState("locked");
     setInitResult(null);
     navigate("/");
   };
+
+  // Admin mode state
+  const [adminActive, setAdminActive]           = useState(false);
+  const [adminExpiresIn, setAdminExpiresIn]     = useState(0);
+  const [showAdminAuth, setShowAdminAuth]       = useState(false);
+  const [adminPassword, setAdminPassword]       = useState("");
+  const [showAdminPw, setShowAdminPw]           = useState(false);
+  const [adminAuthError, setAdminAuthError]     = useState("");
+  const [adminAuthLoading, setAdminAuthLoading] = useState(false);
 
   // Fresh start
   const [showFreshStart, setShowFreshStart] = useState(false);
@@ -276,6 +329,7 @@ export function Layout() {
     { to: "/audit-log", label: "Audit Log", icon: ScrollText },
     { to: "/security", label: "Security", icon: Shield },
     { to: "/settings", label: "Settings", icon: Settings },
+    ...(adminActive ? [{ to: "/admin", label: "Admin Panel", icon: ShieldAlert, end: false }] : []),
     { to: "/about", label: "About", icon: Info },
   ];
 
@@ -739,6 +793,36 @@ export function Layout() {
               </button>
             )}
           </div>
+
+          {/* Admin mode indicator */}
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              <ShieldAlert className={`w-3 h-3 ${adminActive ? "text-red-500" : "text-gray-400"}`} />
+              <span className="text-xs text-gray-500">Admin Mode</span>
+            </div>
+            {adminActive ? (
+              <div className="flex items-center gap-1">
+                <span className="text-xs text-red-500 flex items-center gap-0.5">
+                  <Timer className="w-3 h-3" />
+                  {Math.ceil(adminExpiresIn / 60)}m
+                </span>
+                <button
+                  onClick={handleAdminDeactivate}
+                  className="text-xs text-gray-400 hover:text-gray-600 ml-1 transition-colors"
+                  title="Deactivate admin mode"
+                >
+                  ×
+                </button>
+              </div>
+            ) : (
+              <button
+                onClick={() => { setAdminAuthError(""); setAdminPassword(""); setShowAdminAuth(true); }}
+                className="text-xs text-red-500 hover:text-red-600 transition-colors"
+              >
+                Activate
+              </button>
+            )}
+          </div>
         </div>
 
         <div className="p-2 border-t border-gray-100">
@@ -807,6 +891,75 @@ export function Layout() {
         )}
         <Outlet />
       </main>
+
+      {/* Admin mode authentication dialog */}
+      {showAdminAuth && (
+        <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50">
+          <div className="bg-white rounded-xl shadow-2xl p-8 w-full max-w-md mx-4">
+            <div className="flex items-center gap-3 mb-2">
+              <div className="w-12 h-12 bg-red-100 rounded-full flex items-center justify-center">
+                <ShieldAlert className="w-6 h-6 text-red-600" />
+              </div>
+              <div>
+                <h2 className="text-xl font-semibold text-gray-900">Activate Admin Mode</h2>
+                <p className="text-sm text-gray-500">Enter your root / sudo password</p>
+              </div>
+            </div>
+
+            <div className="bg-amber-50 border border-amber-200 rounded-lg p-3 mb-5 text-sm text-amber-800">
+              Admin mode grants full, unrestricted system access for 30 minutes.
+              All actions are audit-logged.
+            </div>
+
+            <form onSubmit={handleAdminAuth} className="space-y-4">
+              <div className="relative">
+                <input
+                  type={showAdminPw ? "text" : "password"}
+                  value={adminPassword}
+                  onChange={e => setAdminPassword(e.target.value)}
+                  placeholder="Root / sudo password"
+                  className="w-full px-4 py-2.5 pr-10 border border-gray-300 rounded-lg focus:ring-2 focus:ring-red-500 focus:border-transparent"
+                  autoFocus
+                  disabled={adminAuthLoading}
+                />
+                <button
+                  type="button"
+                  onClick={() => setShowAdminPw(v => !v)}
+                  className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600"
+                >
+                  {showAdminPw ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                </button>
+              </div>
+
+              {adminAuthError && (
+                <div className="flex items-center gap-2 text-red-600 text-sm bg-red-50 p-3 rounded-lg">
+                  <AlertCircle className="w-4 h-4 flex-shrink-0" />
+                  <span>{adminAuthError}</span>
+                </div>
+              )}
+
+              <div className="flex gap-3 pt-1">
+                <button
+                  type="button"
+                  onClick={() => { setShowAdminAuth(false); setAdminPassword(""); setAdminAuthError(""); }}
+                  className="flex-1 px-4 py-2.5 border border-gray-300 rounded-lg hover:bg-gray-50 transition-colors"
+                  disabled={adminAuthLoading}
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={adminAuthLoading || !adminPassword}
+                  className="flex-1 bg-red-600 text-white px-4 py-2.5 rounded-lg hover:bg-red-700 transition-colors disabled:opacity-60 flex items-center justify-center gap-2"
+                >
+                  <ShieldAlert className="w-4 h-4" />
+                  {adminAuthLoading ? "Verifying..." : "Activate"}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
 
       {/* PIN setup dialog (available while unlocked) */}
       {showPinSetup && (

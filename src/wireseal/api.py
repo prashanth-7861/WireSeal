@@ -144,6 +144,134 @@ def _clear_unlock_failures(ip: str) -> None:
         _unlock_attempts.pop(ip, None)
 
 
+# ---------------------------------------------------------------------------
+# Admin mode — full system access via verified root/sudo credentials.
+# Activated by POST /api/admin/authenticate with the root password.
+# Expires after _ADMIN_TIMEOUT seconds or on vault lock / shutdown.
+# ---------------------------------------------------------------------------
+
+_admin_session: dict = {
+    "active":     False,
+    "password":   None,   # SecretBytes — cached sudo password
+    "expires_at": None,   # monotonic clock timestamp
+}
+_ADMIN_TIMEOUT   = 1800  # 30 minutes
+_ADMIN_MAX_FAILS = 3     # stricter limit than vault unlock
+_admin_lock      = threading.Lock()
+_admin_attempts: dict[str, list[float]] = {}
+
+
+def _check_admin_rate_limit(ip: str) -> None:
+    """Raise 429 if this IP has exceeded admin authentication attempts."""
+    import time as _time
+    now = _time.time()
+    with _admin_lock:
+        attempts = [t for t in _admin_attempts.get(ip, []) if now - t < _UNLOCK_WINDOW]
+        _admin_attempts[ip] = attempts
+        if len(attempts) >= _ADMIN_MAX_FAILS:
+            from wireseal.security.audit import AuditLog
+            AuditLog(_AUDIT_PATH).log("admin-auth-ratelimited", {"ip": ip})
+            raise _ApiError("Too many admin authentication attempts. Try again later.", 429)
+
+
+def _record_admin_failure(ip: str) -> None:
+    import time as _time
+    with _admin_lock:
+        _admin_attempts.setdefault(ip, []).append(_time.time())
+
+
+def _clear_admin_failures(ip: str) -> None:
+    with _admin_lock:
+        _admin_attempts.pop(ip, None)
+
+
+def _verify_root_password(password: str) -> bool:
+    """Return True if the given password is the valid sudo/root password."""
+    if sys.platform == "win32":
+        try:
+            import ctypes
+            return bool(ctypes.windll.shell32.IsUserAnAdmin())
+        except Exception:
+            return False
+    if os.geteuid() == 0:
+        return True  # Already root — no password needed
+    try:
+        result = subprocess.run(
+            ["sudo", "-k", "-S", "true"],   # -k forces re-auth, -S reads password from stdin
+            input=(password + "\n").encode("utf-8"),
+            capture_output=True,
+            timeout=10,
+            creationflags=_SP_FLAGS,
+        )
+        return result.returncode == 0
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return False
+
+
+def _require_admin_active() -> None:
+    """Raise 403 if admin mode is not active or has expired."""
+    import time as _time
+    with _admin_lock:
+        active  = _admin_session["active"]
+        expires = _admin_session["expires_at"]
+    if not active:
+        raise _ApiError("Admin mode not active. POST /api/admin/authenticate first.", 403)
+    if expires is not None and _time.monotonic() > expires:
+        _admin_deactivate()
+        raise _ApiError("Admin session expired. Re-authenticate.", 403)
+
+
+def _admin_deactivate() -> None:
+    """Wipe admin session credentials from memory."""
+    with _admin_lock:
+        if _admin_session["password"] is not None:
+            try:
+                _admin_session["password"].wipe()
+            except Exception:
+                pass
+        _admin_session.update(active=False, password=None, expires_at=None)
+
+
+def _admin_run(
+    cmd: list[str],
+    stdin_extra: bytes = b"",
+    timeout: int = 30,
+) -> "subprocess.CompletedProcess[bytes]":
+    """Execute a command with root credentials (admin mode required).
+
+    When not already root, prepends ``sudo -S`` and pipes the cached password
+    as the first stdin line, followed by any stdin bytes for the child process.
+    """
+    import time as _time
+    with _admin_lock:
+        active   = _admin_session["active"]
+        expires  = _admin_session["expires_at"]
+        password = _admin_session["password"]
+
+    if not active:
+        raise _ApiError("Admin mode not active.", 403)
+    if expires is not None and _time.monotonic() > expires:
+        _admin_deactivate()
+        raise _ApiError("Admin session expired.", 403)
+
+    already_root = sys.platform == "win32" or os.geteuid() == 0
+    if already_root:
+        full_cmd: list[str] = cmd
+        stdin_bytes: bytes | None = stdin_extra or None
+    else:
+        full_cmd = ["sudo", "-S"] + cmd
+        pw_bytes = password.expose_secret() + b"\n"
+        stdin_bytes = pw_bytes + stdin_extra if stdin_extra else pw_bytes
+
+    return subprocess.run(
+        full_cmd,
+        input=stdin_bytes,
+        capture_output=True,
+        timeout=timeout,
+        creationflags=_SP_FLAGS,
+    )
+
+
 # On Windows, prevent subprocess calls from flashing a visible console window.
 # CREATE_NO_WINDOW (0x08000000) suppresses the console for child processes.
 _SP_FLAGS = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
@@ -680,6 +808,7 @@ def _h_unlock(req: "_Handler", _groups: tuple) -> dict:
 
 def _h_lock(req: "_Handler", _groups: tuple) -> dict:
     from wireseal.security.audit import AuditLog
+    _admin_deactivate()  # admin mode is tied to the authenticated session
     with _lock:
         if _session["passphrase"]:
             _session["passphrase"].wipe()
@@ -1627,6 +1756,290 @@ def _h_pin_info(req: "_Handler", _groups: tuple) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Admin mode endpoints
+# ---------------------------------------------------------------------------
+
+def _h_admin_authenticate(req: "_Handler", _groups: tuple) -> dict:
+    """Verify root/sudo password and activate admin mode.
+
+    POST /api/admin/authenticate
+    Body: {"password": "..."}
+
+    Vault must be unlocked first. Admin mode grants unrestricted system access
+    for _ADMIN_TIMEOUT seconds. Rate-limited to 3 attempts per 5 minutes.
+    """
+    _require_unlocked()
+    body      = req._json()
+    password  = body.get("password", "")
+    client_ip = req.client_address[0]
+
+    if not password and sys.platform != "win32":
+        raise _ApiError("password is required", 400)
+
+    _check_admin_rate_limit(client_ip)
+
+    if not _verify_root_password(password):
+        _record_admin_failure(client_ip)
+        from wireseal.security.audit import AuditLog
+        AuditLog(_AUDIT_PATH).log("admin-auth-failed", {"ip": client_ip})
+        raise _ApiError("Invalid credentials.", 401)
+
+    _clear_admin_failures(client_ip)
+
+    import time as _time
+    from wireseal.security.secret_types import SecretBytes
+    from wireseal.security.audit import AuditLog
+
+    pw_secret = SecretBytes(bytearray(password.encode("utf-8")))
+
+    with _admin_lock:
+        if _admin_session["password"] is not None:
+            try:
+                _admin_session["password"].wipe()
+            except Exception:
+                pass
+        _admin_session["active"]     = True
+        _admin_session["password"]   = pw_secret
+        _admin_session["expires_at"] = _time.monotonic() + _ADMIN_TIMEOUT
+
+    AuditLog(_AUDIT_PATH).log("admin-activate", {"ip": client_ip})
+    return {"ok": True, "expires_in": _ADMIN_TIMEOUT}
+
+
+def _h_admin_deactivate_endpoint(req: "_Handler", _groups: tuple) -> dict:
+    """Deactivate admin mode and wipe cached credentials.
+
+    POST /api/admin/deactivate
+    """
+    _require_unlocked()
+    _admin_deactivate()
+    from wireseal.security.audit import AuditLog
+    AuditLog(_AUDIT_PATH).log("admin-deactivate", {})
+    return {"ok": True}
+
+
+def _h_admin_status(req: "_Handler", _groups: tuple) -> dict:
+    """Return admin mode state and seconds remaining.
+
+    GET /api/admin/status
+    """
+    import time as _time
+    with _admin_lock:
+        active  = _admin_session["active"]
+        expires = _admin_session["expires_at"]
+
+    if not active:
+        return {"active": False, "expires_in": 0}
+
+    remaining = max(0.0, (expires or 0.0) - _time.monotonic())
+    if remaining == 0.0:
+        _admin_deactivate()
+        return {"active": False, "expires_in": 0}
+
+    return {"active": True, "expires_in": int(remaining)}
+
+
+def _h_admin_exec(req: "_Handler", _groups: tuple) -> dict:
+    """Execute any command as root.
+
+    POST /api/admin/exec
+    Body: {"cmd": ["ls", "-la", "/etc"], "stdin": "", "timeout": 30}
+
+    Requires vault unlocked + admin mode active.
+    ``timeout`` is capped at 120 seconds.
+    """
+    _require_unlocked()
+    _require_admin_active()
+
+    body      = req._json()
+    cmd       = body.get("cmd", [])
+    if not cmd or not isinstance(cmd, list):
+        raise _ApiError("cmd (array of strings) is required", 400)
+    if not all(isinstance(s, str) for s in cmd):
+        raise _ApiError("cmd must be an array of strings", 400)
+
+    stdin_str = body.get("stdin", "")
+    timeout   = min(int(body.get("timeout", 30)), 120)
+
+    try:
+        result = _admin_run(
+            cmd,
+            stdin_extra=stdin_str.encode("utf-8") if stdin_str else b"",
+            timeout=timeout,
+        )
+    except _ApiError:
+        raise
+    except subprocess.TimeoutExpired:
+        raise _ApiError(f"Command timed out after {timeout}s", 504)
+    except Exception as exc:
+        raise _ApiError(f"Execution failed: {exc}", 500)
+
+    from wireseal.security.audit import AuditLog
+    AuditLog(_AUDIT_PATH).log("admin-exec", {"cmd": cmd[:3], "rc": result.returncode})
+
+    return {
+        "returncode": result.returncode,
+        "stdout":     result.stdout.decode("utf-8", errors="replace"),
+        "stderr":     result.stderr.decode("utf-8", errors="replace"),
+    }
+
+
+def _h_admin_services(req: "_Handler", _groups: tuple) -> dict:
+    """List all systemd services with their state.
+
+    GET /api/admin/services   — Linux only.
+    """
+    _require_unlocked()
+    _require_admin_active()
+
+    if sys.platform != "linux":
+        return {"services": [], "note": "Service management is Linux-only."}
+
+    try:
+        result = _admin_run(
+            [
+                "systemctl", "list-units", "--type=service",
+                "--all", "--no-pager", "--plain", "--no-legend",
+            ],
+            timeout=15,
+        )
+    except _ApiError:
+        raise
+    except Exception as exc:
+        raise _ApiError(f"Failed to list services: {exc}", 500)
+
+    services: list[dict] = []
+    for line in result.stdout.decode("utf-8", errors="replace").splitlines():
+        parts = line.split(None, 4)
+        if len(parts) >= 4:
+            services.append({
+                "unit":        parts[0],
+                "load":        parts[1],
+                "active":      parts[2],
+                "sub":         parts[3],
+                "description": parts[4].strip() if len(parts) > 4 else "",
+            })
+
+    return {"services": services}
+
+
+_SERVICE_ACTIONS = frozenset({
+    "start", "stop", "restart", "reload", "status", "enable", "disable",
+})
+
+
+def _h_admin_service_action(req: "_Handler", groups: tuple) -> dict:
+    """Perform an action on a systemd service.
+
+    POST /api/admin/services/<name>/<action>
+
+    Linux only. Valid actions: start, stop, restart, reload, status, enable, disable.
+    """
+    _require_unlocked()
+    _require_admin_active()
+
+    service = groups[0] if groups else ""
+    action  = groups[1] if len(groups) > 1 else ""
+
+    if not re.fullmatch(r"[a-zA-Z0-9@._:-]{1,128}", service):
+        raise _ApiError("Invalid service name.", 400)
+    if action not in _SERVICE_ACTIONS:
+        raise _ApiError(
+            f"action must be one of: {', '.join(sorted(_SERVICE_ACTIONS))}", 400
+        )
+    if sys.platform != "linux":
+        raise _ApiError("Service management is Linux-only.", 400)
+
+    try:
+        result = _admin_run(["systemctl", action, service, "--no-pager"], timeout=30)
+    except _ApiError:
+        raise
+    except subprocess.TimeoutExpired:
+        raise _ApiError("Service action timed out.", 504)
+    except Exception as exc:
+        raise _ApiError(f"Service action failed: {exc}", 500)
+
+    from wireseal.security.audit import AuditLog
+    AuditLog(_AUDIT_PATH).log(
+        "admin-service", {"service": service, "action": action, "rc": result.returncode}
+    )
+
+    return {
+        "ok":         result.returncode == 0,
+        "returncode": result.returncode,
+        "stdout":     result.stdout.decode("utf-8", errors="replace"),
+        "stderr":     result.stderr.decode("utf-8", errors="replace"),
+    }
+
+
+def _h_admin_read_file(req: "_Handler", _groups: tuple) -> dict:
+    """Read any file as root.
+
+    POST /api/admin/file/read
+    Body: {"path": "/etc/wireguard/wg0.conf"}
+    """
+    _require_unlocked()
+    _require_admin_active()
+
+    body = req._json()
+    path = body.get("path", "").strip()
+    if not path:
+        raise _ApiError("path is required", 400)
+
+    try:
+        result = _admin_run(["cat", "--", path], timeout=10)
+    except _ApiError:
+        raise
+    except Exception as exc:
+        raise _ApiError(f"Read failed: {exc}", 500)
+
+    if result.returncode != 0:
+        err = result.stderr.decode("utf-8", errors="replace").strip()
+        raise _ApiError(err or "File not found or permission denied.", 404)
+
+    from wireseal.security.audit import AuditLog
+    AuditLog(_AUDIT_PATH).log("admin-read-file", {"path": path})
+
+    return {"path": path, "content": result.stdout.decode("utf-8", errors="replace")}
+
+
+def _h_admin_write_file(req: "_Handler", _groups: tuple) -> dict:
+    """Write content to any file as root.
+
+    POST /api/admin/file/write
+    Body: {"path": "/etc/wireguard/wg0.conf", "content": "..."}
+    """
+    _require_unlocked()
+    _require_admin_active()
+
+    body    = req._json()
+    path    = body.get("path", "").strip()
+    content = body.get("content", "")
+    if not path:
+        raise _ApiError("path is required", 400)
+
+    try:
+        result = _admin_run(
+            ["tee", "--", path],
+            stdin_extra=content.encode("utf-8"),
+            timeout=10,
+        )
+    except _ApiError:
+        raise
+    except Exception as exc:
+        raise _ApiError(f"Write failed: {exc}", 500)
+
+    if result.returncode != 0:
+        err = result.stderr.decode("utf-8", errors="replace").strip()
+        raise _ApiError(err or "Write failed.", 500)
+
+    from wireseal.security.audit import AuditLog
+    AuditLog(_AUDIT_PATH).log("admin-write-file", {"path": path})
+
+    return {"ok": True, "path": path}
+
+
+# ---------------------------------------------------------------------------
 # Key rotation API endpoints (Phase 7)
 # ---------------------------------------------------------------------------
 
@@ -1952,7 +2365,16 @@ _ROUTES: list[tuple[str, re.Pattern, Any]] = [
     ("POST",   re.compile(r"^/api/terminate$"),              _h_terminate),
     ("POST",   re.compile(r"^/api/fresh-start$"),            _h_fresh_start),
     ("POST",   re.compile(r"^/api/update-endpoint$"),        _h_update_endpoint),
-    ("POST",   re.compile(r"^/api/rotate-server-keys$"),    _h_rotate_server_keys),
+    ("POST",   re.compile(r"^/api/rotate-server-keys$"),                    _h_rotate_server_keys),
+    # Admin mode
+    ("POST",   re.compile(r"^/api/admin/authenticate$"),                 _h_admin_authenticate),
+    ("POST",   re.compile(r"^/api/admin/deactivate$"),                   _h_admin_deactivate_endpoint),
+    ("GET",    re.compile(r"^/api/admin/status$"),                       _h_admin_status),
+    ("POST",   re.compile(r"^/api/admin/exec$"),                         _h_admin_exec),
+    ("GET",    re.compile(r"^/api/admin/services$"),                     _h_admin_services),
+    ("POST",   re.compile(r"^/api/admin/services/([^/]+)/([^/]+)$"),    _h_admin_service_action),
+    ("POST",   re.compile(r"^/api/admin/file/read$"),                    _h_admin_read_file),
+    ("POST",   re.compile(r"^/api/admin/file/write$"),                   _h_admin_write_file),
     ("POST",   re.compile(r"^/api/set-pin$"),               _h_set_pin),
     ("POST",   re.compile(r"^/api/remove-pin$"),            _h_remove_pin),
     ("POST",   re.compile(r"^/api/unlock-pin$"),            _h_unlock_pin),
@@ -2094,6 +2516,7 @@ def _cleanup_session(server: ThreadingHTTPServer) -> None:
     if _cleaned_up:
         return
     _cleaned_up = True
+    _admin_deactivate()
     with _lock:
         if _session["passphrase"]:
             _session["passphrase"].wipe()
