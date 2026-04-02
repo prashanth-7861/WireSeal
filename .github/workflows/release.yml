@@ -436,6 +436,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           sparse-checkout: scripts
+          clean: false
 
       - name: Copy install scripts to release
         run: |
