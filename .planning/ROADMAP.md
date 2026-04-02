@@ -105,10 +105,29 @@ Plans:
 - [ ] 05-02-PLAN.md — Docker integration lifecycle test, config tampering test, and Argon2id benchmark (tests/integration/, tests/benchmarks/, Dockerfile.test)
 - [ ] 05-03-PLAN.md — PyInstaller spec, hash-pinned requirements, GitHub Actions workflows, and README (wg-automate.spec, requirements.txt, .github/workflows/, README.md)
 
+### Phase 6: Dashboard Accuracy and Display Quality
+**Goal**: The web dashboard shows accurate, real-time peer connection status — not a broken keyword heuristic — and every metric (connected count, badge, Rx/Tx, endpoint IP) reflects ground truth from WireGuard
+**Depends on**: Phase 5
+**Requirements**: DASH-01, DASH-02, DASH-03, DASH-04, DASH-05, DASH-06, DASH-07
+**Success Criteria** (what must be TRUE):
+  1. Peer "connected" status is derived from handshake timestamp delta (< 3 minutes = connected); keyword matching removed entirely
+  2. Connected peers count in Dashboard stats cards uses the corrected connected field
+  3. Clients page shows live per-client connection status polled from /api/status
+  4. Dashboard stats card shows public endpoint IP, not internal WireGuard interface IP
+  5. Rx/Tx transfer values display with consistent B/KB/MB/GB units parsed from wg show output
+  6. New handshake events are recorded in the audit log (delta comparison between polls)
+  7. Peer status badge shows handshake age with colour coding: green < 3 min, yellow < 10 min, grey = idle
+**Plans**: 3 plans
+
+Plans:
+- [ ] 06-01-PLAN.md — Fix _parse_wg_show: delta-based connected field, last_handshake_seconds, consistent Rx/Tx units, peer-connected audit events (src/wireseal/api.py)
+- [ ] 06-02-PLAN.md — Fix Dashboard stats card endpoint, connectedPeers count, three-state badge with age label, Rx/Tx display (Dashboard/src/app/api.ts, Dashboard/src/app/pages/Dashboard.tsx)
+- [ ] 06-03-PLAN.md — Add live connection status column to Clients page with 5s polling (Dashboard/src/app/pages/Clients.tsx)
+
 ## Progress
 
 **Execution Order:**
-Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 5
+Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 5 -> 6
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
@@ -117,3 +136,4 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 5
 | 3. Dynamic DNS and Audit | 2/2 | Complete    | 2026-03-20 |
 | 4. CLI and Client Management | 3/4 | In Progress|  |
 | 5. Tests and Packaging | 3/3 | Complete    | 2026-03-21 |
+| 6. Dashboard Accuracy and Display Quality | 0/3 | Pending | |
