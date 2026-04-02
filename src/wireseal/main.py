@@ -1757,6 +1757,105 @@ def audit_log(lines: int) -> None:
 
 
 # ===========================================================================
+# backup-vault / restore-vault
+# ===========================================================================
+
+
+@cli.command("backup-vault")
+@click.argument("dest", type=click.Path())
+def backup_vault(dest: str) -> None:
+    """Backup the encrypted vault to DEST.
+
+    Verifies the passphrase before copying to ensure the vault is valid.
+    The backup file inherits 0o600 permissions on Unix.
+    """
+    import shutil
+    from pathlib import Path
+    from wireseal.security.vault import Vault, DEFAULT_VAULT_DIR
+    from wireseal.security.secret_types import SecretBytes
+    from wireseal.security.secrets_wipe import wipe_string
+    from wireseal.security.audit import AuditLog
+
+    vault_path = DEFAULT_VAULT_DIR / "vault.enc"
+    audit_path = DEFAULT_VAULT_DIR / "audit.log"
+
+    if not vault_path.exists():
+        click.echo("No vault found. Run 'wireseal init' first.")
+        raise SystemExit(1)
+
+    passphrase_str: str = click.prompt("Vault passphrase", hide_input=True)
+    passphrase = SecretBytes(bytearray(passphrase_str.encode()))
+    try:
+        vault = Vault(vault_path)
+        try:
+            with vault.open(passphrase) as _st:
+                pass  # Just verify it decrypts
+        except Exception:
+            click.echo("Incorrect passphrase.")
+            raise SystemExit(1)
+
+        dest_path = Path(dest)
+        shutil.copy2(vault_path, dest_path)
+        try:
+            if sys.platform != "win32":
+                os.chmod(dest_path, 0o600)
+        except OSError:
+            pass
+
+        AuditLog(audit_path).log("backup-vault", {"dest": str(dest_path)})
+        click.echo(f"Vault backed up to: {dest_path}")
+    finally:
+        passphrase.wipe()
+        wipe_string(passphrase_str)
+
+
+@cli.command("restore-vault")
+@click.argument("src", type=click.Path(exists=True))
+def restore_vault(src: str) -> None:
+    """Restore the vault from a backup file SRC.
+
+    Verifies the passphrase against the backup before overwriting.
+    """
+    from pathlib import Path
+    from wireseal.security.vault import Vault, DEFAULT_VAULT_DIR
+    from wireseal.security.atomic import atomic_write
+    from wireseal.security.secret_types import SecretBytes
+    from wireseal.security.secrets_wipe import wipe_string
+    from wireseal.security.audit import AuditLog
+
+    vault_path = DEFAULT_VAULT_DIR / "vault.enc"
+    audit_path = DEFAULT_VAULT_DIR / "audit.log"
+    src_path = Path(src)
+
+    passphrase_str: str = click.prompt("Passphrase for the backup vault", hide_input=True)
+    passphrase = SecretBytes(bytearray(passphrase_str.encode()))
+    try:
+        # Verify the backup decrypts
+        vault = Vault(src_path)
+        try:
+            with vault.open(passphrase) as _st:
+                pass
+        except Exception:
+            click.echo("Incorrect passphrase — cannot decrypt the backup.")
+            raise SystemExit(1)
+
+        if vault_path.exists():
+            if not click.confirm("Existing vault will be overwritten. Continue?"):
+                click.echo("Aborted.")
+                return
+
+        DEFAULT_VAULT_DIR.mkdir(parents=True, exist_ok=True)
+        atomic_write(vault_path, src_path.read_bytes(), mode=0o600)
+
+        AuditLog(audit_path).log("restore-vault", {"src": str(src_path)})
+        click.echo(f"Vault restored from: {src_path}")
+        click.echo("Run 'wireseal unlock' or start the dashboard to use it.")
+    finally:
+        passphrase.wipe()
+        wipe_string(passphrase_str)
+
+
+# ===========================================================================
 # terminate
 # ===========================================================================
 

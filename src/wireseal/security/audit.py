@@ -16,11 +16,16 @@ from __future__ import annotations
 
 import json
 import re
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from .secret_types import SecretBytes
+
+# Log rotation constants
+MAX_LOG_SIZE = 10 * 1024 * 1024  # 10 MiB
+MAX_ROTATED  = 5                 # keep audit.log.1 through audit.log.5
 
 # WireGuard private keys: base64-encoded 32 bytes, typically 44 chars (43 base64
 # chars + one padding '=').  Some test vectors in the codebase use a 43-char
@@ -132,6 +137,8 @@ class AuditLog:
         log_path: Absolute path to the audit log file.
     """
 
+    _class_lock = threading.Lock()  # Thread safety for concurrent API requests
+
     def __init__(self, log_path: Path) -> None:
         self._log_path = log_path
 
@@ -200,6 +207,47 @@ class AuditLog:
             set_file_permissions(self._log_path, mode=0o640)
 
     # ------------------------------------------------------------------
+    # Log rotation
+    # ------------------------------------------------------------------
+
+    def _rotate(self) -> None:
+        """Rotate the log file when it exceeds MAX_LOG_SIZE.
+
+        Renames audit.log → audit.log.1, shifts .1→.2, etc.
+        Deletes the oldest file if count exceeds MAX_ROTATED.
+        Applies 0o640 permissions to rotated files on Unix.
+        Must be called while holding _class_lock.
+        """
+        import sys
+
+        # Shift existing rotated files up by one
+        for i in range(MAX_ROTATED, 0, -1):
+            src = self._log_path.parent / f"{self._log_path.name}.{i}"
+            if i == MAX_ROTATED:
+                # Delete the oldest
+                try:
+                    src.unlink(missing_ok=True)
+                except OSError:
+                    pass
+                continue
+            dst = self._log_path.parent / f"{self._log_path.name}.{i + 1}"
+            if src.exists():
+                try:
+                    src.rename(dst)
+                except OSError:
+                    pass
+
+        # Move current log to .1
+        dst1 = self._log_path.parent / f"{self._log_path.name}.1"
+        try:
+            self._log_path.rename(dst1)
+            if sys.platform != "win32":
+                import os
+                os.chmod(dst1, 0o640)
+        except OSError:
+            pass
+
+    # ------------------------------------------------------------------
     # Write API
     # ------------------------------------------------------------------
 
@@ -212,29 +260,17 @@ class AuditLog:
     ) -> AuditEntry:
         """Append one entry to the audit log and return it.
 
+        Thread-safe: uses a class-level lock so concurrent API handler threads
+        don't corrupt the file. Rotates the log when it exceeds MAX_LOG_SIZE.
+
         AUDIT-01: _scrub_secrets() is applied to *metadata* before the entry
         is built, ensuring no SecretBytes value or WireGuard private key is
         ever serialised to disk.
-
-        Args:
-            action:   Short action-type label (e.g. "dns_update").
-            metadata: Arbitrary context dict; secrets will be scrubbed.
-            success:  True if the action succeeded.
-            error:    Error message if success=False.
-
-        Returns:
-            The AuditEntry that was written.
-
-        Raises:
-            AuditError: If the log file cannot be written.
         """
         import datetime  # deferred: no side effects at module import
 
         scrubbed = _scrub_secrets(metadata)
-        # Scrub the error field too — callers may pass str(exc) which could
-        # contain file paths, key material, or other internal details.
         scrubbed_error = str(_scrub_secrets(error)) if error else error
-        # Sanitize action and error fields to prevent NDJSON log injection (HIGH-03)
         safe_action = action.replace("\n", " ").replace("\r", " ") if action else action
         safe_error = scrubbed_error.replace("\n", " ").replace("\r", " ") if scrubbed_error else scrubbed_error
         entry = AuditEntry(
@@ -245,20 +281,25 @@ class AuditLog:
             error=safe_error,
         )
 
-        try:
-            self._ensure_parents_exist()
-            is_new = not self._log_path.exists()
-            with open(self._log_path, mode="a", encoding="utf-8", newline="\n", buffering=1) as fh:
-                fh.write(json.dumps(entry.to_dict()) + "\n")
-            # Apply permissions after the first successful write so the file
-            # has already been created (and the write completed) before any
-            # platform-specific ACL adjustment.  On Windows this avoids a
-            # race where icacls would lock out the current non-SYSTEM process
-            # before it could complete the open().  AUDIT-02.
-            if is_new:
-                self._apply_permissions()
-        except OSError as exc:
-            raise AuditError(f"Failed to write audit log entry: {exc}") from exc
+        with self._class_lock:
+            try:
+                self._ensure_parents_exist()
+
+                # Rotate if the log exceeds the size limit
+                if self._log_path.exists():
+                    try:
+                        if self._log_path.stat().st_size > MAX_LOG_SIZE:
+                            self._rotate()
+                    except OSError:
+                        pass
+
+                is_new = not self._log_path.exists()
+                with open(self._log_path, mode="a", encoding="utf-8", newline="\n", buffering=1) as fh:
+                    fh.write(json.dumps(entry.to_dict()) + "\n")
+                if is_new:
+                    self._apply_permissions()
+            except OSError as exc:
+                raise AuditError(f"Failed to write audit log entry: {exc}") from exc
 
         return entry
 
@@ -269,27 +310,33 @@ class AuditLog:
     def get_recent_entries(self, n: int = 50) -> list[AuditEntry]:
         """Return the last *n* log entries, oldest first.
 
-        AUDIT-03: This method is the retrieval interface for the Phase 4
-        audit-log CLI command.
-
-        If the log file does not exist, an empty list is returned instead of
-        raising an exception.  Malformed lines are silently skipped.
-
-        Args:
-            n: Maximum number of entries to return (default 50).
-
-        Returns:
-            List of AuditEntry objects, oldest first.
+        Reads from rotated files (.1, .2, ...) when the current log doesn't
+        have enough entries. AUDIT-03.
         """
-        if not self._log_path.exists():
+        all_lines: list[str] = []
+
+        # Collect lines from rotated files (oldest first) then current
+        for i in range(MAX_ROTATED, 0, -1):
+            rotated = self._log_path.parent / f"{self._log_path.name}.{i}"
+            if rotated.exists():
+                try:
+                    all_lines.extend(rotated.read_text(encoding="utf-8").splitlines())
+                except OSError:
+                    continue
+            if len(all_lines) >= n:
+                break
+
+        # Current log file
+        if self._log_path.exists():
+            try:
+                all_lines.extend(self._log_path.read_text(encoding="utf-8").splitlines())
+            except OSError:
+                pass
+
+        if not all_lines:
             return []
 
-        try:
-            lines = self._log_path.read_text(encoding="utf-8").splitlines()
-        except OSError:
-            return []
-
-        recent_lines = lines[-n:] if len(lines) > n else lines
+        recent_lines = all_lines[-n:] if len(all_lines) > n else all_lines
 
         entries: list[AuditEntry] = []
         for line in recent_lines:

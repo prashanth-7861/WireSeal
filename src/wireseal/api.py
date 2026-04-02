@@ -104,6 +104,46 @@ _WG_IFACE   = "wg0"
 _PIN_MAX_ATTEMPTS = 5
 _pin_fail_count   = 0
 
+# ---------------------------------------------------------------------------
+# Rate limiting for /api/unlock — prevents brute-force passphrase guessing.
+# Tracks failed attempts per IP in a sliding window. After _UNLOCK_MAX
+# failures within _UNLOCK_WINDOW seconds, returns 429 Too Many Requests.
+# ---------------------------------------------------------------------------
+_unlock_attempts: dict[str, list[float]] = {}  # ip -> list of failure timestamps
+_UNLOCK_WINDOW = 300   # 5-minute sliding window
+_UNLOCK_MAX    = 5     # max failures per window
+
+
+def _check_rate_limit(ip: str) -> None:
+    """Raise 429 if this IP has exceeded the unlock attempt limit."""
+    import time as _time
+    now = _time.time()
+    with _lock:
+        attempts = _unlock_attempts.get(ip, [])
+        # Prune entries outside the window
+        attempts = [t for t in attempts if now - t < _UNLOCK_WINDOW]
+        _unlock_attempts[ip] = attempts
+        if len(attempts) >= _UNLOCK_MAX:
+            from wireseal.security.audit import AuditLog
+            AuditLog(_AUDIT_PATH).log("unlock-ratelimited", {"ip": ip})
+            raise _ApiError("Too many unlock attempts. Try again later.", 429)
+
+
+def _record_unlock_failure(ip: str) -> None:
+    """Record a failed unlock attempt for rate limiting."""
+    import time as _time
+    with _lock:
+        _unlock_attempts.setdefault(ip, []).append(_time.time())
+    from wireseal.security.audit import AuditLog
+    AuditLog(_AUDIT_PATH).log("unlock-failed", {"ip": ip})
+
+
+def _clear_unlock_failures(ip: str) -> None:
+    """Clear failed attempts after a successful unlock."""
+    with _lock:
+        _unlock_attempts.pop(ip, None)
+
+
 # On Windows, prevent subprocess calls from flashing a visible console window.
 # CREATE_NO_WINDOW (0x08000000) suppresses the console for child processes.
 _SP_FLAGS = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
@@ -133,8 +173,11 @@ def _sudo(cmd: list[str]) -> list[str]:
 
 
 def _require_unlocked() -> None:
+    global _last_activity
     if _session["vault"] is None:
         raise _ApiError("Vault is locked. POST /api/unlock first.", 401)
+    import time as _time
+    _last_activity = _time.monotonic()
 
 
 # ---------------------------------------------------------------------------
@@ -391,6 +434,23 @@ def _reload_wireguard(interface: str = "wg0") -> str:
 # ---------------------------------------------------------------------------
 
 
+_server_start_time: float = 0.0
+_last_activity: float = 0.0
+_SESSION_TIMEOUT = 900  # 15 minutes of inactivity triggers auto-lock
+
+
+def _h_health(req: "_Handler", _groups: tuple) -> dict:
+    """Lightweight health endpoint for monitoring — no auth, no subprocess."""
+    import time
+    uptime = int(time.monotonic() - _server_start_time) if _server_start_time else 0
+    return {
+        "status": "ok",
+        "vault_initialized": _VAULT_PATH.exists(),
+        "vault_locked": _session["vault"] is None,
+        "uptime_seconds": uptime,
+    }
+
+
 def _h_vault_info(req: "_Handler", _groups: tuple) -> dict:
     return {
         "initialized": _VAULT_PATH.exists(),
@@ -560,6 +620,9 @@ def _h_init(req: "_Handler", _groups: tuple) -> dict:
 
 
 def _h_unlock(req: "_Handler", _groups: tuple) -> dict:
+    client_ip = req.client_address[0]
+    _check_rate_limit(client_ip)
+
     body           = req._json()
     passphrase_str = body.get("passphrase", "")
     if not passphrase_str:
@@ -578,6 +641,7 @@ def _h_unlock(req: "_Handler", _groups: tuple) -> dict:
                 cache = _refresh_cache(st)
         except Exception as exc:
             passphrase.wipe()
+            _record_unlock_failure(client_ip)
             raise _ApiError("Incorrect passphrase.", 401)
 
         with _lock:
@@ -585,6 +649,7 @@ def _h_unlock(req: "_Handler", _groups: tuple) -> dict:
                 _session["passphrase"].wipe()
             _session.update(vault=vault, passphrase=passphrase, cache=cache)
 
+        _clear_unlock_failures(client_ip)
         AuditLog(_AUDIT_PATH).log("unlock-web", {})
 
         # Auto-start WireGuard tunnel if config exists but tunnel is down
@@ -1474,6 +1539,8 @@ def _h_remove_pin(req: "_Handler", _groups: tuple) -> dict:
 def _h_unlock_pin(req: "_Handler", _groups: tuple) -> dict:
     """Unlock the vault using a PIN instead of the full passphrase."""
     global _pin_fail_count
+    client_ip = req.client_address[0]
+    _check_rate_limit(client_ip)
 
     if not _PIN_PATH.exists():
         raise _ApiError("No PIN set. Use passphrase to unlock.", 400)
@@ -1491,6 +1558,7 @@ def _h_unlock_pin(req: "_Handler", _groups: tuple) -> dict:
     passphrase_bytes = _pin_load(pin)
     if passphrase_bytes is None:
         _pin_fail_count += 1
+        _record_unlock_failure(client_ip)
         remaining = _PIN_MAX_ATTEMPTS - _pin_fail_count
         if _pin_fail_count >= _PIN_MAX_ATTEMPTS:
             _pin_wipe()
@@ -1522,6 +1590,7 @@ def _h_unlock_pin(req: "_Handler", _groups: tuple) -> dict:
             _session.update(vault=vault, passphrase=passphrase, cache=cache)
 
         _pin_fail_count = 0  # Reset on success
+        _clear_unlock_failures(client_ip)
         AuditLog(_AUDIT_PATH).log("unlock-pin", {})
 
         # Auto-start WireGuard tunnel (same as passphrase unlock)
@@ -1558,10 +1627,309 @@ def _h_pin_info(req: "_Handler", _groups: tuple) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Key rotation API endpoints (Phase 7)
+# ---------------------------------------------------------------------------
+
+
+def _h_rotate_client_keys(req: "_Handler", groups: tuple) -> dict:
+    """Rotate the keypair and PSK for a specific client.
+
+    POST /api/clients/<name>/rotate
+
+    Generates new client keypair + PSK, rebuilds both client and server
+    configs, validates them, writes atomically, reloads WireGuard, and
+    updates the vault.  Returns the new client config + QR PNG.
+    """
+    _require_unlocked()
+    name = (groups[0] if groups else "").strip()
+    if not name:
+        raise _ApiError("client name is required", 400)
+
+    with _lock:
+        vault      = _session["vault"]
+        passphrase = _session["passphrase"]
+
+    from wireseal.core.keygen         import generate_keypair
+    from wireseal.core.psk            import generate_psk
+    from wireseal.core.config_builder import ConfigBuilder
+    from wireseal.security.validator  import validate_client_config, validate_server_config
+    from wireseal.security.atomic     import atomic_write
+    from wireseal.security.audit      import AuditLog
+    from wireseal.platform.detect     import get_adapter
+
+    with vault.open(passphrase) as state:
+        if name not in state.clients:
+            raise _ApiError(f"Client '{name}' not found.", 404)
+
+        client_data = state.clients[name]
+
+        # Generate new material
+        new_priv, new_pub_bytes = generate_keypair()
+        new_psk = generate_psk()
+        new_pub_str  = new_pub_bytes.decode("ascii")
+        new_priv_str = new_priv.expose_secret().decode("ascii")
+        new_psk_str  = new_psk.expose_secret().decode("ascii")
+
+        # Collect server info
+        server_data     = state.server
+        server_pub_key  = _extract(server_data["public_key"])
+        client_ip       = client_data["ip"]
+        server_port     = server_data["port"]
+        server_endpoint = _resolve_client_endpoint(server_data)
+        subnet          = state.ip_pool.get("subnet", "10.0.0.0/24")
+        prefix_length   = int(subnet.split("/")[1])
+        dns_server      = client_data.get("dns_server", "1.1.1.1, 8.8.8.8")
+
+        # Build new client config
+        builder = ConfigBuilder()
+        new_client_config = builder.render_client_config(
+            client_private_key=new_priv_str,
+            client_ip=client_ip,
+            dns_server=dns_server,
+            server_public_key=server_pub_key,
+            psk=new_psk_str,
+            server_endpoint=server_endpoint,
+            mtu=_detect_mtu(),
+        )
+
+        # Build updated server config
+        peers = []
+        for cname, cdata in state.clients.items():
+            if cname == name:
+                peers.append({
+                    "name": cname, "public_key": new_pub_str,
+                    "psk": new_psk_str, "ip": cdata["ip"],
+                })
+            else:
+                peers.append({
+                    "name": cname, "public_key": _extract(cdata["public_key"]),
+                    "psk": _extract(cdata["psk"]), "ip": cdata["ip"],
+                })
+
+        new_server_config = builder.render_server_config(
+            server_private_key=_extract(server_data["private_key"]),
+            server_ip=server_data["ip"],
+            prefix_length=prefix_length,
+            server_port=server_port,
+            clients=peers,
+        )
+
+        # Validate
+        try:
+            validate_client_config({
+                "private_key": new_priv_str, "psk": new_psk_str,
+                "ip": client_ip, "dns_server": dns_server,
+                "server_public_key": server_pub_key,
+                "endpoint": server_endpoint,
+            })
+        except ValueError as exc:
+            new_priv.wipe()
+            new_psk.wipe()
+            raise _ApiError(f"Client config validation failed: {exc}", 500) from exc
+
+        try:
+            validate_server_config({
+                "private_key": _extract(server_data["private_key"]),
+                "public_key": "", "port": server_port,
+                "subnet": subnet, "clients": peers,
+            })
+        except ValueError as exc:
+            new_priv.wipe()
+            new_psk.wipe()
+            raise _ApiError(f"Server config validation failed: {exc}", 500) from exc
+
+        # Write configs atomically
+        clients_dir = _VAULT_DIR / "clients"
+        clients_dir.mkdir(parents=True, exist_ok=True)
+        client_conf_path = clients_dir / f"{name}.conf"
+        client_encoded = new_client_config.encode("utf-8")
+        atomic_write(client_conf_path, client_encoded, mode=0o600)
+        client_hash = hashlib.sha256(client_encoded).hexdigest()
+
+        adapter = get_adapter()
+        server_conf_path = adapter.get_config_path(_WG_IFACE)
+        server_encoded = new_server_config.encode("utf-8")
+        atomic_write(server_conf_path, server_encoded, mode=0o600)
+        server_hash = hashlib.sha256(server_encoded).hexdigest()
+
+        # Reload WireGuard
+        wg_warning = _reload_wireguard(_WG_IFACE)
+
+        # Update vault state
+        state.clients[name]["private_key"] = new_priv_str
+        state.clients[name]["public_key"]  = new_pub_str
+        state.clients[name]["psk"]         = new_psk_str
+        state.integrity[f"client-{name}"]  = client_hash
+        state.integrity["server"]          = server_hash
+        vault.save(state, passphrase)
+
+        AuditLog(_AUDIT_PATH).log("rotate-client-keys", {"name": name})
+
+        with _lock:
+            _session["cache"] = _refresh_cache(state)
+
+    # Generate QR
+    qr_b64 = ""
+    try:
+        qr_img = io.BytesIO()
+        import qrcode  # type: ignore
+        qrcode.make(new_client_config).save(qr_img, format="PNG")
+        qr_b64 = base64.b64encode(qr_img.getvalue()).decode()
+    except Exception:
+        pass
+
+    result: dict = {"ok": True, "name": name, "config": new_client_config}
+    if qr_b64:
+        result["qr_png_b64"] = qr_b64
+    if wg_warning:
+        result["warning"] = wg_warning
+    return result
+
+
+def _h_rotate_server_keys(req: "_Handler", _groups: tuple) -> dict:
+    """Rotate the server keypair and update all client configs.
+
+    POST /api/rotate-server-keys
+
+    Generates a new server keypair, rebuilds ALL client configs with the
+    new server public key, validates everything, writes atomically,
+    reloads WireGuard, and updates the vault.
+    """
+    _require_unlocked()
+
+    with _lock:
+        vault      = _session["vault"]
+        passphrase = _session["passphrase"]
+
+    from wireseal.core.keygen         import generate_keypair
+    from wireseal.core.config_builder import ConfigBuilder
+    from wireseal.security.validator  import validate_client_config, validate_server_config
+    from wireseal.security.atomic     import atomic_write
+    from wireseal.security.audit      import AuditLog
+    from wireseal.platform.detect     import get_adapter
+
+    with vault.open(passphrase) as state:
+        clients = list(state.clients.keys())
+        client_count = len(clients)
+
+        # Generate new server keypair
+        new_server_priv, new_server_pub = generate_keypair()
+        new_server_pub_str  = new_server_pub.decode("ascii")
+        new_server_priv_str = new_server_priv.expose_secret().decode("ascii")
+
+        server_data   = state.server
+        server_port   = server_data["port"]
+        server_ip     = server_data["ip"]
+        subnet        = state.ip_pool.get("subnet", "10.0.0.0/24")
+        prefix_length = int(subnet.split("/")[1])
+
+        builder     = ConfigBuilder()
+        clients_dir = _VAULT_DIR / "clients"
+        clients_dir.mkdir(parents=True, exist_ok=True)
+        adapter = get_adapter()
+
+        # Rebuild all client configs with new server public key
+        new_client_hashes: dict[str, str] = {}
+        updated_configs: dict[str, str] = {}
+        for cname in clients:
+            cdata = state.clients[cname]
+            client_ip       = cdata["ip"]
+            dns_server      = cdata.get("dns_server", "1.1.1.1, 8.8.8.8")
+            server_endpoint = _resolve_client_endpoint(server_data)
+            cpriv_str       = _extract(cdata.get("private_key", ""))
+            cpsk_str        = _extract(cdata.get("psk", ""))
+
+            updated_cfg = builder.render_client_config(
+                client_private_key=cpriv_str,
+                client_ip=client_ip,
+                dns_server=dns_server,
+                server_public_key=new_server_pub_str,
+                psk=cpsk_str,
+                server_endpoint=server_endpoint,
+                mtu=_detect_mtu(),
+            )
+
+            try:
+                validate_client_config({
+                    "private_key": cpriv_str, "psk": cpsk_str,
+                    "ip": client_ip, "dns_server": dns_server,
+                    "server_public_key": new_server_pub_str,
+                    "endpoint": server_endpoint,
+                })
+            except ValueError as exc:
+                new_server_priv.wipe()
+                raise _ApiError(
+                    f"Client config validation failed for '{cname}': {exc}", 500
+                ) from exc
+
+            client_encoded = updated_cfg.encode("utf-8")
+            atomic_write(clients_dir / f"{cname}.conf", client_encoded, mode=0o600)
+            new_client_hashes[cname] = hashlib.sha256(client_encoded).hexdigest()
+            updated_configs[cname] = updated_cfg
+
+        # Build new server config
+        peers_for_server = []
+        for cname in clients:
+            cdata = state.clients[cname]
+            peers_for_server.append({
+                "name": cname,
+                "public_key": _extract(cdata.get("public_key", "")),
+                "psk": _extract(cdata.get("psk", "")),
+                "ip": cdata["ip"],
+            })
+
+        try:
+            validate_server_config({
+                "private_key": new_server_priv_str, "public_key": "",
+                "port": server_port, "subnet": subnet,
+                "clients": peers_for_server,
+            })
+        except ValueError as exc:
+            new_server_priv.wipe()
+            raise _ApiError(f"Server config validation failed: {exc}", 500) from exc
+
+        new_server_config = builder.render_server_config(
+            server_private_key=new_server_priv_str,
+            server_ip=server_ip,
+            prefix_length=prefix_length,
+            server_port=server_port,
+            clients=peers_for_server,
+        )
+        server_encoded = new_server_config.encode("utf-8")
+        server_conf_path = adapter.get_config_path(_WG_IFACE)
+        atomic_write(server_conf_path, server_encoded, mode=0o600)
+        server_hash = hashlib.sha256(server_encoded).hexdigest()
+
+        # Reload WireGuard
+        wg_warning = _reload_wireguard(_WG_IFACE)
+
+        # Update vault state
+        state.server["private_key"] = new_server_priv_str
+        state.server["public_key"]  = new_server_pub_str
+        state.integrity["server"]   = server_hash
+        for cname, chash in new_client_hashes.items():
+            state.integrity[f"client-{cname}"] = chash
+        vault.save(state, passphrase)
+
+        AuditLog(_AUDIT_PATH).log(
+            "rotate-server-keys", {"client_count": client_count}
+        )
+
+        with _lock:
+            _session["cache"] = _refresh_cache(state)
+
+    result: dict = {"ok": True, "client_count": client_count}
+    if wg_warning:
+        result["warning"] = wg_warning
+    return result
+
+
+# ---------------------------------------------------------------------------
 # Routing table  — order matters for overlapping patterns
 # ---------------------------------------------------------------------------
 
 _ROUTES: list[tuple[str, re.Pattern, Any]] = [
+    ("GET",    re.compile(r"^/api/health$"),                 _h_health),
     ("GET",    re.compile(r"^/api/vault-info$"),             _h_vault_info),
     ("POST",   re.compile(r"^/api/init$"),                   _h_init),
     ("POST",   re.compile(r"^/api/unlock$"),                 _h_unlock),
@@ -1572,6 +1940,7 @@ _ROUTES: list[tuple[str, re.Pattern, Any]] = [
     # QR must come before the generic DELETE so GET .../qr is matched first
     ("GET",    re.compile(r"^/api/clients/([^/]+)/qr$"),     _h_client_qr),
     ("GET",    re.compile(r"^/api/clients/([^/]+)/config$"), _h_client_config),
+    ("POST",   re.compile(r"^/api/clients/([^/]+)/rotate$"), _h_rotate_client_keys),
     ("DELETE", re.compile(r"^/api/clients/([^/]+)$"),        _h_remove_client),
     ("GET",    re.compile(r"^/api/audit-log$"),              _h_audit_log),
     ("GET",    re.compile(r"^/api/session-summary$"),         _h_session_summary),
@@ -1583,6 +1952,7 @@ _ROUTES: list[tuple[str, re.Pattern, Any]] = [
     ("POST",   re.compile(r"^/api/terminate$"),              _h_terminate),
     ("POST",   re.compile(r"^/api/fresh-start$"),            _h_fresh_start),
     ("POST",   re.compile(r"^/api/update-endpoint$"),        _h_update_endpoint),
+    ("POST",   re.compile(r"^/api/rotate-server-keys$"),    _h_rotate_server_keys),
     ("POST",   re.compile(r"^/api/set-pin$"),               _h_set_pin),
     ("POST",   re.compile(r"^/api/remove-pin$"),            _h_remove_pin),
     ("POST",   re.compile(r"^/api/unlock-pin$"),            _h_unlock_pin),
@@ -1711,11 +2081,28 @@ class _Handler(BaseHTTPRequestHandler):
 # ---------------------------------------------------------------------------
 
 
+_cleaned_up = False
+
+
 def _cleanup_session(server: ThreadingHTTPServer) -> None:
-    """Wipe vault state and shut down the HTTP server."""
+    """Wipe vault state and shut down the HTTP server.
+
+    Guarded by _cleaned_up flag to prevent double-cleanup when both
+    atexit and signal handlers fire.
+    """
+    global _cleaned_up
+    if _cleaned_up:
+        return
+    _cleaned_up = True
     with _lock:
         if _session["passphrase"]:
             _session["passphrase"].wipe()
+        _session.update(vault=None, passphrase=None, cache=None)
+    try:
+        from wireseal.security.audit import AuditLog
+        AuditLog(_AUDIT_PATH).log("shutdown", {})
+    except Exception:
+        pass
     server.server_close()
     print("\n[wireseal] Server stopped. Vault state wiped.")
 
@@ -1741,8 +2128,26 @@ def serve(host: str = "127.0.0.1", port: int = 8080, gui: bool = True) -> None:
             print(f"[wireseal] Open http://{host}:{port}/ in your browser.")
             gui = False
 
+    global _cleaned_up, _server_start_time
+    import time as _time
+    _cleaned_up = False
+    _server_start_time = _time.monotonic()
+
     server = ThreadingHTTPServer((host, port), _Handler)
     url = f"http://{host}:{port}/"
+
+    # Register signal handlers for graceful shutdown (wipe secrets on exit)
+    import atexit
+    import signal as _signal
+    atexit.register(lambda: _cleanup_session(server))
+
+    def _signal_handler(signum, frame):
+        _cleanup_session(server)
+        sys.exit(0)
+
+    _signal.signal(_signal.SIGTERM, _signal_handler)
+    if hasattr(_signal, "SIGHUP"):
+        _signal.signal(_signal.SIGHUP, _signal_handler)
 
     # In GUI mode on Windows (console=False binary), suppress prints to avoid
     # allocating a console window.  Headless mode keeps prints for terminal use.
@@ -1764,6 +2169,33 @@ def serve(host: str = "127.0.0.1", port: int = 8080, gui: bool = True) -> None:
     # GUI mode: server runs in a daemon thread; pywebview owns the main thread.
     server_thread = threading.Thread(target=server.serve_forever, daemon=True)
     server_thread.start()
+
+    # Auto-lock daemon: wipes vault after SESSION_TIMEOUT seconds of inactivity
+    def _auto_lock_loop():
+        global _last_activity
+        import time as _t
+        while True:
+            _t.sleep(60)
+            with _lock:
+                if _session["vault"] is None:
+                    continue
+                if _last_activity and (_t.monotonic() - _last_activity > _SESSION_TIMEOUT):
+                    if _session["passphrase"]:
+                        _session["passphrase"].wipe()
+                    _session.update(vault=None, passphrase=None, cache=None)
+            # Audit log OUTSIDE the lock to avoid deadlock
+            if _last_activity and (_t.monotonic() - _last_activity > _SESSION_TIMEOUT + 60):
+                continue  # Already logged
+            try:
+                from wireseal.security.audit import AuditLog
+                AuditLog(_AUDIT_PATH).log("auto-lock", {"reason": "inactivity"})
+            except Exception:
+                pass
+            if not _quiet:
+                print("[wireseal] Vault auto-locked after inactivity.")
+
+    _autolock_thread = threading.Thread(target=_auto_lock_loop, daemon=True)
+    _autolock_thread.start()
 
     # Start system tray icon (best-effort — runs even if pywebview fails)
     _tray_thread = None

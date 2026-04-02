@@ -171,6 +171,14 @@ export const api = {
   clientConfig: (name: string) =>
     _fetch<{ name: string; config: string }>("GET", `/clients/${encodeURIComponent(name)}/config`),
 
+  rotateClientKeys: (name: string) =>
+    _fetch<{ ok: boolean; name: string; config: string; qr_png_b64?: string; warning?: string }>(
+      "POST", `/clients/${encodeURIComponent(name)}/rotate`
+    ),
+
+  rotateServerKeys: () =>
+    _fetch<{ ok: boolean; client_count: number; warning?: string }>("POST", "/rotate-server-keys"),
+
   auditLog: () =>
     _fetch<{ entries: AuditEntry[] }>("GET", "/audit-log"),
 
