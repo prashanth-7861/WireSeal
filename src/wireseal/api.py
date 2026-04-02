@@ -113,6 +113,10 @@ _unlock_attempts: dict[str, list[float]] = {}  # ip -> list of failure timestamp
 _UNLOCK_WINDOW = 300   # 5-minute sliding window
 _UNLOCK_MAX    = 5     # max failures per window
 
+# Maps peer public_key → last_handshake_seconds from previous _h_status call.
+# Used to detect new handshake events for the audit log (DASH-06).
+_peer_handshake_cache: dict[str, int] = {}
+
 
 def _check_rate_limit(ip: str) -> None:
     """Raise 429 if this IP has exceeded the unlock attempt limit."""
@@ -817,6 +821,46 @@ def _h_lock(req: "_Handler", _groups: tuple) -> dict:
     return {"ok": True}
 
 
+def _detect_new_handshakes(peers: list[dict]) -> None:
+    """Compare current handshake times against the module-level cache.
+
+    For each peer that has crossed from disconnected (last_handshake_seconds
+    >= 180 or absent from cache) to connected (last_handshake_seconds < 180),
+    write a 'peer-connected' entry to the audit log and update the cache.
+
+    Intentionally swallows all exceptions: a failing audit write must never
+    crash the status endpoint.
+    """
+    global _peer_handshake_cache
+    try:
+        from wireseal.security.audit import AuditLog
+        audit = AuditLog(_AUDIT_PATH)
+        new_cache: dict[str, int] = {}
+        for p in peers:
+            key = p.get("public_key", p.get("public_key_short", ""))
+            secs = p.get("last_handshake_seconds", -1)
+            new_cache[key] = secs
+            prev = _peer_handshake_cache.get(key)
+            # Fire event: was disconnected (or unseen), now connected
+            was_disconnected = (prev is None) or (prev < 0) or (prev >= 180)
+            now_connected = 0 <= secs < 180
+            if was_disconnected and now_connected:
+                try:
+                    audit.log(
+                        "peer-connected",
+                        {
+                            "name": p.get("name", "unknown"),
+                            "peer": p.get("public_key_short", ""),
+                            "last_handshake_seconds": secs,
+                        },
+                    )
+                except Exception:
+                    pass  # Audit failures never crash the status endpoint
+        _peer_handshake_cache = new_cache
+    except Exception:
+        pass  # Never crash _h_status due to audit/cache logic
+
+
 def _h_status(req: "_Handler", _groups: tuple) -> dict:
     _require_unlocked()
     with _lock:
@@ -858,6 +902,9 @@ def _h_status(req: "_Handler", _groups: tuple) -> dict:
         ip = p.get("allowed_ips", "").split("/")[0]
         p["name"] = ip_to_name.get(ip, "unknown")
 
+    # DASH-06: Detect new handshake events by comparing against previous poll.
+    _detect_new_handshakes(peers)
+
     return {
         "running":       running,
         "interface":     _WG_IFACE,
@@ -869,6 +916,87 @@ def _h_status(req: "_Handler", _groups: tuple) -> dict:
     }
 
 
+def _parse_handshake_to_seconds(hs: str) -> int:
+    """Convert a WireGuard handshake age string to total seconds.
+
+    Handles the full range of wg show output:
+      "Never"                        → -1
+      "30 seconds ago"               → 30
+      "2 minutes, 30 seconds ago"    → 150
+      "1 hour, 5 minutes ago"        → 3900
+      "1 day, 3 hours ago"           → 97200
+
+    Returns -1 for "Never" or any unparseable value.
+    """
+    if not hs or hs.strip().lower() in ("never", ""):
+        return -1
+    total = 0
+    # Strip trailing "ago" and commas, then tokenise "N unit" pairs
+    cleaned = re.sub(r"\bago\b", "", hs, flags=re.IGNORECASE).replace(",", " ")
+    tokens = cleaned.split()
+    i = 0
+    matched_any = False
+    while i < len(tokens) - 1:
+        try:
+            val = int(tokens[i])
+        except ValueError:
+            i += 1
+            continue
+        unit = tokens[i + 1].lower().rstrip("s")  # "minutes" → "minute"
+        if unit == "second":
+            total += val
+            matched_any = True
+        elif unit == "minute":
+            total += val * 60
+            matched_any = True
+        elif unit == "hour":
+            total += val * 3600
+            matched_any = True
+        elif unit == "day":
+            total += val * 86400
+            matched_any = True
+        elif unit == "week":
+            total += val * 604800
+            matched_any = True
+        i += 2
+    return total if matched_any else -1
+
+
+def _format_transfer_bytes(raw: str) -> str:
+    """Parse a WireGuard transfer string like '1.23 MiB' and re-format
+    to decimal units (B, KB, MB, GB) for consistent display.
+
+    WireGuard uses IEC (KiB=1024, MiB=1024²) in wg show output.
+    We convert to SI (KB=1000, MB=1000², GB=1000³) for display.
+    Returns '0 B' on parse failure.
+    """
+    raw = raw.strip()
+    m = re.match(r"^([\d.]+)\s*([KMGT]?i?B)$", raw, re.IGNORECASE)
+    if not m:
+        return raw if raw else "0 B"
+    try:
+        value = float(m.group(1))
+    except ValueError:
+        return "0 B"
+    unit = m.group(2).upper()
+    multipliers = {
+        "B": 1,
+        "KIB": 1024, "KB": 1000,
+        "MIB": 1024 ** 2, "MB": 1000 ** 2,
+        "GIB": 1024 ** 3, "GB": 1000 ** 3,
+        "TIB": 1024 ** 4, "TB": 1000 ** 4,
+    }
+    byte_val = value * multipliers.get(unit, 1)
+    if byte_val < 1000:
+        return f"{byte_val:.0f} B"
+    elif byte_val < 1_000_000:
+        return f"{byte_val / 1000:.2f} KB"
+    elif byte_val < 1_000_000_000:
+        return f"{byte_val / 1_000_000:.2f} MB"
+    else:
+        return f"{byte_val / 1_000_000_000:.2f} GB"
+
+
 def _parse_wg_show(output: str) -> list[dict]:
     peers: list[dict] = []
     cur: dict | None = None
@@ -878,12 +1006,14 @@ def _parse_wg_show(output: str) -> list[dict]:
             if cur:
                 peers.append(cur)
             cur = {
-                "public_key_short": s.split(":", 1)[1].strip()[:12] + "...",
-                "allowed_ips":      "",
-                "last_handshake":   "never",
-                "transfer_rx":      "0 B",
-                "transfer_tx":      "0 B",
-                "connected":        False,
+                "public_key":             s.split(":", 1)[1].strip(),
+                "public_key_short":       s.split(":", 1)[1].strip()[:12] + "...",
+                "allowed_ips":            "",
+                "last_handshake":         "never",
+                "last_handshake_seconds": -1,
+                "transfer_rx":            "0 B",
+                "transfer_tx":            "0 B",
+                "connected":              False,
             }
         elif cur:
             if s.startswith("allowed ips:"):
@@ -891,12 +1021,18 @@ def _parse_wg_show(output: str) -> list[dict]:
             elif s.startswith("latest handshake:"):
                 hs = s.split(":", 1)[1].strip()
                 cur["last_handshake"] = hs
-                cur["connected"] = any(x in hs for x in ("second", "minute"))
+                secs = _parse_handshake_to_seconds(hs)
+                cur["last_handshake_seconds"] = secs
+                cur["connected"] = 0 <= secs < 180
             elif s.startswith("transfer:"):
                 parts = s.split(":", 1)[1].strip().split(",")
                 if len(parts) == 2:
-                    cur["transfer_rx"] = parts[0].replace("received", "").strip()
-                    cur["transfer_tx"] = parts[1].replace("sent", "").strip()
+                    cur["transfer_rx"] = _format_transfer_bytes(
+                        parts[0].replace("received", "").strip()
+                    )
+                    cur["transfer_tx"] = _format_transfer_bytes(
+                        parts[1].replace("sent", "").strip()
+                    )
     if cur:
         peers.append(cur)
     return peers

@@ -15,7 +15,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 - [x] **Phase 1: Secure Core Engine** - Security primitives, encrypted vault, key generation, config builder, and IP pool (completed 2026-03-18)
 - [x] **Phase 2: Platform Hardening** - ABC-based platform adapters for Linux, macOS, and Windows with firewall and service management (completed 2026-03-18)
 - [x] **Phase 3: Dynamic DNS and Audit** - Multi-source IP consensus, DuckDNS integration, and append-only audit logging (completed 2026-03-20)
-- [ ] **Phase 4: CLI and Client Management** - Full 14-command Click CLI with client lifecycle, key rotation, and QR display
+- [x] **Phase 4: CLI and Client Management** - Full 14-command Click CLI with client lifecycle, key rotation, and QR display (completed 2026-04-02)
 - [x] **Phase 5: Tests and Packaging** - Security-focused test suite, Docker integration tests, PyInstaller binaries, and signed releases (completed 2026-03-21)
 
 ## Phase Details
@@ -120,9 +120,9 @@ Plans:
 **Plans**: 3 plans
 
 Plans:
-- [ ] 06-01-PLAN.md — Fix _parse_wg_show: delta-based connected field, last_handshake_seconds, consistent Rx/Tx units, peer-connected audit events (src/wireseal/api.py)
-- [ ] 06-02-PLAN.md — Fix Dashboard stats card endpoint, connectedPeers count, three-state badge with age label, Rx/Tx display (Dashboard/src/app/api.ts, Dashboard/src/app/pages/Dashboard.tsx)
-- [ ] 06-03-PLAN.md — Add live connection status column to Clients page with 5s polling (Dashboard/src/app/pages/Clients.tsx)
+- [x] 06-01-PLAN.md — Fix _parse_wg_show: delta-based connected field, last_handshake_seconds, consistent Rx/Tx units, peer-connected audit events (src/wireseal/api.py)
+- [x] 06-02-PLAN.md — Fix Dashboard stats card endpoint, connectedPeers count, three-state badge with age label, Rx/Tx display (Dashboard/src/app/api.ts, Dashboard/src/app/pages/Dashboard.tsx)
+- [x] 06-03-PLAN.md — Add live connection status column to Clients page with 5s polling (Dashboard/src/app/pages/Clients.tsx)
 
 ## Progress
 
@@ -136,4 +136,4 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 5 -> 6
 | 3. Dynamic DNS and Audit | 2/2 | Complete    | 2026-03-20 |
 | 4. CLI and Client Management | 3/4 | In Progress|  |
 | 5. Tests and Packaging | 3/3 | Complete    | 2026-03-21 |
-| 6. Dashboard Accuracy and Display Quality | 0/3 | Pending | |
+| 6. Dashboard Accuracy and Display Quality | 3/3 | Complete    | 2026-04-02 |

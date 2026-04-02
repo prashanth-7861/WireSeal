@@ -54,7 +54,45 @@ export function Dashboard() {
     return b;
   };
 
-  const connectedPeers = status?.peers.filter((p) => p.connected).length ?? 0;
+  const formatHandshakeAge = (secs: number): string => {
+    if (secs < 0) return "never";
+    if (secs < 60) return `${secs}s ago`;
+    if (secs < 3600) {
+      const m = Math.floor(secs / 60);
+      const s = secs % 60;
+      return s > 0 ? `${m}m ${s}s ago` : `${m}m ago`;
+    }
+    if (secs < 86400) {
+      const h = Math.floor(secs / 3600);
+      const m = Math.floor((secs % 3600) / 60);
+      return m > 0 ? `${h}h ${m}m ago` : `${h}h ago`;
+    }
+    const d = Math.floor(secs / 86400);
+    return `${d}d ago`;
+  };
+
+  const handshakeBadgeClass = (secs: number): string => {
+    if (secs >= 0 && secs < 180)   return "bg-green-100 text-green-700";
+    if (secs >= 180 && secs < 600) return "bg-yellow-100 text-yellow-700";
+    return "bg-gray-100 text-gray-600";
+  };
+
+  const handshakeDotClass = (secs: number): string => {
+    if (secs >= 0 && secs < 180)   return "bg-green-500 animate-pulse";
+    if (secs >= 180 && secs < 600) return "bg-yellow-500";
+    return "bg-gray-400";
+  };
+
+  const handshakeBadgeLabel = (secs: number): string => {
+    if (secs >= 0 && secs < 180)   return "Connected";
+    if (secs >= 180 && secs < 600) return "Recent";
+    return "Idle";
+  };
+
+  const connectedPeers =
+    status?.peers.filter(
+      (p) => p.last_handshake_seconds >= 0 && p.last_handshake_seconds < 180
+    ).length ?? 0;
 
   // ── Start server ─────────────────────────────────────────────────────────
   const handleStart = async () => {
@@ -143,11 +181,19 @@ export function Dashboard() {
             {status && (
               <div className="text-right text-sm text-gray-500 space-y-1 mr-2">
                 <div>Interface: <span className="font-mono text-gray-700">{status.interface}</span></div>
-                {status.endpoint && (
-                  <div>Endpoint: <span className="font-mono text-gray-700">{status.endpoint}:{status.port}</span></div>
+                {(status.endpoint || status.server_ip) && (
+                  <div>
+                    Public IP:{" "}
+                    <span className="font-mono text-gray-700">
+                      {status.endpoint || status.server_ip}:{status.port}
+                    </span>
+                  </div>
                 )}
-                {status.server_ip && (
-                  <div>Server IP: <span className="font-mono text-gray-700">{status.server_ip}</span></div>
+                {status.endpoint && status.server_ip && (
+                  <div>
+                    VPN IP:{" "}
+                    <span className="font-mono text-gray-500">{status.server_ip}</span>
+                  </div>
                 )}
               </div>
             )}
@@ -313,14 +359,19 @@ export function Dashboard() {
                     <span className="text-blue-600">{formatBytes(peer.transfer_tx)}</span>
                   </td>
                   <td className="px-6 py-4">
-                    <span className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium ${
-                      peer.connected ? "bg-green-100 text-green-700" : "bg-gray-100 text-gray-600"
-                    }`}>
-                      <span className={`w-1.5 h-1.5 rounded-full ${
-                        peer.connected ? "bg-green-500 animate-pulse" : "bg-gray-400"
-                      }`} />
-                      {peer.connected ? "Connected" : "Idle"}
-                    </span>
+                    <div className="flex flex-col gap-0.5 items-start">
+                      <span className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium ${
+                        handshakeBadgeClass(peer.last_handshake_seconds)
+                      }`}>
+                        <span className={`w-1.5 h-1.5 rounded-full ${
+                          handshakeDotClass(peer.last_handshake_seconds)
+                        }`} />
+                        {handshakeBadgeLabel(peer.last_handshake_seconds)}
+                      </span>
+                      <span className="text-xs text-gray-400 pl-1">
+                        {formatHandshakeAge(peer.last_handshake_seconds)}
+                      </span>
+                    </div>
                   </td>
                 </tr>
               ))}

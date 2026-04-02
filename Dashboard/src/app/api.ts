@@ -58,9 +58,10 @@ export interface Peer {
   public_key_short: string;
   allowed_ips: string;
   last_handshake: string;
-  transfer_rx: string;
-  transfer_tx: string;
-  connected: boolean;
+  last_handshake_seconds: number;   // -1 = never; seconds since last handshake otherwise
+  transfer_rx: string;               // pre-formatted: "1.29 MB", "466.94 KB", "0 B"
+  transfer_tx: string;               // pre-formatted: same
+  connected: boolean;                // true when last_handshake_seconds in [0, 179]
   name: string;
 }
 

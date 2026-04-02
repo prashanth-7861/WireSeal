@@ -3,7 +3,7 @@ import {
   Plus, Monitor, Trash2, QrCode, X, AlertTriangle, CheckCircle, RefreshCw,
   Download,
 } from "lucide-react";
-import { api, type Client } from "../api";
+import { api, type Client, type Status } from "../api";
 
 const QR_TTL = 60; // seconds before QR auto-dismisses
 
@@ -19,6 +19,7 @@ export function Clients() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [success, setSuccess] = useState("");
+  const [peerStatus, setPeerStatus] = useState<Status | null>(null);
 
   // Add dialog
   const [showAddDialog, setShowAddDialog] = useState(false);
@@ -62,6 +63,22 @@ export function Clients() {
   }, []);
 
   useEffect(() => { fetchClients(); }, [fetchClients]);
+
+  // Poll /api/status every 5 s for live connection data
+  useEffect(() => {
+    let cancelled = false;
+    const poll = async () => {
+      try {
+        const s = await api.status();
+        if (!cancelled) setPeerStatus(s);
+      } catch {
+        // Status unavailable — keep previous peerStatus, don't clear it
+      }
+    };
+    poll();
+    const id = window.setInterval(poll, 5000);
+    return () => { cancelled = true; clearInterval(id); };
+  }, []);
 
   // ── Open QR panel ─────────────────────────────────────────────────────────
   const openQr = useCallback(async (name: string) => {
@@ -139,6 +156,31 @@ export function Clients() {
   const circumference = 2 * Math.PI * 18; // r=18
   const dashOffset = circumference * (1 - ringProgress);
 
+  // Build a Map from WireGuard peer IP (without /32 suffix) → Peer for O(1) badge lookup
+  const peerMap = new Map(
+    (peerStatus?.peers ?? []).map((p) => [
+      p.allowed_ips.split("/")[0],
+      p,
+    ])
+  );
+
+  // Badge helpers (same thresholds as Dashboard.tsx)
+  const badgeClass = (secs: number): string => {
+    if (secs >= 0 && secs < 180)   return "bg-green-100 text-green-700";
+    if (secs >= 180 && secs < 600) return "bg-yellow-100 text-yellow-700";
+    return "bg-gray-100 text-gray-600";
+  };
+  const dotClass = (secs: number): string => {
+    if (secs >= 0 && secs < 180)   return "bg-green-500 animate-pulse";
+    if (secs >= 180 && secs < 600) return "bg-yellow-500";
+    return "bg-gray-400";
+  };
+  const badgeLabel = (secs: number): string => {
+    if (secs >= 0 && secs < 180)   return "Connected";
+    if (secs >= 180 && secs < 600) return "Recent";
+    return "Idle";
+  };
+
   return (
     <div>
       <div className="flex items-center justify-between mb-8">
@@ -194,6 +236,7 @@ export function Clients() {
                 <tr>
                   <th className="text-left px-6 py-3 text-sm font-medium text-gray-700">Name</th>
                   <th className="text-left px-6 py-3 text-sm font-medium text-gray-700">Assigned IP</th>
+                  <th className="text-left px-6 py-3 text-sm font-medium text-gray-700">Status</th>
                   <th className="text-right px-6 py-3 text-sm font-medium text-gray-700">Actions</th>
                 </tr>
               </thead>
@@ -210,6 +253,27 @@ export function Clients() {
                       </div>
                     </td>
                     <td className="px-6 py-4 text-gray-700 font-mono text-sm">{client.ip}</td>
+                    <td className="px-6 py-4">
+                      {(() => {
+                        const ip = client.ip.split("/")[0];
+                        const peer = peerMap.get(ip);
+                        const secs = peer?.last_handshake_seconds ?? -1;
+                        if (!peerStatus) {
+                          return (
+                            <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium bg-gray-100 text-gray-400">
+                              <span className="w-1.5 h-1.5 rounded-full bg-gray-300" />
+                              —
+                            </span>
+                          );
+                        }
+                        return (
+                          <span className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium ${badgeClass(secs)}`}>
+                            <span className={`w-1.5 h-1.5 rounded-full ${dotClass(secs)}`} />
+                            {badgeLabel(secs)}
+                          </span>
+                        );
+                      })()}
+                    </td>
                     <td className="px-6 py-4 text-right">
                       <div className="flex items-center justify-end gap-1">
                         <button
