@@ -70,16 +70,37 @@ is exposed.
   pass/fail and fix suggestions
 - **Open ports audit** — lists all listening services with Expected/Review badges
 
+### Production Hardening
+- **API rate limiting** — sliding-window throttle on unlock endpoints (5 attempts per
+  5-minute window); returns 429 Too Many Requests when exceeded
+- **PIN quick unlock** — set a short PIN after the initial passphrase unlock; vault
+  re-opens instantly without re-typing the full passphrase. Auto-wiped after 5 wrong
+  attempts (falls back to passphrase)
+- **Session timeout** — auto-locks the vault after 15 minutes of inactivity; daemon
+  thread monitors activity and wipes the passphrase from memory
+- **Graceful shutdown** — SIGTERM/SIGHUP handlers + atexit hook wipe the passphrase
+  from memory and flush the audit log on exit
+- **Health endpoint** — `GET /api/health` (no auth) returns vault state and uptime for
+  Docker HEALTHCHECK, monitoring tools, and load balancers
+- **Audit log rotation** — thread-safe rotation at 10 MiB with up to 5 archived files;
+  `get_recent_entries` spans rotated logs automatically
+- **Vault backup & restore** — `wireseal backup-vault <dest>` and
+  `wireseal restore-vault <src>` CLI commands with passphrase verification and atomic writes
+- **Key rotation API** — `POST /api/clients/<name>/rotate` (client keypair + PSK) and
+  `POST /api/rotate-server-keys` (server keypair, rebuilds all client configs);
+  validates, writes atomically, and hot-reloads WireGuard
+
 ### Dashboard & Monitoring
 - **Web dashboard (GUI)** — native desktop window (pywebview) or browser-based
 - **Real-time status** — API server and WireGuard tunnel indicators in the sidebar
-- **Client management** — add, remove, view QR codes, download `.conf` files
+- **Client management** — add, remove, rotate keys, view QR codes, download `.conf` files
 - **Live peers table** with connection status, handshake times, and transfer stats
 - **Enhanced audit log** with three tabs:
   - **Events** — timestamped security event history
   - **Sessions** — unlock/lock session pairs with duration and event breakdown
   - **File Activity** — SFTP operations (read, write, rename, remove, mkdir, etc.)
     tracked via verbose SSH logging
+- **PIN management** — set, remove, and use PIN from the lock screen and sidebar
 - **Stop Server** button on Dashboard to bring down the WireGuard tunnel
 - **Fresh Start** option on the welcome screen to wipe and reinitialize
 - **System tray icon** — background operation with menu: Open Dashboard, Stop Server,
@@ -93,7 +114,11 @@ is exposed.
 ### General
 - **QR code output** — display client configs as terminal QR codes (PNG or SVG fallback)
 - **Append-only NDJSON audit log** — timestamped, no key material ever logged
-- **Cross-platform** — Linux x86_64, macOS arm64, Windows x86_64
+- **Cross-platform** — Linux x86_64/ARM64, macOS arm64, Windows x86_64
+- **Raspberry Pi support** — tested on Pi 5 with KDE Plasma/Wayland; runs GUI as
+  regular user, elevates only WireGuard commands via sudoers rule
+- **Headless mode** — auto-detects missing display and binds to `0.0.0.0` for LAN
+  browser access with dynamic CORS
 - **Supply chain security** — all dependencies pinned with SHA-256 hashes; `pip-audit`
   runs on every CI push
 
@@ -504,6 +529,8 @@ verbose SFTP logging and displayed in the dashboard's **Audit Log → File Activ
 | `update-dns` | Push the current public IP to DuckDNS using 2-of-3 resolver consensus |
 | `rotate-keys` | Rotate keypair + PSK for a specific client |
 | `rotate-server-keys` | Rotate the server keypair and update all client configs |
+| `backup-vault` | Back up the encrypted vault to a destination path |
+| `restore-vault` | Restore the vault from a backup file (with passphrase verification) |
 | `audit-log` | Display recent audit log entries (no passphrase required) |
 
 ---
@@ -573,6 +600,13 @@ and serialized only inside the AES-256-GCM vault.
 - Append-only NDJSON, mode 640 on Unix / SYSTEM-only ACL on Windows
 - No passphrase, private key, or PSK material ever logged (AUDIT-01)
 - Newline characters in action/error fields are sanitized to prevent log injection
+- Thread-safe rotation at 10 MiB with up to 5 archived files
+
+**API security:**
+- Unlock endpoints rate-limited with a sliding-window counter (5 failures per 5-minute window)
+- PIN quick unlock uses PBKDF2-HMAC-SHA256 (600k iterations); PIN file auto-wiped after 5 wrong attempts
+- 15-minute inactivity session timeout with daemon-thread monitoring
+- Graceful shutdown (SIGTERM/SIGHUP/atexit) wipes passphrase from memory
 
 **Supply chain:**
 - All Python dependencies are pinned with SHA-256 hashes in `requirements-dev.txt`
@@ -645,14 +679,16 @@ wireseal serve
 The dashboard provides:
 
 - **Welcome screen** with animated branding, vault passphrase setup, and Fresh Start option
+- **PIN quick unlock** — set a PIN after first unlock; re-open the vault without the full passphrase
 - **Real-time status** showing API server (Online/Offline) and WireGuard tunnel (Running/Stopped) indicators in the sidebar
 - **Dashboard** with server overview and Stop Server button
-- **Client management** — add, remove, view QR codes, and download `.conf` files for mobile clients
+- **Client management** — add, remove, rotate keys, view QR codes, and download `.conf` files for mobile clients
 - **Live peers table** with connection status, handshake times, and transfer stats
 - **Audit log** with three tabs: Events, Sessions, and File Activity (SFTP tracking)
 - **Security dashboard** — security score, defense status cards (firewall, fail2ban, SSH,
   kernel, IP forwarding, auto-updates), individual security checks, and open ports audit
 - **Settings** for passphrase changes, endpoint updates, and server termination
+- **Auto-lock** — vault locks automatically after 15 minutes of inactivity
 
 The WireGuard tunnel runs as a **background system service** — you can close the dashboard
 and the VPN keeps running. Reopen the dashboard at any time to manage clients or check status.
