@@ -22,3 +22,22 @@ class VaultTamperedError(VaultError):
     or corrupted MAGIC header. GCM tag failures are reported as
     VaultUnlockError to avoid leaking distinguishing information.
     """
+
+
+class KeyslotNotFoundError(VaultError):
+    """Raised when admin_id not found in any keyslot, or when AES-256-GCM
+    authentication fails during keyslot unwrap (wrong passphrase)."""
+
+
+class KeyslotExistsError(VaultError):
+    """Raised when add_keyslot is called with an admin_id that is already
+    present in the keyslot store."""
+
+
+class AdminRoleError(VaultError):
+    """Raised when an operation violates role constraints.
+
+    Examples:
+    - Attempting to remove the last owner keyslot
+    - A non-owner attempting an owner-only operation
+    """
