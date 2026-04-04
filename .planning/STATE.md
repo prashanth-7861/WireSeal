@@ -9,12 +9,12 @@ See: .planning/PROJECT.md (updated 2026-03-17)
 
 ## Current Position
 
-Phase: 5 of 5 (Tests and Packaging) -- COMPLETE
-Plan: 3 of 3 in current phase (05-03 complete)
-Status: Complete
-Last activity: 2026-03-21 -- Completed plan 05-03 (PyInstaller spec, hash-pinned requirements, CI/CD workflows, README)
+Phase: 7 of 7 (ZTNA Foundation)
+Plan: 1 of 8 in current phase (07-01 complete)
+Status: In Progress
+Last activity: 2026-04-04 -- Completed plan 07-01 (FORMAT_VERSION 3 keyslot vault foundation)
 
-Progress: [██████████] 100% (16/16 plans complete)
+Progress: [██████████░░░░░░░] 62% (17/27 plans complete)
 
 ## Performance Metrics
 
@@ -39,6 +39,7 @@ Progress: [██████████] 100% (16/16 plans complete)
 
 *Updated after each plan completion*
 | Phase 05-tests-and-packaging P05-02 | 3 | 2 tasks | 6 files |
+| Phase 07-ztna-foundation P07-01 | 25 min | 4 tasks | 3 files modified, 1 created |
 
 ## Accumulated Context
 
@@ -100,6 +101,10 @@ Recent decisions affecting current work:
 - [Phase 05-tests-and-packaging]: benchmark.stats guard: --benchmark-disable sets stats to None; None-check added before timing assertion
 - [Phase 05-tests-and-packaging]: WG_ENFORCE_TIMING=1 env var: timing assertion skips locally (190ms machine), fails hard in CI release gate
 - [Phase 05-tests-and-packaging]: Lifecycle test uses CliRunner HOME override (not --vault-dir); init has no --vault-dir option in main.py
+- [07-01]: Argon2id dev params for keyslots: time=3, mem=64MiB, par=4 -- production hardening deferred to 07-07
+- [07-01]: Roles NOT in keyslot binary -- loaded from data["admins"] into KeyslotStore after v3 decryption
+- [07-01]: _migrate_v1_to_v2() available but not auto-called from open() -- preserves existing tests; new vaults start at schema_version=2 natively
+- [07-01]: VaultState.__exit__ auto-saves v3 format on clean exit (no exception) so keyslot mutations persist without explicit save()
 
 ### Pending Todos
 
@@ -113,6 +118,6 @@ None.
 
 ## Session Continuity
 
-Last session: 2026-03-21
-Stopped at: Completed 05-03-PLAN.md (PyInstaller spec, hash-pinned requirements, CI/CD workflows, README) -- ALL PLANS COMPLETE
+Last session: 2026-04-04
+Stopped at: Completed 07-01-PLAN.md (FORMAT_VERSION 3 keyslot vault, Argon2id+AES-256-GCM wrapping, multi-admin management)
 Resume file: None

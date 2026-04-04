@@ -124,10 +124,32 @@ Plans:
 - [x] 06-02-PLAN.md — Fix Dashboard stats card endpoint, connectedPeers count, three-state badge with age label, Rx/Tx display (Dashboard/src/app/api.ts, Dashboard/src/app/pages/Dashboard.tsx)
 - [x] 06-03-PLAN.md — Add live connection status column to Clients page with 5s polling (Dashboard/src/app/pages/Clients.tsx)
 
+### Phase 7: ZTNA Foundation
+**Goal**: Self-sovereign multi-admin access platform — hardware-free cryptographic identity, ephemeral access control, split-DNS, and encrypted local backup. Zero external APIs. Runs on any hardware.
+**Depends on**: Phase 6
+**Requirements**: ZTNA-01 through ZTNA-07
+**Success Criteria** (what must be TRUE):
+  1. Single-admin deployments experience zero UX change after upgrade (transparent migration)
+  2. Multi-admin: each admin unlocks with own passphrase; audit log attributes every action to acting admin
+  3. TOTP: enrollment QR scannable by any authenticator; wrong code rejected; backup codes consumed on use
+  4. Ephemeral: client auto-removed at TTL; heartbeat resets TTL; permanent flag bypasses expiry
+  5. Split-DNS: internal hostnames resolve for VPN clients only, not external traffic
+  6. Backup: vault survives corrupt→restore→unlock cycle end-to-end
+**Plans**: 7 plans
+
+Plans:
+- [x] 07-01-PLAN.md — Schema migration + FORMAT_VERSION 3 keyslot vault (security/keyslot.py, security/vault.py, security/exceptions.py)
+- [ ] 07-02-PLAN.md — Multi-admin API, CLI commands, Dashboard Admins page (api.py, main.py, Dashboard)
+- [ ] 07-03-PLAN.md — TOTP 2FA: RFC 6238 stdlib-only, enrollment flow, backup codes (security/totp.py, api.py, Dashboard)
+- [ ] 07-04-PLAN.md — Ephemeral keys TTL + ExpiryWatcher thread + heartbeat endpoint (core/expiry.py, api.py, Dashboard)
+- [ ] 07-05-PLAN.md — Split-DNS via dnsmasq: config writer, reload, DNS settings page (dns/dnsmasq.py, api.py, Dashboard)
+- [ ] 07-06-PLAN.md — Encrypted local backup: local/SSH/WebDAV destinations, restore safety (backup/manager.py, api.py, Dashboard)
+- [ ] 07-07-PLAN.md — Integration hardening: audit actor fields, cross-feature tests, stress test
+
 ## Progress
 
 **Execution Order:**
-Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 5 -> 6
+Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 5 -> 6 -> 7
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
@@ -137,3 +159,4 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 5 -> 6
 | 4. CLI and Client Management | 3/4 | In Progress|  |
 | 5. Tests and Packaging | 3/3 | Complete    | 2026-03-21 |
 | 6. Dashboard Accuracy and Display Quality | 3/3 | Complete    | 2026-04-02 |
+| 7. ZTNA Foundation | 1/7 | In Progress | |
