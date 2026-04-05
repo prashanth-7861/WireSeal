@@ -87,6 +87,10 @@ export interface Status {
 export interface Client {
   name: string;
   ip: string;
+  permanent: boolean;
+  ttl_seconds: number | null;
+  ttl_expires_at: number | null;
+  expires_in_seconds: number | null;
 }
 
 export interface AuditEntry {
@@ -191,11 +195,17 @@ export const api = {
   listClients: () =>
     _fetch<Client[]>("GET", "/clients"),
 
-  addClient: (name: string) =>
-    _fetch<Client>("POST", "/clients", { name }),
+  addClient: (name: string, ttl_seconds?: number) =>
+    _fetch<Client>("POST", "/clients", ttl_seconds != null ? { name, ttl_seconds } : { name }),
 
   removeClient: (name: string) =>
     _fetch<{ ok: boolean }>("DELETE", `/clients/${encodeURIComponent(name)}`),
+
+  setClientTtl: (name: string, opts: { ttl_seconds?: number; permanent?: boolean }) =>
+    _fetch<{ ok: boolean; expires_at?: number; permanent?: boolean }>("POST", `/clients/${encodeURIComponent(name)}/ttl`, opts),
+
+  heartbeat: (name: string) =>
+    _fetch<{ ok: boolean; expires_at?: number; permanent?: boolean }>("POST", `/heartbeat/${encodeURIComponent(name)}`),
 
   clientQr: (name: string) =>
     _fetch<{ name: string; qr_png_b64: string; format?: string }>("GET", `/clients/${encodeURIComponent(name)}/qr`),

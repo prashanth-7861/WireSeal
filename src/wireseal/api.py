@@ -82,6 +82,19 @@ def _get_dist_dir() -> Path | None:
 
     return None
 
+# Lazy TOTP import — kept here so handlers can reference after module load.
+# The actual import happens inside handlers; this symbol is set at first use.
+from wireseal.security.totp import (  # noqa: E402 — placed after stdlib imports
+    generate_totp_secret,
+    totp_uri,
+    verify_totp,
+    generate_backup_codes,
+    hash_backup_code,
+    verify_backup_code,
+    secret_to_b32,
+    b32_to_secret,
+)
+
 # ---------------------------------------------------------------------------
 # Module-level session state
 # ---------------------------------------------------------------------------
@@ -95,6 +108,11 @@ _session: dict = {
     "admin_id":   None,   # Admin ID of the currently authenticated user
     "admin_role": None,   # Role of the currently authenticated user
 }
+
+# Pending TOTP enrollment state keyed by admin_id.
+# Populated by _h_totp_enroll_begin, consumed by _h_totp_enroll_confirm.
+# Entries are {secret: bytes, used_codes: set[str]}.
+_pending_totp: dict[str, dict] = {}
 
 
 def _utcnow_iso() -> str:
@@ -120,6 +138,10 @@ _pin_fail_count   = 0
 _unlock_attempts: dict[str, list[float]] = {}  # ip -> list of failure timestamps
 _UNLOCK_WINDOW = 300   # 5-minute sliding window
 _UNLOCK_MAX    = 5     # max failures per window
+
+# Rate-limit heartbeat resets: maps client_name → last_reset_timestamp
+_heartbeat_cooldown: dict[str, float] = {}
+_HEARTBEAT_MIN_INTERVAL = 30.0  # seconds between heartbeat resets per client
 
 # Maps peer public_key → last_handshake_seconds from previous _h_status call.
 # Used to detect new handshake events for the audit log (DASH-06).
@@ -390,12 +412,29 @@ def _refresh_cache(state: Any) -> dict:
             "duckdns":  state.server.get("duckdns_domain", ""),
         },
         "clients": {
-            name: {"ip": data["ip"]}
+            name: {
+                "ip":             data["ip"],
+                "permanent":      data.get("permanent", True),
+                "ttl_seconds":    data.get("ttl_seconds"),
+                "ttl_expires_at": data.get("ttl_expires_at"),
+            }
             for name, data in state.clients.items()
         },
         "ip_pool": dict(state.ip_pool),
         "admins": dict(state.data.get("admins", {})),
     }
+
+
+def _refresh_cache_unlocked(vault: Any, passphrase: Any, admin_id: str = "owner") -> None:
+    """Open vault and refresh in-memory cache. Called after writes that happen
+    outside the context manager pattern (heartbeat, set-ttl, expiry watcher).
+    """
+    try:
+        with vault.open(passphrase, admin_id=admin_id) as state:
+            with _lock:
+                _session["cache"] = _refresh_cache(state)
+    except Exception:
+        pass
 
 
 def _extract(value: Any) -> str:
@@ -787,6 +826,8 @@ def _h_unlock(req: "_Handler", _groups: tuple) -> dict:
     from wireseal.security.vault        import Vault
     from wireseal.security.audit        import AuditLog
 
+    totp_code = body.get("totp_code")  # optional — required only when enrolled
+
     passphrase = SecretBytes(bytearray(passphrase_str.encode()))
     try:
         vault = Vault(_VAULT_PATH)
@@ -797,7 +838,21 @@ def _h_unlock(req: "_Handler", _groups: tuple) -> dict:
                 if admin_id in admins_dict:
                     admins_dict[admin_id]["last_unlock"] = _utcnow_iso()
                 admin_role = admins_dict.get(admin_id, {}).get("role", "owner")
+
+                # TOTP enforcement: if admin has enrolled TOTP, require a valid code.
+                totp_b32 = admins_dict.get(admin_id, {}).get("totp_secret_b32")
+                if totp_b32 is not None:
+                    if not totp_code:
+                        raise _ApiError("totp_code required", 401)
+                    totp_secret = b32_to_secret(totp_b32)
+                    if not verify_totp(totp_secret, str(totp_code)):
+                        raise _ApiError("invalid_totp", 401)
+
                 cache = _refresh_cache(st)
+        except _ApiError:
+            passphrase.wipe()
+            _record_unlock_failure(client_ip)
+            raise
         except Exception as exc:
             passphrase.wipe()
             _record_unlock_failure(client_ip)
@@ -1069,12 +1124,114 @@ def _parse_wg_show(output: str) -> list[dict]:
     return peers
 
 
+def _h_heartbeat(req: "_Handler", groups: tuple) -> dict:
+    """Reset TTL for a client. Rate-limited to 1 reset per 30s per client.
+
+    No vault unlock required — clients call this directly.
+    """
+    import time as _time
+    name = groups[0]
+
+    # Rate limiting
+    now = _time.time()
+    last = _heartbeat_cooldown.get(name, 0)
+    if now - last < _HEARTBEAT_MIN_INTERVAL:
+        raise _ApiError("Heartbeat rate limit exceeded.", 429)
+
+    with _lock:
+        cache      = _session.get("cache") or {}
+        vault      = _session.get("vault")
+        passphrase = _session.get("passphrase")
+        admin_id   = _session.get("admin_id", "owner")
+
+    if vault is None:
+        raise _ApiError("Server vault is locked.", 503)
+
+    client = cache.get("clients", {}).get(name)
+    if not client:
+        raise _ApiError("Client not found.", 404)
+
+    if client.get("permanent", True):
+        return {"ok": True, "permanent": True}
+
+    ttl_seconds = client.get("ttl_seconds") or 86400
+    new_expires = now + ttl_seconds
+    _heartbeat_cooldown[name] = now
+
+    # Update vault
+    with vault.open(passphrase, admin_id=admin_id) as state:
+        if name in state.clients:
+            state.clients[name]["ttl_expires_at"] = new_expires
+        vault.save(state, passphrase)
+
+    _refresh_cache_unlocked(vault, passphrase, admin_id)
+
+    from wireseal.security.audit import AuditLog
+    try:
+        AuditLog(_AUDIT_PATH).log("heartbeat", {"name": name, "expires_at": new_expires})
+    except Exception:
+        pass
+
+    return {"ok": True, "expires_at": new_expires}
+
+
+def _h_set_client_ttl(req: "_Handler", groups: tuple) -> dict:
+    """Set or clear TTL for an existing client. Requires unlocked vault."""
+    _require_unlocked()
+    name = groups[0]
+    body = req._json()
+    permanent   = body.get("permanent", False)
+    ttl_seconds = body.get("ttl_seconds")
+
+    with _lock:
+        vault      = _session["vault"]
+        passphrase = _session["passphrase"]
+        admin_id   = _session.get("admin_id", "owner")
+        cache      = _session.get("cache") or {}
+
+    if name not in cache.get("clients", {}):
+        raise _ApiError("Client not found.", 404)
+
+    import time as _time
+    with vault.open(passphrase, admin_id=admin_id) as state:
+        if name not in state.clients:
+            raise _ApiError("Client not found.", 404)
+        client = state.clients[name]
+        if permanent or ttl_seconds == 0:
+            client["permanent"]      = True
+            client["ttl_seconds"]    = None
+            client["ttl_expires_at"] = None
+            result = {"ok": True, "permanent": True}
+        else:
+            client["permanent"]      = False
+            client["ttl_seconds"]    = int(ttl_seconds)
+            client["ttl_expires_at"] = _time.time() + int(ttl_seconds)
+            result = {"ok": True, "expires_at": client["ttl_expires_at"]}
+        vault.save(state, passphrase)
+
+    _refresh_cache_unlocked(vault, passphrase, admin_id)
+    return result
+
+
 def _h_list_clients(req: "_Handler", _groups: tuple) -> list:
     _require_unlocked()
+    import time as _time
     with _lock:
         cache = _session["cache"] or {}
+    now = _time.time()
     return [
-        {"name": n, "ip": d["ip"]}
+        {
+            "name":             n,
+            "ip":               d["ip"],
+            "permanent":        d.get("permanent", True),
+            "ttl_seconds":      d.get("ttl_seconds"),
+            "ttl_expires_at":   d.get("ttl_expires_at"),
+            "expires_in_seconds": (
+                max(0, int(d["ttl_expires_at"] - now))
+                if not d.get("permanent", True) and d.get("ttl_expires_at")
+                else None
+            ),
+        }
         for n, d in cache.get("clients", {}).items()
     ]
 
@@ -1174,12 +1331,26 @@ def _h_add_client(req: "_Handler", _groups: tuple) -> dict:
             traceback.print_exc()
             wg_warning = f"WireGuard setup failed: {exc}"
 
+        import time as _time
+        ttl_seconds = body.get("ttl_seconds")
+        if ttl_seconds is not None and int(ttl_seconds) > 0:
+            _ttl_secs = int(ttl_seconds)
+            _ttl_expires = _time.time() + _ttl_secs
+            _permanent = False
+        else:
+            _ttl_secs = None
+            _ttl_expires = None
+            _permanent = True
+
         state.clients[name] = {
-            "private_key": priv_key_str,
-            "public_key":  pub_key_str,
-            "psk":         psk_str,
-            "ip":          allocated_ip,
-            "config_hash": config_hash,
+            "private_key":    priv_key_str,
+            "public_key":     pub_key_str,
+            "psk":            psk_str,
+            "ip":             allocated_ip,
+            "config_hash":    config_hash,
+            "permanent":      _permanent,
+            "ttl_seconds":    _ttl_secs,
+            "ttl_expires_at": _ttl_expires,
         }
         state.ip_pool["allocated"]        = pool.get_allocated()
         state.integrity[f"client-{name}"] = config_hash
@@ -2686,6 +2857,250 @@ def _h_change_admin_passphrase(req: "_Handler", groups: tuple) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# TOTP handlers
+# ---------------------------------------------------------------------------
+
+
+def _h_totp_enroll_begin(req: "_Handler", _groups: tuple) -> dict:
+    """POST /api/totp/enroll/begin — generate a new TOTP secret for enrollment.
+
+    Requires unlocked vault.  Stores a pending enrollment entry in
+    ``_pending_totp`` keyed by admin_id.  The Dashboard renders the QR code
+    from the returned otpauth:// URI using a JS library.
+
+    Returns: {otpauth_uri, secret_b32}
+    """
+    _require_unlocked()
+    with _lock:
+        admin_id = _session.get("admin_id", "owner")
+
+    secret = generate_totp_secret()
+    uri = totp_uri(secret, admin_id)
+    _pending_totp[admin_id] = {"secret": secret, "used_codes": set()}
+
+    return {
+        "otpauth_uri": uri,
+        "secret_b32": secret_to_b32(secret),
+    }
+
+
+def _h_totp_enroll_confirm(req: "_Handler", _groups: tuple) -> dict:
+    """POST /api/totp/enroll/confirm — verify code and commit TOTP enrollment.
+
+    Body: {totp_code: "123456"}
+    Returns: {ok: true, backup_codes: [...8 plaintext codes...]}
+
+    The 8 backup codes are shown once and never stored in plaintext.
+    The vault stores only their SHA-256 hashes.
+    """
+    _require_unlocked()
+    with _lock:
+        admin_id  = _session.get("admin_id", "owner")
+        vault     = _session["vault"]
+        sess_pass = _session["passphrase"]
+
+    body      = req._json()
+    totp_code = str(body.get("totp_code", "")).strip()
+
+    pending = _pending_totp.get(admin_id)
+    if pending is None:
+        raise _ApiError("No pending enrollment. Call /api/totp/enroll/begin first.", 400)
+
+    if not verify_totp(pending["secret"], totp_code, used_codes=pending["used_codes"]):
+        raise _ApiError("invalid_code", 400)
+
+    # Enrollment verified — generate backup codes and persist to vault
+    backup_codes  = generate_backup_codes(8)
+    hashed_codes  = [hash_backup_code(c) for c in backup_codes]
+    b32           = secret_to_b32(pending["secret"])
+
+    try:
+        with vault.open(sess_pass, admin_id=admin_id) as state:
+            admins_dict = state.data.setdefault("admins", {})
+            if admin_id not in admins_dict:
+                admins_dict[admin_id] = {
+                    "role": "owner",
+                    "created_at": _utcnow_iso(),
+                    "totp_secret_b32": None,
+                    "totp_enrolled_at": None,
+                    "backup_codes": [],
+                    "last_unlock": None,
+                }
+            admins_dict[admin_id]["totp_secret_b32"]  = b32
+            admins_dict[admin_id]["totp_enrolled_at"] = _utcnow_iso()
+            admins_dict[admin_id]["backup_codes"]     = hashed_codes
+            with _lock:
+                _session["cache"] = _refresh_cache(state)
+    except _ApiError:
+        raise
+    except Exception as exc:
+        raise _ApiError(str(exc), 500)
+
+    _pending_totp.pop(admin_id, None)
+
+    from wireseal.security.audit import AuditLog
+    AuditLog(_AUDIT_PATH).log("totp-enrolled", {"admin_id": admin_id})
+
+    return {"ok": True, "backup_codes": backup_codes}
+
+
+def _h_totp_disable(req: "_Handler", _groups: tuple) -> dict:
+    """POST /api/totp/disable — disable TOTP for an admin.
+
+    Body (optional): {admin_id: "alice"}
+    Owner can disable any admin's TOTP; non-owner can only disable their own.
+    """
+    _require_unlocked()
+    with _lock:
+        acting_id   = _session.get("admin_id", "owner")
+        acting_role = _session.get("admin_role", "owner")
+        vault       = _session["vault"]
+        sess_pass   = _session["passphrase"]
+
+    body      = req._json()
+    target_id = body.get("admin_id", acting_id).strip() or acting_id
+
+    if acting_role != "owner" and target_id != acting_id:
+        raise _ApiError("may only disable your own TOTP", 403)
+
+    try:
+        with vault.open(sess_pass, admin_id=acting_id) as state:
+            admins_dict = state.data.setdefault("admins", {})
+            if target_id not in admins_dict:
+                raise _ApiError(f"Admin '{target_id}' not found", 404)
+            admins_dict[target_id]["totp_secret_b32"]  = None
+            admins_dict[target_id]["totp_enrolled_at"] = None
+            admins_dict[target_id]["backup_codes"]     = []
+            with _lock:
+                _session["cache"] = _refresh_cache(state)
+    except _ApiError:
+        raise
+    except Exception as exc:
+        raise _ApiError(str(exc), 500)
+
+    _pending_totp.pop(target_id, None)
+
+    from wireseal.security.audit import AuditLog
+    AuditLog(_AUDIT_PATH).log("totp-disabled", {
+        "target": target_id, "actor": acting_id,
+    })
+    return {"ok": True}
+
+
+def _h_totp_reset(req: "_Handler", _groups: tuple) -> dict:
+    """POST /api/totp/reset — owner-only: force-clear TOTP for any admin.
+
+    Body: {admin_id: "alice"}
+    """
+    _require_unlocked()
+    _require_owner()
+    with _lock:
+        acting_id = _session.get("admin_id", "owner")
+        vault     = _session["vault"]
+        sess_pass = _session["passphrase"]
+
+    body      = req._json()
+    target_id = body.get("admin_id", "").strip()
+    if not target_id:
+        raise _ApiError("admin_id is required", 400)
+
+    try:
+        with vault.open(sess_pass, admin_id=acting_id) as state:
+            admins_dict = state.data.setdefault("admins", {})
+            if target_id not in admins_dict:
+                raise _ApiError(f"Admin '{target_id}' not found", 404)
+            admins_dict[target_id]["totp_secret_b32"]  = None
+            admins_dict[target_id]["totp_enrolled_at"] = None
+            admins_dict[target_id]["backup_codes"]     = []
+            with _lock:
+                _session["cache"] = _refresh_cache(state)
+    except _ApiError:
+        raise
+    except Exception as exc:
+        raise _ApiError(str(exc), 500)
+
+    _pending_totp.pop(target_id, None)
+
+    from wireseal.security.audit import AuditLog
+    AuditLog(_AUDIT_PATH).log("totp-reset", {
+        "target": target_id, "actor": acting_id,
+    })
+    return {"ok": True}
+
+
+def _h_totp_verify_backup(req: "_Handler", _groups: tuple) -> dict:
+    """POST /api/totp/verify-backup — unlock using a passphrase + backup code.
+
+    This replaces the normal unlock flow when the user has lost their TOTP
+    device.  Does not require an unlocked session.
+
+    Body: {admin_id: "owner", passphrase: "...", backup_code: "ABCDEFGHIJ"}
+    Returns: {ok: true, role: "owner"} on success.
+    """
+    body          = req._json()
+    admin_id      = body.get("admin_id", "owner")
+    passphrase_str = body.get("passphrase", "")
+    backup_code   = body.get("backup_code", "").upper().strip()
+    client_ip     = req.client_address[0]
+
+    if not passphrase_str:
+        raise _ApiError("passphrase is required", 400)
+    if not backup_code:
+        raise _ApiError("backup_code is required", 400)
+
+    _check_rate_limit(client_ip)
+
+    from wireseal.security.secret_types import SecretBytes
+    from wireseal.security.secrets_wipe import wipe_string
+    from wireseal.security.vault        import Vault
+    from wireseal.security.audit        import AuditLog
+
+    passphrase = SecretBytes(bytearray(passphrase_str.encode()))
+    try:
+        vault = Vault(_VAULT_PATH)
+        try:
+            with vault.open(passphrase, admin_id=admin_id) as st:
+                admins_dict = st.data.setdefault("admins", {})
+                if admin_id in admins_dict:
+                    admins_dict[admin_id]["last_unlock"] = _utcnow_iso()
+                admin_role   = admins_dict.get(admin_id, {}).get("role", "owner")
+                hashed_codes = admins_dict.get(admin_id, {}).get("backup_codes", [])
+
+                # Verify backup code (constant-time)
+                matched = verify_backup_code(backup_code, hashed_codes)
+                if matched is None:
+                    _record_unlock_failure(client_ip)
+                    raise _ApiError("invalid_backup_code", 401)
+
+                # Consume the matched code (single-use)
+                admins_dict[admin_id]["backup_codes"] = [
+                    h for h in hashed_codes if h != matched
+                ]
+                cache = _refresh_cache(st)
+        except _ApiError:
+            passphrase.wipe()
+            raise
+        except Exception as exc:
+            passphrase.wipe()
+            _record_unlock_failure(client_ip)
+            raise _ApiError("Incorrect passphrase.", 401)
+
+        with _lock:
+            if _session["passphrase"]:
+                _session["passphrase"].wipe()
+            _session.update(
+                vault=vault, passphrase=passphrase, cache=cache,
+                admin_id=admin_id, admin_role=admin_role,
+            )
+
+        _clear_unlock_failures(client_ip)
+        AuditLog(_AUDIT_PATH).log("unlock-backup-code", {"admin_id": admin_id})
+        return {"ok": True, "role": admin_role}
+    finally:
+        wipe_string(passphrase_str)
+
+
+# ---------------------------------------------------------------------------
 # Routing table  — order matters for overlapping patterns
 # ---------------------------------------------------------------------------
 
@@ -2706,7 +3121,9 @@ _ROUTES: list[tuple[str, re.Pattern, Any]] = [
     ("GET",    re.compile(r"^/api/clients/([^/]+)/qr$"),     _h_client_qr),
     ("GET",    re.compile(r"^/api/clients/([^/]+)/config$"), _h_client_config),
     ("POST",   re.compile(r"^/api/clients/([^/]+)/rotate$"), _h_rotate_client_keys),
+    ("POST",   re.compile(r"^/api/clients/([^/]+)/ttl$"),   _h_set_client_ttl),
     ("DELETE", re.compile(r"^/api/clients/([^/]+)$"),        _h_remove_client),
+    ("POST",   re.compile(r"^/api/heartbeat/([^/]+)$"),      _h_heartbeat),
     ("GET",    re.compile(r"^/api/audit-log$"),              _h_audit_log),
     ("GET",    re.compile(r"^/api/session-summary$"),         _h_session_summary),
     ("GET",    re.compile(r"^/api/file-activity$"),           _h_file_activity),
@@ -2731,6 +3148,12 @@ _ROUTES: list[tuple[str, re.Pattern, Any]] = [
     ("POST",   re.compile(r"^/api/remove-pin$"),            _h_remove_pin),
     ("POST",   re.compile(r"^/api/unlock-pin$"),            _h_unlock_pin),
     ("GET",    re.compile(r"^/api/pin-info$"),              _h_pin_info),
+    # TOTP 2FA
+    ("POST",   re.compile(r"^/api/totp/enroll/begin$"),     _h_totp_enroll_begin),
+    ("POST",   re.compile(r"^/api/totp/enroll/confirm$"),   _h_totp_enroll_confirm),
+    ("POST",   re.compile(r"^/api/totp/disable$"),          _h_totp_disable),
+    ("POST",   re.compile(r"^/api/totp/reset$"),            _h_totp_reset),
+    ("POST",   re.compile(r"^/api/totp/verify-backup$"),    _h_totp_verify_backup),
 ]
 
 # ---------------------------------------------------------------------------
@@ -2933,6 +3356,15 @@ def serve(host: str = "127.0.0.1", port: int = 8080, gui: bool = True) -> None:
     if not gui:
         if not _quiet:
             print("[wireseal] Headless mode — press Ctrl+C to stop.")
+        # Start TTL expiry watcher daemon thread (ZTNA-7.3)
+        from wireseal.core.expiry import ExpiryWatcher
+        _expiry_watcher = ExpiryWatcher(
+            get_session=lambda: _session,
+            session_lock=_lock,
+            wg_iface=_WG_IFACE,
+            audit_path=_AUDIT_PATH,
+        )
+        _expiry_watcher.start()
         try:
             server.serve_forever()
         except KeyboardInterrupt:
@@ -2944,6 +3376,15 @@ def serve(host: str = "127.0.0.1", port: int = 8080, gui: bool = True) -> None:
     # GUI mode: server runs in a daemon thread; pywebview owns the main thread.
     server_thread = threading.Thread(target=server.serve_forever, daemon=True)
     server_thread.start()
+    # Start TTL expiry watcher daemon thread (ZTNA-7.3)
+    from wireseal.core.expiry import ExpiryWatcher
+    _expiry_watcher = ExpiryWatcher(
+        get_session=lambda: _session,
+        session_lock=_lock,
+        wg_iface=_WG_IFACE,
+        audit_path=_AUDIT_PATH,
+    )
+    _expiry_watcher.start()
 
     # Auto-lock daemon: wipes vault after SESSION_TIMEOUT seconds of inactivity
     def _auto_lock_loop():

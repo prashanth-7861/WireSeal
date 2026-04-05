@@ -4,6 +4,7 @@ import {
   Download,
 } from "lucide-react";
 import { api, type Client, type Status } from "../api";
+import { ClientTtlBadge } from "../components/ClientTtlBadge";
 
 const QR_TTL = 60; // seconds before QR auto-dismisses
 
@@ -237,6 +238,7 @@ export function Clients() {
                   <th className="text-left px-6 py-3 text-sm font-medium text-gray-700">Name</th>
                   <th className="text-left px-6 py-3 text-sm font-medium text-gray-700">Assigned IP</th>
                   <th className="text-left px-6 py-3 text-sm font-medium text-gray-700">Status</th>
+                  <th className="text-left px-6 py-3 text-sm font-medium text-gray-700">Expires</th>
                   <th className="text-right px-6 py-3 text-sm font-medium text-gray-700">Actions</th>
                 </tr>
               </thead>
@@ -273,6 +275,12 @@ export function Clients() {
                           </span>
                         );
                       })()}
+                    </td>
+                    <td className="px-6 py-4">
+                      <ClientTtlBadge
+                        permanent={client.permanent ?? true}
+                        expiresInSeconds={client.expires_in_seconds ?? null}
+                      />
                     </td>
                     <td className="px-6 py-4 text-right">
                       <div className="flex items-center justify-end gap-1">
