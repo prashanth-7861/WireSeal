@@ -10,11 +10,11 @@ See: .planning/PROJECT.md (updated 2026-03-17)
 ## Current Position
 
 Phase: 7 of 7 (ZTNA Foundation)
-Plan: 1 of 8 in current phase (07-01 complete)
+Plan: 2 of 8 in current phase (07-02 complete)
 Status: In Progress
-Last activity: 2026-04-04 -- Completed plan 07-01 (FORMAT_VERSION 3 keyslot vault foundation)
+Last activity: 2026-04-05 -- Completed plan 07-02 (Multi-Admin API + CLI + Dashboard Admins page)
 
-Progress: [██████████░░░░░░░] 62% (17/27 plans complete)
+Progress: [██████████░░░░░░░] 67% (18/27 plans complete)
 
 ## Performance Metrics
 
@@ -40,6 +40,7 @@ Progress: [██████████░░░░░░░] 62% (17/27 plans
 *Updated after each plan completion*
 | Phase 05-tests-and-packaging P05-02 | 3 | 2 tasks | 6 files |
 | Phase 07-ztna-foundation P07-01 | 25 min | 4 tasks | 3 files modified, 1 created |
+| Phase 07-ztna-foundation P07-02 | 35 min | 3 tasks | 5 files modified, 2 created |
 
 ## Accumulated Context
 
@@ -105,6 +106,9 @@ Recent decisions affecting current work:
 - [07-01]: Roles NOT in keyslot binary -- loaded from data["admins"] into KeyslotStore after v3 decryption
 - [07-01]: _migrate_v1_to_v2() available but not auto-called from open() -- preserves existing tests; new vaults start at schema_version=2 natively
 - [07-01]: VaultState.__exit__ auto-saves v3 format on clean exit (no exception) so keyslot mutations persist without explicit save()
+- [07-02]: _require_owner() raises _ApiError(403) directly (not callback pattern) -- consistent with _require_unlocked() style
+- [07-02]: Owner changing another admin's passphrase bypasses old_passphrase by direct keyslot re-wrap using session master_key via vault._session_store
+- [07-02]: Admins cache snapshot added to _refresh_cache() so handlers read admin data without re-opening vault
 
 ### Pending Todos
 
