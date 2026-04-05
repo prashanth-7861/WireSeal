@@ -27,6 +27,7 @@ POST /api/update-endpoint         update stored public IP
 from __future__ import annotations
 
 import base64
+import datetime
 import hashlib
 import io
 import json
@@ -91,7 +92,14 @@ _session: dict = {
     "vault":      None,   # Vault instance (path + methods)
     "passphrase": None,   # SecretBytes kept in memory
     "cache":      None,   # Non-secret snapshot for fast reads
+    "admin_id":   None,   # Admin ID of the currently authenticated user
+    "admin_role": None,   # Role of the currently authenticated user
 }
+
+
+def _utcnow_iso() -> str:
+    """Return current UTC time as ISO 8601 string."""
+    return datetime.datetime.now(datetime.timezone.utc).isoformat()
 
 _VAULT_DIR  = Path.home() / ".wireseal"
 _VAULT_PATH = _VAULT_DIR / "vault.enc"
@@ -386,6 +394,7 @@ def _refresh_cache(state: Any) -> dict:
             for name, data in state.clients.items()
         },
         "ip_pool": dict(state.ip_pool),
+        "admins": dict(state.data.get("admins", {})),
     }
 
 
@@ -584,11 +593,23 @@ def _h_health(req: "_Handler", _groups: tuple) -> dict:
 
 
 def _h_vault_info(req: "_Handler", _groups: tuple) -> dict:
+    locked = _session["vault"] is None
+    multi_admin: bool = False
+    totp_required_for: list = []
+    if not locked and _session["cache"]:
+        admins_data = _session["cache"].get("admins", {})
+        multi_admin = len(admins_data) > 1
+        totp_required_for = [
+            aid for aid, info in admins_data.items()
+            if info.get("totp_secret_b32") is not None
+        ]
     return {
-        "initialized": _VAULT_PATH.exists(),
-        "locked":      _session["vault"] is None,
-        "interface":   _WG_IFACE,
-        "pin_set":     _PIN_PATH.exists(),
+        "initialized":      _VAULT_PATH.exists(),
+        "locked":           locked,
+        "interface":        _WG_IFACE,
+        "pin_set":          _PIN_PATH.exists(),
+        "multi_admin":      multi_admin,
+        "totp_required_for": totp_required_for,
     }
 
 
@@ -757,6 +778,7 @@ def _h_unlock(req: "_Handler", _groups: tuple) -> dict:
 
     body           = req._json()
     passphrase_str = body.get("passphrase", "")
+    admin_id       = body.get("admin_id", "owner")
     if not passphrase_str:
         raise _ApiError("passphrase is required", 400)
 
@@ -769,7 +791,12 @@ def _h_unlock(req: "_Handler", _groups: tuple) -> dict:
     try:
         vault = Vault(_VAULT_PATH)
         try:
-            with vault.open(passphrase) as st:
+            with vault.open(passphrase, admin_id=admin_id) as st:
+                # Update last_unlock for this admin
+                admins_dict = st.data.setdefault("admins", {})
+                if admin_id in admins_dict:
+                    admins_dict[admin_id]["last_unlock"] = _utcnow_iso()
+                admin_role = admins_dict.get(admin_id, {}).get("role", "owner")
                 cache = _refresh_cache(st)
         except Exception as exc:
             passphrase.wipe()
@@ -779,10 +806,13 @@ def _h_unlock(req: "_Handler", _groups: tuple) -> dict:
         with _lock:
             if _session["passphrase"]:
                 _session["passphrase"].wipe()
-            _session.update(vault=vault, passphrase=passphrase, cache=cache)
+            _session.update(
+                vault=vault, passphrase=passphrase, cache=cache,
+                admin_id=admin_id, admin_role=admin_role,
+            )
 
         _clear_unlock_failures(client_ip)
-        AuditLog(_AUDIT_PATH).log("unlock-web", {})
+        AuditLog(_AUDIT_PATH).log("unlock-web", {"admin_id": admin_id})
 
         # Auto-start WireGuard tunnel if config exists but tunnel is down
         try:
@@ -805,7 +835,7 @@ def _h_unlock(req: "_Handler", _groups: tuple) -> dict:
         except Exception:
             pass  # Best-effort — don't block unlock
 
-        return {"ok": True}
+        return {"ok": True, "role": admin_role}
     finally:
         wipe_string(passphrase_str)
 
@@ -816,7 +846,8 @@ def _h_lock(req: "_Handler", _groups: tuple) -> dict:
     with _lock:
         if _session["passphrase"]:
             _session["passphrase"].wipe()
-        _session.update(vault=None, passphrase=None, cache=None)
+        _session.update(vault=None, passphrase=None, cache=None,
+                        admin_id=None, admin_role=None)
     AuditLog(_AUDIT_PATH).log("lock", {})
     return {"ok": True}
 
@@ -2474,6 +2505,187 @@ def _h_rotate_server_keys(req: "_Handler", _groups: tuple) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Multi-admin management helpers and handlers
+# ---------------------------------------------------------------------------
+
+
+def _require_owner() -> None:
+    """Raise 403 if current session does not have owner role."""
+    if _session.get("admin_role") != "owner":
+        raise _ApiError("owner role required", 403)
+
+
+def _h_list_admins(req: "_Handler", _groups: tuple) -> dict:
+    """GET /api/admins — list all admins."""
+    _require_unlocked()
+    with _lock:
+        admins_data = (_session["cache"] or {}).get("admins", {})
+    result = []
+    for aid, info in admins_data.items():
+        result.append({
+            "id": aid,
+            "role": info.get("role", "admin"),
+            "totp_enrolled": info.get("totp_secret_b32") is not None,
+            "last_unlock": info.get("last_unlock"),
+        })
+    return {"admins": result}
+
+
+def _h_add_admin(req: "_Handler", _groups: tuple) -> dict:
+    """POST /api/admins — add a new admin keyslot."""
+    _require_unlocked()
+    _require_owner()
+    body       = req._json()
+    admin_id   = body.get("admin_id", "").strip()
+    passphrase = body.get("passphrase", "")
+    role       = body.get("role", "admin")
+    if not admin_id or not passphrase:
+        raise _ApiError("admin_id and passphrase required", 400)
+    if role not in ("owner", "admin", "readonly"):
+        raise _ApiError("role must be owner, admin, or readonly", 400)
+
+    with _lock:
+        vault     = _session["vault"]
+        sess_pass = _session["passphrase"]
+        acting_id = _session.get("admin_id", "owner")
+
+    new_bytes = bytearray(passphrase.encode())
+    try:
+        with vault.open(sess_pass, admin_id=acting_id) as state:
+            vault.add_keyslot(admin_id, new_bytes, role=role)
+            # add_keyslot already syncs state.data["admins"] but ensure entry is complete
+            state.data.setdefault("admins", {})[admin_id] = {
+                "role": role,
+                "created_at": _utcnow_iso(),
+                "totp_secret_b32": None,
+                "totp_enrolled_at": None,
+                "backup_codes": [],
+                "last_unlock": None,
+            }
+            with _lock:
+                _session["cache"] = _refresh_cache(state)
+    except _ApiError:
+        raise
+    except Exception as exc:
+        raise _ApiError(str(exc), 409)
+    finally:
+        new_bytes[:] = b"\x00" * len(new_bytes)
+
+    from wireseal.security.audit import AuditLog
+    AuditLog(_AUDIT_PATH).log("add-admin", {
+        "target": admin_id, "role": role, "actor": acting_id,
+    })
+    return {"ok": True, "admin_id": admin_id}
+
+
+def _h_remove_admin(req: "_Handler", groups: tuple) -> dict:
+    """DELETE /api/admins/<id> — remove an admin keyslot."""
+    _require_unlocked()
+    _require_owner()
+    target_id = (groups[0] if groups else "").strip()
+    if not target_id:
+        raise _ApiError("admin_id is required", 400)
+
+    with _lock:
+        vault     = _session["vault"]
+        sess_pass = _session["passphrase"]
+        acting_id = _session.get("admin_id", "owner")
+
+    if target_id == acting_id:
+        raise _ApiError("cannot remove yourself", 409)
+
+    # Check if target is last owner
+    with _lock:
+        admins = (_session["cache"] or {}).get("admins", {})
+    owners = [aid for aid, info in admins.items() if info.get("role") == "owner"]
+    if target_id in owners and len(owners) == 1:
+        raise _ApiError("cannot remove the last owner", 409)
+
+    try:
+        with vault.open(sess_pass, admin_id=acting_id) as state:
+            vault.remove_keyslot(target_id)
+            state.data.get("admins", {}).pop(target_id, None)
+            with _lock:
+                _session["cache"] = _refresh_cache(state)
+    except _ApiError:
+        raise
+    except Exception as exc:
+        raise _ApiError(str(exc), 404)
+
+    from wireseal.security.audit import AuditLog
+    AuditLog(_AUDIT_PATH).log("remove-admin", {
+        "target": target_id, "actor": acting_id,
+    })
+    return {"ok": True}
+
+
+def _h_change_admin_passphrase(req: "_Handler", groups: tuple) -> dict:
+    """POST /api/admins/<id>/change-passphrase — change an admin's passphrase.
+
+    Owner can change any admin's passphrase without knowing the old one.
+    Non-owner must provide old_passphrase and can only change their own.
+    """
+    _require_unlocked()
+    target_id = (groups[0] if groups else "").strip()
+    if not target_id:
+        raise _ApiError("admin_id is required", 400)
+
+    with _lock:
+        vault       = _session["vault"]
+        sess_pass   = _session["passphrase"]
+        acting_id   = _session.get("admin_id", "owner")
+        acting_role = _session.get("admin_role", "owner")
+
+    # Non-owner may only change their own passphrase
+    if acting_role != "owner" and acting_id != target_id:
+        raise _ApiError("may only change your own passphrase", 403)
+
+    body           = req._json()
+    new_passphrase = body.get("new_passphrase", "")
+    old_passphrase = body.get("old_passphrase", "")
+    if not new_passphrase:
+        raise _ApiError("new_passphrase required", 400)
+
+    # Non-owner changing their own passphrase must provide old_passphrase
+    if acting_role != "owner" and not old_passphrase:
+        raise _ApiError("old_passphrase required for non-owner passphrase change", 400)
+
+    new_bytes = bytearray(new_passphrase.encode())
+    old_bytes = bytearray(old_passphrase.encode()) if old_passphrase else bytearray()
+    try:
+        with vault.open(sess_pass, admin_id=acting_id) as _state:
+            if acting_role == "owner" and acting_id != target_id:
+                # Owner changing another admin's passphrase: remove + re-add using master key
+                from wireseal.security.keyslot import create_keyslot
+                store = vault._session_store
+                if store is None:
+                    raise _ApiError("Vault is not FORMAT_VERSION 3; multi-admin not active", 409)
+                slot = store.find(target_id)
+                if slot is None:
+                    raise _ApiError(f"No keyslot for admin '{target_id}'", 404)
+                new_slot = create_keyslot(
+                    target_id, new_bytes, vault._session_master_key, role=slot.role
+                )
+                store.keyslots = [new_slot if s.admin_id == target_id else s
+                                  for s in store.keyslots]
+            else:
+                vault.change_keyslot_passphrase(target_id, old_bytes, new_bytes)
+    except _ApiError:
+        raise
+    except Exception as exc:
+        raise _ApiError(str(exc), 400)
+    finally:
+        new_bytes[:] = b"\x00" * len(new_bytes)
+        old_bytes[:] = b"\x00" * len(old_bytes)
+
+    from wireseal.security.audit import AuditLog
+    AuditLog(_AUDIT_PATH).log("change-passphrase", {
+        "target": target_id, "actor": acting_id,
+    })
+    return {"ok": True}
+
+
+# ---------------------------------------------------------------------------
 # Routing table  — order matters for overlapping patterns
 # ---------------------------------------------------------------------------
 
@@ -2484,6 +2696,10 @@ _ROUTES: list[tuple[str, re.Pattern, Any]] = [
     ("POST",   re.compile(r"^/api/unlock$"),                 _h_unlock),
     ("POST",   re.compile(r"^/api/lock$"),                   _h_lock),
     ("GET",    re.compile(r"^/api/status$"),                 _h_status),
+    ("GET",    re.compile(r"^/api/admins$"),                                     _h_list_admins),
+    ("POST",   re.compile(r"^/api/admins$"),                                     _h_add_admin),
+    ("POST",   re.compile(r"^/api/admins/([^/]+)/change-passphrase$"),           _h_change_admin_passphrase),
+    ("DELETE", re.compile(r"^/api/admins/([^/]+)$"),                             _h_remove_admin),
     ("GET",    re.compile(r"^/api/clients$"),                _h_list_clients),
     ("POST",   re.compile(r"^/api/clients$"),                _h_add_client),
     # QR must come before the generic DELETE so GET .../qr is matched first
