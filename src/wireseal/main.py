@@ -2087,6 +2087,172 @@ def update_endpoint(ip_or_host: str | None) -> None:
 # ===========================================================================
 
 # ---------------------------------------------------------------------------
+# ===========================================================================
+# Multi-admin management commands (07-02)
+# ===========================================================================
+
+
+def _utcnow_iso_main() -> str:
+    """Return current UTC time as ISO 8601 string."""
+    import datetime as _dt
+    return _dt.datetime.now(_dt.timezone.utc).isoformat()
+
+
+@cli.command("add-admin")
+@click.argument("admin_id")
+@click.option("--role", type=click.Choice(["admin", "read-only", "owner"]),
+              default="admin", show_default=True, help="Role for the new admin")
+def add_admin(admin_id: str, role: str) -> None:
+    """Add a new admin keyslot to the vault."""
+    owner_pass = click.prompt("Owner passphrase", hide_input=True)
+    new_pass   = click.prompt(f"Passphrase for {admin_id!r}", hide_input=True)
+    new_pass2  = click.prompt("Confirm passphrase", hide_input=True)
+    if new_pass != new_pass2:
+        click.echo("Passphrases do not match.", err=True)
+        raise SystemExit(1)
+    role_internal = "readonly" if role == "read-only" else role
+
+    from wireseal.security.vault import Vault
+    from wireseal.security.audit import AuditLog
+    from wireseal.security.secret_types import SecretBytes
+    from wireseal.security.secrets_wipe import wipe_string
+
+    vault       = Vault(DEFAULT_VAULT_PATH)
+    owner_bytes = bytearray(owner_pass.encode())
+    new_bytes   = bytearray(new_pass.encode())
+    try:
+        with vault.open(SecretBytes(bytearray(owner_bytes)), admin_id="owner") as state:
+            vault.add_keyslot(admin_id, new_bytes, role=role_internal)
+            # Ensure the admins dict entry is present and complete
+            state.data.setdefault("admins", {})[admin_id] = {
+                "role": role_internal,
+                "created_at": _utcnow_iso_main(),
+                "totp_secret_b32": None,
+                "totp_enrolled_at": None,
+                "backup_codes": [],
+                "last_unlock": None,
+            }
+        audit = AuditLog(DEFAULT_AUDIT_LOG_PATH)
+        audit.log("add-admin", {"target": admin_id, "role": role_internal, "actor": "owner"})
+        click.echo(f"Admin {admin_id!r} added with role {role_internal!r}.")
+    except SystemExit:
+        raise
+    except Exception as exc:
+        click.echo(f"Error: {exc}", err=True)
+        raise SystemExit(1)
+    finally:
+        owner_bytes[:] = b"\x00" * len(owner_bytes)
+        new_bytes[:] = b"\x00" * len(new_bytes)
+        wipe_string(owner_pass)
+        wipe_string(new_pass)
+
+
+@cli.command("remove-admin")
+@click.argument("admin_id")
+def remove_admin(admin_id: str) -> None:
+    """Remove an admin keyslot from the vault."""
+    owner_pass = click.prompt("Owner passphrase", hide_input=True)
+    click.confirm(f"Remove admin {admin_id!r}? This cannot be undone.", abort=True)
+
+    from wireseal.security.vault import Vault
+    from wireseal.security.audit import AuditLog
+    from wireseal.security.secret_types import SecretBytes
+    from wireseal.security.secrets_wipe import wipe_string
+
+    vault       = Vault(DEFAULT_VAULT_PATH)
+    owner_bytes = bytearray(owner_pass.encode())
+    try:
+        with vault.open(SecretBytes(bytearray(owner_bytes)), admin_id="owner") as state:
+            admins = state.data.get("admins", {})
+            owners = [aid for aid, info in admins.items() if info.get("role") == "owner"]
+            if admin_id in owners and len(owners) == 1:
+                click.echo("Error: cannot remove the last owner.", err=True)
+                raise SystemExit(1)
+            vault.remove_keyslot(admin_id)
+            admins.pop(admin_id, None)
+        audit = AuditLog(DEFAULT_AUDIT_LOG_PATH)
+        audit.log("remove-admin", {"target": admin_id, "actor": "owner"})
+        click.echo(f"Admin {admin_id!r} removed.")
+    except SystemExit:
+        raise
+    except Exception as exc:
+        click.echo(f"Error: {exc}", err=True)
+        raise SystemExit(1)
+    finally:
+        owner_bytes[:] = b"\x00" * len(owner_bytes)
+        wipe_string(owner_pass)
+
+
+@cli.command("list-admins")
+def list_admins() -> None:
+    """List all admins in the vault."""
+    passphrase = click.prompt("Passphrase", hide_input=True)
+
+    from wireseal.security.vault import Vault
+    from wireseal.security.secret_types import SecretBytes
+    from wireseal.security.secrets_wipe import wipe_string
+
+    vault      = Vault(DEFAULT_VAULT_PATH)
+    pass_bytes = bytearray(passphrase.encode())
+    try:
+        with vault.open(SecretBytes(bytearray(pass_bytes))) as state:
+            admins = state.data.get("admins", {})
+            if not admins:
+                click.echo("No admins found.")
+                return
+            header = f"{'ID':<20} {'Role':<10} {'TOTP':<6} {'Last Unlock'}"
+            click.echo(header)
+            click.echo("-" * len(header))
+            for aid, info in sorted(admins.items()):
+                totp = "yes" if info.get("totp_secret_b32") else "no"
+                last = info.get("last_unlock") or "never"
+                click.echo(f"{aid:<20} {info.get('role','?'):<10} {totp:<6} {last}")
+    except Exception as exc:
+        click.echo(f"Error: {exc}", err=True)
+        raise SystemExit(1)
+    finally:
+        pass_bytes[:] = b"\x00" * len(pass_bytes)
+        wipe_string(passphrase)
+
+
+@cli.command("change-admin-passphrase")
+@click.argument("admin_id", default="owner")
+def change_admin_passphrase(admin_id: str) -> None:
+    """Change an admin's vault passphrase."""
+    current  = click.prompt("Current passphrase (yours)", hide_input=True)
+    new_pass = click.prompt(f"New passphrase for {admin_id!r}", hide_input=True)
+    new_pass2 = click.prompt("Confirm new passphrase", hide_input=True)
+    if new_pass != new_pass2:
+        click.echo("Passphrases do not match.", err=True)
+        raise SystemExit(1)
+
+    from wireseal.security.vault import Vault
+    from wireseal.security.audit import AuditLog
+    from wireseal.security.secret_types import SecretBytes
+    from wireseal.security.secrets_wipe import wipe_string
+
+    vault         = Vault(DEFAULT_VAULT_PATH)
+    current_bytes = bytearray(current.encode())
+    new_bytes     = bytearray(new_pass.encode())
+    try:
+        # Verify caller can open the vault with their own passphrase
+        with vault.open(SecretBytes(bytearray(current_bytes))):
+            pass
+        vault.change_keyslot_passphrase(admin_id, bytearray(current_bytes), new_bytes)
+        audit = AuditLog(DEFAULT_AUDIT_LOG_PATH)
+        audit.log("change-passphrase", {"target": admin_id})
+        click.echo(f"Passphrase for {admin_id!r} updated.")
+    except Exception as exc:
+        click.echo(f"Error: {exc}", err=True)
+        raise SystemExit(1)
+    finally:
+        current_bytes[:] = b"\x00" * len(current_bytes)
+        new_bytes[:] = b"\x00" * len(new_bytes)
+        wipe_string(current)
+        wipe_string(new_pass)
+
+
+# ---------------------------------------------------------------------------
 # serve  — web dashboard + REST API
 # ---------------------------------------------------------------------------
 
