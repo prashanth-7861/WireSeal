@@ -52,6 +52,15 @@ export interface VaultInfo {
   locked: boolean;
   interface: string;
   pin_set: boolean;
+  multi_admin: boolean;
+  totp_required_for: string[];
+}
+
+export interface AdminInfo {
+  id: string;
+  role: "owner" | "admin" | "readonly";
+  totp_enrolled: boolean;
+  last_unlock: string | null;
 }
 
 export interface Peer {
@@ -167,8 +176,11 @@ export const api = {
       "POST", "/init", { passphrase, ...opts }
     ),
 
-  unlock: (passphrase: string) =>
-    _fetch<{ ok: boolean }>("POST", "/unlock", { passphrase }),
+  unlock: (passphrase: string, admin_id?: string) =>
+    _fetch<{ ok: boolean; role?: string }>("POST", "/unlock", {
+      passphrase,
+      ...(admin_id !== undefined ? { admin_id } : {}),
+    }),
 
   lock: () =>
     _fetch<{ ok: boolean }>("POST", "/lock"),
@@ -267,4 +279,17 @@ export const api = {
 
   adminWriteFile: (path: string, content: string) =>
     _fetch<{ ok: boolean; path: string }>("POST", "/admin/file/write", { path, content }),
+
+  // ── Multi-admin management ────────────────────────────────────────────────
+  listAdmins: (): Promise<{ admins: AdminInfo[] }> =>
+    _fetch<{ admins: AdminInfo[] }>("GET", "/admins"),
+
+  addAdmin: (admin_id: string, passphrase: string, role: string): Promise<void> =>
+    _fetch<void>("POST", "/admins", { admin_id, passphrase, role }),
+
+  removeAdmin: (admin_id: string): Promise<void> =>
+    _fetch<void>("DELETE", `/admins/${encodeURIComponent(admin_id)}`),
+
+  changeAdminPassphrase: (admin_id: string, new_passphrase: string): Promise<void> =>
+    _fetch<void>("POST", `/admins/${encodeURIComponent(admin_id)}/change-passphrase`, { new_passphrase }),
 };

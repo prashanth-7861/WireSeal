@@ -5,6 +5,7 @@ import {
   Lock, Play, Eye, EyeOff, AlertCircle, CheckCircle,
   Shield, Sparkles, Wifi, WifiOff, Circle, RotateCcw,
   KeyRound, Hash, ArrowLeft, Trash2, ShieldAlert, Timer,
+  Users,
 } from "lucide-react";
 import { api, VAULT_LOCKED_EVENT, type Status } from "../api";
 
@@ -22,6 +23,10 @@ export function Layout() {
   const [showPw, setShowPw] = useState(false);
   const [authError, setAuthError] = useState("");
   const [authLoading, setAuthLoading] = useState(false);
+
+  // Multi-admin state
+  const [multiAdmin, setMultiAdmin] = useState(false);
+  const [adminId, setAdminId] = useState("owner");
 
   // PIN state
   const [pinSet, setPinSet] = useState(false);
@@ -60,6 +65,7 @@ export function Layout() {
       }
       setPinSet(info.pin_set ?? false);
       setUnlockMode(info.pin_set ? "pin" : "passphrase");
+      setMultiAdmin(info.multi_admin ?? false);
     } catch {
       setVaultState("locked");
     }
@@ -217,7 +223,7 @@ export function Layout() {
           warnings: result.warnings,
         });
       } else {
-        await api.unlock(passphrase);
+        await api.unlock(passphrase, multiAdmin ? adminId : undefined);
       }
       setShowPassphrase(false);
       setVaultState("unlocked");
@@ -328,6 +334,7 @@ export function Layout() {
     { to: "/clients", label: "Clients", icon: Monitor },
     { to: "/audit-log", label: "Audit Log", icon: ScrollText },
     { to: "/security", label: "Security", icon: Shield },
+    { to: "/admins", label: "Admins", icon: Users },
     { to: "/settings", label: "Settings", icon: Settings },
     ...(adminActive ? [{ to: "/admin", label: "Admin Panel", icon: ShieldAlert, end: false }] : []),
     { to: "/about", label: "About", icon: Info },
@@ -552,6 +559,19 @@ export function Layout() {
                   </div>
 
                   <form onSubmit={handleAuth} className="space-y-4">
+                    {multiAdmin && passphraseMode === "unlock" && (
+                      <div>
+                        <label className="block text-sm font-medium text-gray-700 mb-2">Admin ID</label>
+                        <input
+                          type="text"
+                          value={adminId}
+                          onChange={e => setAdminId(e.target.value)}
+                          className="w-full px-4 py-2.5 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                          placeholder="owner"
+                          disabled={authLoading}
+                        />
+                      </div>
+                    )}
                     <div>
                       <label className="block text-sm font-medium text-gray-700 mb-2">Passphrase</label>
                       <div className="relative">

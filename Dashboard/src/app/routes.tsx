@@ -7,6 +7,7 @@ import { Security } from "./pages/Security";
 import { Settings } from "./pages/Settings";
 import { About } from "./pages/About";
 import { Admin } from "./pages/Admin";
+import { Admins } from "./pages/Admins";
 
 export const router = createBrowserRouter([
   {
@@ -19,6 +20,7 @@ export const router = createBrowserRouter([
       { path: "security", Component: Security },
       { path: "settings", Component: Settings },
       { path: "admin", Component: Admin },
+      { path: "admins", Component: Admins },
       { path: "about", Component: About },
     ],
   },
