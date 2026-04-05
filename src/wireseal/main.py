@@ -2253,6 +2253,96 @@ def change_admin_passphrase(admin_id: str) -> None:
 
 
 # ---------------------------------------------------------------------------
+# TOTP commands
+# ---------------------------------------------------------------------------
+
+
+@cli.command("totp-enroll")
+@click.argument("admin_id")
+def totp_enroll(admin_id: str) -> None:
+    """Print the TOTP enrollment URI for ADMIN_ID (open with an authenticator app).
+
+    The vault must already be unlocked (run ``wireseal serve`` first, then
+    authenticate via the dashboard — or unlock via the API).  This CLI
+    command only shows the URI; enrollment must be confirmed via the API
+    (POST /api/totp/enroll/confirm) with the 6-digit code.
+    """
+    owner_pass = click.prompt("Owner passphrase", hide_input=True)
+
+    from wireseal.security.vault import Vault
+    from wireseal.security.secret_types import SecretBytes
+    from wireseal.security.secrets_wipe import wipe_string
+    from wireseal.security.totp import generate_totp_secret, totp_uri, secret_to_b32
+
+    vault      = Vault(DEFAULT_VAULT_PATH)
+    owner_bytes = bytearray(owner_pass.encode())
+    try:
+        with vault.open(SecretBytes(bytearray(owner_bytes)), admin_id="owner") as state:
+            admins = state.data.get("admins", {})
+            if admin_id not in admins:
+                click.echo(f"Error: admin '{admin_id}' not found in vault.", err=True)
+                raise SystemExit(1)
+            secret = generate_totp_secret()
+            uri    = totp_uri(secret, admin_id)
+            b32    = secret_to_b32(secret)
+            click.echo(f"\nTOTP enrollment URI for {admin_id!r}:")
+            click.echo(f"  {uri}")
+            click.echo(f"\nManual entry secret: {b32}")
+            click.echo(
+                "\nScan the URI with an authenticator app (Google Authenticator, "
+                "Aegis, etc.), then confirm enrollment via POST /api/totp/enroll/confirm."
+            )
+            click.echo("(Secret NOT committed to vault until confirmed via the API.)")
+    except SystemExit:
+        raise
+    except Exception as exc:
+        click.echo(f"Error: {exc}", err=True)
+        raise SystemExit(1)
+    finally:
+        owner_bytes[:] = b"\x00" * len(owner_bytes)
+        wipe_string(owner_pass)
+
+
+@cli.command("totp-disable")
+@click.argument("admin_id")
+def totp_disable(admin_id: str) -> None:
+    """Disable TOTP for ADMIN_ID (emergency recovery — owner only)."""
+    owner_pass = click.prompt("Owner passphrase", hide_input=True)
+    click.confirm(
+        f"Disable TOTP 2FA for admin {admin_id!r}? They will only need passphrase to unlock.",
+        abort=True,
+    )
+
+    from wireseal.security.vault import Vault
+    from wireseal.security.audit import AuditLog
+    from wireseal.security.secret_types import SecretBytes
+    from wireseal.security.secrets_wipe import wipe_string
+
+    vault       = Vault(DEFAULT_VAULT_PATH)
+    owner_bytes = bytearray(owner_pass.encode())
+    try:
+        with vault.open(SecretBytes(bytearray(owner_bytes)), admin_id="owner") as state:
+            admins = state.data.get("admins", {})
+            if admin_id not in admins:
+                click.echo(f"Error: admin '{admin_id}' not found in vault.", err=True)
+                raise SystemExit(1)
+            admins[admin_id]["totp_secret_b32"]  = None
+            admins[admin_id]["totp_enrolled_at"] = None
+            admins[admin_id]["backup_codes"]     = []
+        audit = AuditLog(DEFAULT_AUDIT_LOG_PATH)
+        audit.log("totp-disabled", {"target": admin_id, "actor": "owner", "via": "cli"})
+        click.echo(f"TOTP disabled for {admin_id!r}.")
+    except SystemExit:
+        raise
+    except Exception as exc:
+        click.echo(f"Error: {exc}", err=True)
+        raise SystemExit(1)
+    finally:
+        owner_bytes[:] = b"\x00" * len(owner_bytes)
+        wipe_string(owner_pass)
+
+
+# ---------------------------------------------------------------------------
 # serve  — web dashboard + REST API
 # ---------------------------------------------------------------------------
 
