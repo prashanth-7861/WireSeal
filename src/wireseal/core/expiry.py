@@ -99,7 +99,7 @@ class ExpiryWatcher(threading.Thread):
             audit = AuditLog(self._audit_path)
             for name in expired_names:
                 try:
-                    audit.log("peer-expired", {"name": name, "reason": "ttl"})
+                    audit.log("peer-expired", {"name": name, "reason": "ttl"}, actor="system")
                 except Exception:
                     pass
             # Refresh in-memory cache

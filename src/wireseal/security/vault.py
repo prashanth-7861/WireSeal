@@ -804,6 +804,7 @@ class Vault:
         passphrase: SecretBytes | bytearray,
         initial_state: dict[str, Any] | None = None,
         hint: str | None = None,
+        keyslot_params: dict | None = None,
     ) -> "Vault":
         """Create a new vault file at vault_path encrypted with passphrase.
 
@@ -955,7 +956,8 @@ class Vault:
     # ------------------------------------------------------------------
 
     def add_keyslot(self, admin_id: str, passphrase: bytearray | bytes,
-                    role: str = "admin") -> None:
+                    role: str = "admin",
+                    keyslot_params: dict | None = None) -> None:
         """Add a new keyslot for admin_id wrapping the current master key.
 
         Must be called within an active open() context (so master key is available).
@@ -963,6 +965,14 @@ class Vault:
         If the vault is currently FORMAT_VERSION 2, this upgrades it to
         FORMAT_VERSION 3 by wrapping the existing master key in an owner keyslot
         (using the session passphrase) and the new admin's keyslot.
+
+        Args:
+            admin_id:       Unique identifier for the new admin.
+            passphrase:     Passphrase to protect this admin's keyslot.
+            role:           "owner" | "admin" | "readonly".
+            keyslot_params: Optional dict with Argon2id override params
+                            (time_cost, memory_cost, parallelism).  Used by
+                            tests to pass _DEV_FAST_PARAMS and avoid slow KDF.
 
         Raises:
             KeyslotExistsError: admin_id already has a keyslot.
@@ -977,8 +987,9 @@ class Vault:
             if self._session_passphrase is None:
                 raise RuntimeError("Cannot upgrade v2 vault: session passphrase not available")
             store = KeyslotStore()
+            kp = keyslot_params or {}
             owner_slot = create_keyslot(
-                "owner", self._session_passphrase, self._session_master_key, role="owner"
+                "owner", self._session_passphrase, self._session_master_key, role="owner", **kp
             )
             store.keyslots.append(owner_slot)
             self._session_store = store
@@ -1007,7 +1018,8 @@ class Vault:
         if store.find(admin_id) is not None:
             raise KeyslotExistsError(f"Keyslot for admin_id '{admin_id}' already exists")
 
-        new_slot = create_keyslot(admin_id, passphrase, self._session_master_key, role=role)
+        kp = keyslot_params or {}
+        new_slot = create_keyslot(admin_id, passphrase, self._session_master_key, role=role, **kp)
         store.keyslots.append(new_slot)
 
         # Keep admins dict in the session state in sync

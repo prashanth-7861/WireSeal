@@ -257,6 +257,7 @@ class AuditLog:
         metadata: dict,
         success: bool = True,
         error: str | None = None,
+        actor: str | None = None,
     ) -> AuditEntry:
         """Append one entry to the audit log and return it.
 
@@ -269,7 +270,10 @@ class AuditLog:
         """
         import datetime  # deferred: no side effects at module import
 
-        scrubbed = _scrub_secrets(metadata)
+        meta_with_actor = dict(metadata)
+        if actor is not None and "actor" not in meta_with_actor:
+            meta_with_actor["actor"] = actor
+        scrubbed = _scrub_secrets(meta_with_actor)
         scrubbed_error = str(_scrub_secrets(error)) if error else error
         safe_action = action.replace("\n", " ").replace("\r", " ") if action else action
         safe_error = scrubbed_error.replace("\n", " ").replace("\r", " ") if scrubbed_error else scrubbed_error

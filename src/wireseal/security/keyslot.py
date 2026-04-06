@@ -29,13 +29,15 @@ from .exceptions import KeyslotNotFoundError
 from .secret_types import SecretBytes
 
 # ---------------------------------------------------------------------------
-# Default Argon2id parameters for new keyslots
-# NOTE: Development values. Production: time=10, mem=262144 (raised in 07-07).
+# Default Argon2id parameters for new keyslots (production values per SECURITY-SPEC §1.2)
 # ---------------------------------------------------------------------------
-KEYSLOT_TIME_COST = 3
-KEYSLOT_MEMORY_COST_KIB = 65536   # 64 MiB
+KEYSLOT_TIME_COST = 10
+KEYSLOT_MEMORY_COST_KIB = 262144  # 256 MiB
 KEYSLOT_PARALLELISM = 4
 KEYSLOT_HASH_LEN = 32
+
+# Development/test override — pass as **_DEV_FAST_PARAMS to create_keyslot / unlock_keyslot
+_DEV_FAST_PARAMS = {"time_cost": 3, "memory_cost": 65536, "parallelism": 4}
 
 _SLOT_STRUCT = struct.Struct(">III")  # memory_cost, time_cost, parallelism (3 x uint32 BE)
 _SLOT_SIZE = 144
@@ -76,34 +78,46 @@ class KeyslotStore:
 
 def _derive_wrapping_key(passphrase: bytearray | bytes, salt: bytes, *,
                          time_cost: int, memory_cost: int, parallelism: int) -> bytearray:
-    """Derive a 32-byte AES wrapping key from passphrase via Argon2id."""
-    raw = hash_secret_raw(
-        secret=bytes(passphrase),
-        salt=salt,
-        time_cost=time_cost,
-        memory_cost=memory_cost,
-        parallelism=parallelism,
-        hash_len=KEYSLOT_HASH_LEN,
-        type=Type.ID,
-    )
+    """Derive a 32-byte AES wrapping key from passphrase via Argon2id.
+
+    Acquires the shared _ARGON2_SEMAPHORE from vault to serialise concurrent
+    KDF calls and prevent simultaneous 256 MiB allocations on low-RAM hardware.
+    """
+    from .vault import _ARGON2_SEMAPHORE
+    with _ARGON2_SEMAPHORE:
+        raw = hash_secret_raw(
+            secret=bytes(passphrase),
+            salt=salt,
+            time_cost=time_cost,
+            memory_cost=memory_cost,
+            parallelism=parallelism,
+            hash_len=KEYSLOT_HASH_LEN,
+            type=Type.ID,
+        )
     return bytearray(raw)
 
 
 def create_keyslot(admin_id: str, passphrase: bytearray | bytes,
-                   master_key: bytes | bytearray, *, role: str = "admin") -> Keyslot:
+                   master_key: bytes | bytearray, *, role: str = "admin",
+                   time_cost: int = KEYSLOT_TIME_COST,
+                   memory_cost: int = KEYSLOT_MEMORY_COST_KIB,
+                   parallelism: int = KEYSLOT_PARALLELISM) -> Keyslot:
     """Create a new keyslot wrapping master_key under passphrase.
 
     Uses Argon2id to derive a wrapping key, then AES-256-GCM to encrypt
     the 32-byte master key. The admin_id is used as AEAD additional data
     to bind the ciphertext to this admin's identity.
+
+    Pass time_cost/memory_cost/parallelism (or **_DEV_FAST_PARAMS) to override
+    production Argon2id parameters for testing.
     """
     salt = os.urandom(32)
     nonce = os.urandom(12)
     wrapping_key = _derive_wrapping_key(
         passphrase, salt,
-        time_cost=KEYSLOT_TIME_COST,
-        memory_cost=KEYSLOT_MEMORY_COST_KIB,
-        parallelism=KEYSLOT_PARALLELISM,
+        time_cost=time_cost,
+        memory_cost=memory_cost,
+        parallelism=parallelism,
     )
     try:
         aesgcm = AESGCM(bytes(wrapping_key))
@@ -118,18 +132,24 @@ def create_keyslot(admin_id: str, passphrase: bytearray | bytes,
         admin_id=admin_id,
         role=role,
         salt=salt,
-        memory_cost=KEYSLOT_MEMORY_COST_KIB,
-        time_cost=KEYSLOT_TIME_COST,
-        parallelism=KEYSLOT_PARALLELISM,
+        memory_cost=memory_cost,
+        time_cost=time_cost,
+        parallelism=parallelism,
         nonce=nonce,
         wrapped_key=wrapped,
     )
 
 
-def unlock_keyslot(slot: Keyslot, passphrase: bytearray | bytes) -> bytearray:
+def unlock_keyslot(slot: Keyslot, passphrase: bytearray | bytes,
+                   **_ignored_kdf_params) -> bytearray:
     """Decrypt the master key from a keyslot using passphrase.
 
     Raises KeyslotNotFoundError if the passphrase is wrong (GCM auth failure).
+
+    KDF parameters are always read from the slot (they were serialised at
+    creation time). Any extra keyword arguments (e.g. **_DEV_FAST_PARAMS)
+    are accepted but ignored so that test code can pass fast params without
+    special-casing unlock vs create.
     """
     wrapping_key = _derive_wrapping_key(
         passphrase, slot.salt,
@@ -153,16 +173,19 @@ def unlock_keyslot(slot: Keyslot, passphrase: bytearray | bytes) -> bytearray:
 
 
 def find_and_unlock(store: KeyslotStore, admin_id: str,
-                    passphrase: bytearray | bytes) -> bytearray:
+                    passphrase: bytearray | bytes, **kdf_params) -> bytearray:
     """Find the keyslot for admin_id and unlock it.
 
     Uses constant-time comparison to find the slot. Raises KeyslotNotFoundError
     if admin_id not found OR if passphrase is wrong.
+
+    Extra keyword arguments are forwarded to unlock_keyslot (accepted but
+    ignored — KDF params come from the stored slot).
     """
     slot = store.find(admin_id)
     if slot is None:
         raise KeyslotNotFoundError(f"No keyslot found for admin_id '{admin_id}'")
-    return unlock_keyslot(slot, passphrase)
+    return unlock_keyslot(slot, passphrase, **kdf_params)
 
 
 def serialize_keyslot(slot: Keyslot) -> bytes:

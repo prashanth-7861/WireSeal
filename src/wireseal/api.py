@@ -163,7 +163,7 @@ def _check_rate_limit(ip: str) -> None:
         _unlock_attempts[ip] = attempts
         if len(attempts) >= _UNLOCK_MAX:
             from wireseal.security.audit import AuditLog
-            AuditLog(_AUDIT_PATH).log("unlock-ratelimited", {"ip": ip})
+            AuditLog(_AUDIT_PATH).log("unlock-ratelimited", {"ip": ip}, actor="system")
             raise _ApiError("Too many unlock attempts. Try again later.", 429)
 
 
@@ -173,7 +173,7 @@ def _record_unlock_failure(ip: str) -> None:
     with _lock:
         _unlock_attempts.setdefault(ip, []).append(_time.time())
     from wireseal.security.audit import AuditLog
-    AuditLog(_AUDIT_PATH).log("unlock-failed", {"ip": ip})
+    AuditLog(_AUDIT_PATH).log("unlock-failed", {"ip": ip}, actor="system")
 
 
 def _clear_unlock_failures(ip: str) -> None:
@@ -208,7 +208,7 @@ def _check_admin_rate_limit(ip: str) -> None:
         _admin_attempts[ip] = attempts
         if len(attempts) >= _ADMIN_MAX_FAILS:
             from wireseal.security.audit import AuditLog
-            AuditLog(_AUDIT_PATH).log("admin-auth-ratelimited", {"ip": ip})
+            AuditLog(_AUDIT_PATH).log("admin-auth-ratelimited", {"ip": ip}, actor="system")
             raise _ApiError("Too many admin authentication attempts. Try again later.", 429)
 
 
@@ -731,7 +731,7 @@ def _h_init(req: "_Handler", _groups: tuple) -> dict:
             _session.update(vault=vault, passphrase=passphrase, cache=cache)
         passphrase = None  # ownership transferred to session
 
-        AuditLog(_AUDIT_PATH).log("init", {"subnet": subnet, "port": port})
+        AuditLog(_AUDIT_PATH).log("init", {"subnet": subnet, "port": port}, actor="system")
 
         # ── Step 2: Platform setup (best-effort — failures are warnings) ────────
         # These operations require admin privileges and WireGuard to be installed.
@@ -873,7 +873,7 @@ def _h_unlock(req: "_Handler", _groups: tuple) -> dict:
             )
 
         _clear_unlock_failures(client_ip)
-        AuditLog(_AUDIT_PATH).log("unlock-web", {"admin_id": admin_id})
+        AuditLog(_AUDIT_PATH).log("unlock-web", {"admin_id": admin_id}, actor=admin_id)
 
         # Auto-start WireGuard tunnel if config exists but tunnel is down
         try:
@@ -905,11 +905,12 @@ def _h_lock(req: "_Handler", _groups: tuple) -> dict:
     from wireseal.security.audit import AuditLog
     _admin_deactivate()  # admin mode is tied to the authenticated session
     with _lock:
+        _lock_actor = _session.get("admin_id") or "system"
         if _session["passphrase"]:
             _session["passphrase"].wipe()
         _session.update(vault=None, passphrase=None, cache=None,
                         admin_id=None, admin_role=None)
-    AuditLog(_AUDIT_PATH).log("lock", {})
+    AuditLog(_AUDIT_PATH).log("lock", {}, actor=_lock_actor)
     return {"ok": True}
 
 
@@ -945,6 +946,7 @@ def _detect_new_handshakes(peers: list[dict]) -> None:
                             "peer": p.get("public_key_short", ""),
                             "last_handshake_seconds": secs,
                         },
+                        actor="system",
                     )
                 except Exception:
                     pass  # Audit failures never crash the status endpoint
@@ -1174,7 +1176,7 @@ def _h_heartbeat(req: "_Handler", groups: tuple) -> dict:
 
     from wireseal.security.audit import AuditLog
     try:
-        AuditLog(_AUDIT_PATH).log("heartbeat", {"name": name, "expires_at": new_expires})
+        AuditLog(_AUDIT_PATH).log("heartbeat", {"name": name, "expires_at": new_expires}, actor="system")
     except Exception:
         pass
 
@@ -1256,6 +1258,7 @@ def _h_add_client(req: "_Handler", _groups: tuple) -> dict:
     with _lock:
         vault      = _session["vault"]
         passphrase = _session["passphrase"]
+        _actor_id  = _session.get("admin_id", "owner")
 
     from wireseal.core.keygen         import generate_keypair
     from wireseal.core.psk            import generate_psk
@@ -1362,7 +1365,7 @@ def _h_add_client(req: "_Handler", _groups: tuple) -> dict:
         state.integrity[f"client-{name}"] = config_hash
         vault.save(state, passphrase)
 
-        AuditLog(_AUDIT_PATH).log("add-client", {"name": name, "ip": allocated_ip})
+        AuditLog(_AUDIT_PATH).log("add-client", {"name": name, "ip": allocated_ip}, actor=_actor_id)
 
         with _lock:
             _session["cache"] = _refresh_cache(state)
@@ -1382,6 +1385,7 @@ def _h_remove_client(req: "_Handler", groups: tuple) -> dict:
     with _lock:
         vault      = _session["vault"]
         passphrase = _session["passphrase"]
+        _actor_id  = _session.get("admin_id", "owner")
 
     from wireseal.core.ip_pool        import IPPool
     from wireseal.core.config_builder import ConfigBuilder
@@ -1440,7 +1444,7 @@ def _h_remove_client(req: "_Handler", groups: tuple) -> dict:
             pass
 
         vault.save(state, passphrase)
-        AuditLog(_AUDIT_PATH).log("remove-client", {"name": name})
+        AuditLog(_AUDIT_PATH).log("remove-client", {"name": name}, actor=_actor_id)
 
         with _lock:
             _session["cache"] = _refresh_cache(state)
@@ -1457,6 +1461,7 @@ def _h_client_qr(req: "_Handler", groups: tuple) -> dict:
     with _lock:
         vault      = _session["vault"]
         passphrase = _session["passphrase"]
+        _actor_id  = _session.get("admin_id", "owner")
 
     from wireseal.core.config_builder import ConfigBuilder
     from wireseal.security.audit      import AuditLog
@@ -1503,7 +1508,7 @@ def _h_client_qr(req: "_Handler", groups: tuple) -> dict:
     except Exception:
         raise _ApiError("QR code generation failed.", 500)
 
-    AuditLog(_AUDIT_PATH).log("export-qr", {"client": name})
+    AuditLog(_AUDIT_PATH).log("export-qr", {"client": name}, actor=_actor_id)
     return {"name": name, "qr_png_b64": png_b64, "format": img_format}
 
 
@@ -1517,6 +1522,7 @@ def _h_client_config(req: "_Handler", groups: tuple) -> dict:
     with _lock:
         vault      = _session["vault"]
         passphrase = _session["passphrase"]
+        _actor_id  = _session.get("admin_id", "owner")
 
     from wireseal.core.config_builder import ConfigBuilder
     from wireseal.security.audit      import AuditLog
@@ -1535,7 +1541,7 @@ def _h_client_config(req: "_Handler", groups: tuple) -> dict:
             mtu=_detect_mtu(),
         )
 
-    AuditLog(_AUDIT_PATH).log("export-config", {"client": name})
+    AuditLog(_AUDIT_PATH).log("export-config", {"client": name}, actor=_actor_id)
     return {"name": name, "config": config_str}
 
 
@@ -1659,7 +1665,8 @@ def _h_harden_server(req: "_Handler", _groups: tuple) -> dict:
         if hasattr(adapter, "harden_server"):
             actions = adapter.harden_server()
             from wireseal.security.audit import AuditLog
-            AuditLog(_AUDIT_PATH).log("harden-server", {"actions_count": len(actions)})
+            AuditLog(_AUDIT_PATH).log("harden-server", {"actions_count": len(actions)},
+                                      actor=_session.get("admin_id", "owner"))
             return {"ok": True, "actions": actions}
         return {"ok": True, "actions": ["Hardening not available on this platform"]}
     except Exception as exc:
@@ -1791,7 +1798,8 @@ def _h_change_passphrase(req: "_Handler", _groups: tuple) -> dict:
     from wireseal.security.audit         import AuditLog
 
     with _lock:
-        vault = _session["vault"]
+        vault     = _session["vault"]
+        _actor_id = _session.get("admin_id", "owner")
 
     old_passphrase = SecretBytes(bytearray(current_str.encode()))
     new_passphrase = SecretBytes(bytearray(new_str.encode()))
@@ -1811,7 +1819,7 @@ def _h_change_passphrase(req: "_Handler", _groups: tuple) -> dict:
         # Wipe PIN — it's encrypted with the old passphrase, now stale
         _pin_wipe()
 
-        AuditLog(_AUDIT_PATH).log("change-passphrase", {})
+        AuditLog(_AUDIT_PATH).log("change-passphrase", {}, actor=_actor_id)
         return {"ok": True, "pin_removed": _PIN_PATH.exists() is False}
     finally:
         wipe_string(current_str)
@@ -1842,7 +1850,8 @@ def _h_start_server(req: "_Handler", _groups: tuple) -> dict:
                 check=False, capture_output=True, timeout=15,
                 creationflags=_SP_FLAGS,
             )
-            AuditLog(_AUDIT_PATH).log("start", {"interface": _WG_IFACE})
+            AuditLog(_AUDIT_PATH).log("start", {"interface": _WG_IFACE},
+                                      actor=_session.get("admin_id", "owner"))
             return {"ok": True}
         raise _ApiError("WireGuard not found or no config.", 500)
 
@@ -1856,7 +1865,8 @@ def _h_start_server(req: "_Handler", _groups: tuple) -> dict:
             check=False, capture_output=True, timeout=30,
         )
         if result.returncode == 0:
-            AuditLog(_AUDIT_PATH).log("start", {"interface": _WG_IFACE})
+            AuditLog(_AUDIT_PATH).log("start", {"interface": _WG_IFACE},
+                                      actor=_session.get("admin_id", "owner"))
             return {"ok": True}
         err = result.stderr.decode("utf-8", errors="replace")
         raise _ApiError(f"Failed to start: {err}", 500)
@@ -1883,7 +1893,8 @@ def _h_terminate(req: "_Handler", _groups: tuple) -> dict:
                 check=False, capture_output=True, timeout=15,
                 creationflags=_SP_FLAGS,
             )
-        AuditLog(_AUDIT_PATH).log("terminate", {"interface": _WG_IFACE})
+        AuditLog(_AUDIT_PATH).log("terminate", {"interface": _WG_IFACE},
+                                  actor=_session.get("admin_id", "owner"))
         return {"ok": True}
 
     # Linux/macOS: use wg-quick down
@@ -1892,7 +1903,8 @@ def _h_terminate(req: "_Handler", _groups: tuple) -> dict:
             _sudo(["wg-quick", "down", _WG_IFACE]),
             check=True, capture_output=True, timeout=15,
         )
-        AuditLog(_AUDIT_PATH).log("terminate", {"interface": _WG_IFACE})
+        AuditLog(_AUDIT_PATH).log("terminate", {"interface": _WG_IFACE},
+                                  actor=_session.get("admin_id", "owner"))
         return {"ok": True}
     except subprocess.CalledProcessError as exc:
         stderr = exc.stderr.decode() if exc.stderr else ""
@@ -1961,6 +1973,7 @@ def _h_update_endpoint(req: "_Handler", _groups: tuple) -> dict:
     with _lock:
         vault      = _session["vault"]
         passphrase = _session["passphrase"]
+        _actor_id  = _session.get("admin_id", "owner")
 
     from wireseal.security.audit import AuditLog
     with vault.open(passphrase) as state:
@@ -1969,7 +1982,7 @@ def _h_update_endpoint(req: "_Handler", _groups: tuple) -> dict:
         with _lock:
             _session["cache"] = _refresh_cache(state)
 
-    AuditLog(_AUDIT_PATH).log("update-endpoint", {"endpoint": endpoint})
+    AuditLog(_AUDIT_PATH).log("update-endpoint", {"endpoint": endpoint}, actor=_actor_id)
     return {"ok": True, "endpoint": endpoint}
 
 
@@ -1997,7 +2010,7 @@ def _h_set_pin(req: "_Handler", _groups: tuple) -> dict:
     _pin_save(passphrase_bytes, pin)
 
     from wireseal.security.audit import AuditLog
-    AuditLog(_AUDIT_PATH).log("set-pin", {})
+    AuditLog(_AUDIT_PATH).log("set-pin", {}, actor=_session.get("admin_id", "owner"))
     return {"ok": True}
 
 
@@ -2005,7 +2018,7 @@ def _h_remove_pin(req: "_Handler", _groups: tuple) -> dict:
     """Remove the quick-unlock PIN."""
     _pin_wipe()
     from wireseal.security.audit import AuditLog
-    AuditLog(_AUDIT_PATH).log("remove-pin", {})
+    AuditLog(_AUDIT_PATH).log("remove-pin", {}, actor=_session.get("admin_id", "owner"))
     return {"ok": True}
 
 
@@ -2064,7 +2077,7 @@ def _h_unlock_pin(req: "_Handler", _groups: tuple) -> dict:
 
         _pin_fail_count = 0  # Reset on success
         _clear_unlock_failures(client_ip)
-        AuditLog(_AUDIT_PATH).log("unlock-pin", {})
+        AuditLog(_AUDIT_PATH).log("unlock-pin", {}, actor="system")
 
         # Auto-start WireGuard tunnel (same as passphrase unlock)
         try:
@@ -2125,7 +2138,7 @@ def _h_admin_authenticate(req: "_Handler", _groups: tuple) -> dict:
     if not _verify_root_password(password):
         _record_admin_failure(client_ip)
         from wireseal.security.audit import AuditLog
-        AuditLog(_AUDIT_PATH).log("admin-auth-failed", {"ip": client_ip})
+        AuditLog(_AUDIT_PATH).log("admin-auth-failed", {"ip": client_ip}, actor="system")
         raise _ApiError("Invalid credentials.", 401)
 
     _clear_admin_failures(client_ip)
@@ -2146,7 +2159,8 @@ def _h_admin_authenticate(req: "_Handler", _groups: tuple) -> dict:
         _admin_session["password"]   = pw_secret
         _admin_session["expires_at"] = _time.monotonic() + _ADMIN_TIMEOUT
 
-    AuditLog(_AUDIT_PATH).log("admin-activate", {"ip": client_ip})
+    AuditLog(_AUDIT_PATH).log("admin-activate", {"ip": client_ip},
+                              actor=_session.get("admin_id", "owner"))
     return {"ok": True, "expires_in": _ADMIN_TIMEOUT}
 
 
@@ -2158,7 +2172,7 @@ def _h_admin_deactivate_endpoint(req: "_Handler", _groups: tuple) -> dict:
     _require_unlocked()
     _admin_deactivate()
     from wireseal.security.audit import AuditLog
-    AuditLog(_AUDIT_PATH).log("admin-deactivate", {})
+    AuditLog(_AUDIT_PATH).log("admin-deactivate", {}, actor=_session.get("admin_id", "owner"))
     return {"ok": True}
 
 
@@ -2219,7 +2233,8 @@ def _h_admin_exec(req: "_Handler", _groups: tuple) -> dict:
         raise _ApiError(f"Execution failed: {exc}", 500)
 
     from wireseal.security.audit import AuditLog
-    AuditLog(_AUDIT_PATH).log("admin-exec", {"cmd": cmd[:3], "rc": result.returncode})
+    AuditLog(_AUDIT_PATH).log("admin-exec", {"cmd": cmd[:3], "rc": result.returncode},
+                              actor=_session.get("admin_id", "owner"))
 
     return {
         "returncode": result.returncode,
@@ -2305,7 +2320,8 @@ def _h_admin_service_action(req: "_Handler", groups: tuple) -> dict:
 
     from wireseal.security.audit import AuditLog
     AuditLog(_AUDIT_PATH).log(
-        "admin-service", {"service": service, "action": action, "rc": result.returncode}
+        "admin-service", {"service": service, "action": action, "rc": result.returncode},
+        actor=_session.get("admin_id", "owner"),
     )
 
     return {
@@ -2342,7 +2358,8 @@ def _h_admin_read_file(req: "_Handler", _groups: tuple) -> dict:
         raise _ApiError(err or "File not found or permission denied.", 404)
 
     from wireseal.security.audit import AuditLog
-    AuditLog(_AUDIT_PATH).log("admin-read-file", {"path": path})
+    AuditLog(_AUDIT_PATH).log("admin-read-file", {"path": path},
+                              actor=_session.get("admin_id", "owner"))
 
     return {"path": path, "content": result.stdout.decode("utf-8", errors="replace")}
 
@@ -2378,7 +2395,8 @@ def _h_admin_write_file(req: "_Handler", _groups: tuple) -> dict:
         raise _ApiError(err or "Write failed.", 500)
 
     from wireseal.security.audit import AuditLog
-    AuditLog(_AUDIT_PATH).log("admin-write-file", {"path": path})
+    AuditLog(_AUDIT_PATH).log("admin-write-file", {"path": path},
+                              actor=_session.get("admin_id", "owner"))
 
     return {"ok": True, "path": path}
 
@@ -2405,6 +2423,7 @@ def _h_rotate_client_keys(req: "_Handler", groups: tuple) -> dict:
     with _lock:
         vault      = _session["vault"]
         passphrase = _session["passphrase"]
+        _actor_id  = _session.get("admin_id", "owner")
 
     from wireseal.core.keygen         import generate_keypair
     from wireseal.core.psk            import generate_psk
@@ -2520,7 +2539,7 @@ def _h_rotate_client_keys(req: "_Handler", groups: tuple) -> dict:
         state.integrity["server"]          = server_hash
         vault.save(state, passphrase)
 
-        AuditLog(_AUDIT_PATH).log("rotate-client-keys", {"name": name})
+        AuditLog(_AUDIT_PATH).log("rotate-client-keys", {"name": name}, actor=_actor_id)
 
         with _lock:
             _session["cache"] = _refresh_cache(state)
@@ -2557,6 +2576,7 @@ def _h_rotate_server_keys(req: "_Handler", _groups: tuple) -> dict:
     with _lock:
         vault      = _session["vault"]
         passphrase = _session["passphrase"]
+        _actor_id  = _session.get("admin_id", "owner")
 
     from wireseal.core.keygen         import generate_keypair
     from wireseal.core.config_builder import ConfigBuilder
@@ -2669,7 +2689,7 @@ def _h_rotate_server_keys(req: "_Handler", _groups: tuple) -> dict:
         vault.save(state, passphrase)
 
         AuditLog(_AUDIT_PATH).log(
-            "rotate-server-keys", {"client_count": client_count}
+            "rotate-server-keys", {"client_count": client_count}, actor=_actor_id,
         )
 
         with _lock:
@@ -2945,7 +2965,7 @@ def _h_totp_enroll_confirm(req: "_Handler", _groups: tuple) -> dict:
     _pending_totp.pop(admin_id, None)
 
     from wireseal.security.audit import AuditLog
-    AuditLog(_AUDIT_PATH).log("totp-enrolled", {"admin_id": admin_id})
+    AuditLog(_AUDIT_PATH).log("totp-enrolled", {"admin_id": admin_id}, actor=admin_id)
 
     return {"ok": True, "backup_codes": backup_codes}
 
@@ -3100,7 +3120,7 @@ def _h_totp_verify_backup(req: "_Handler", _groups: tuple) -> dict:
             )
 
         _clear_unlock_failures(client_ip)
-        AuditLog(_AUDIT_PATH).log("unlock-backup-code", {"admin_id": admin_id})
+        AuditLog(_AUDIT_PATH).log("unlock-backup-code", {"admin_id": admin_id}, actor=admin_id)
         return {"ok": True, "role": admin_role}
     finally:
         wipe_string(passphrase_str)
@@ -3531,7 +3551,7 @@ def _cleanup_session(server: ThreadingHTTPServer) -> None:
         _session.update(vault=None, passphrase=None, cache=None)
     try:
         from wireseal.security.audit import AuditLog
-        AuditLog(_AUDIT_PATH).log("shutdown", {})
+        AuditLog(_AUDIT_PATH).log("shutdown", {}, actor="system")
     except Exception:
         pass
     server.server_close()
@@ -3637,7 +3657,7 @@ def serve(host: str = "127.0.0.1", port: int = 8080, gui: bool = True) -> None:
                 continue  # Already logged
             try:
                 from wireseal.security.audit import AuditLog
-                AuditLog(_AUDIT_PATH).log("auto-lock", {"reason": "inactivity"})
+                AuditLog(_AUDIT_PATH).log("auto-lock", {"reason": "inactivity"}, actor="system")
             except Exception:
                 pass
             if not _quiet:
