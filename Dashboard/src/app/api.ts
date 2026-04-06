@@ -157,6 +157,25 @@ export interface DnsStatus {
   dnsmasq_running: boolean;
 }
 
+export interface BackupConfig {
+  enabled: boolean;
+  destination: "local" | "ssh" | "webdav";
+  local_path: string | null;
+  ssh_host: string | null;
+  ssh_user: string | null;
+  ssh_path: string | null;
+  webdav_url: string | null;
+  webdav_user: string | null;
+  keep_n: number;
+  last_backup_at: number | null;
+}
+
+export interface BackupEntry {
+  path: string;
+  created_at: number;
+  size_bytes: number;
+}
+
 export interface SessionSummary {
   sessions: {
     start: string;
@@ -321,4 +340,20 @@ export const api = {
 
   removeDnsMapping: (hostname: string) =>
     _fetch<{ ok: boolean }>("DELETE", `/dns/${encodeURIComponent(hostname)}`),
+
+  // ── Backup (7.5 encrypted local backup) ──────────────────────────────────
+  getBackupConfig: (): Promise<{ backup_config: BackupConfig }> =>
+    _fetch<{ backup_config: BackupConfig }>("GET", "/backup/config"),
+
+  setBackupConfig: (cfg: Partial<BackupConfig>): Promise<{ ok: boolean }> =>
+    _fetch<{ ok: boolean }>("POST", "/backup/config", cfg),
+
+  triggerBackup: (): Promise<{ ok: boolean; path: string; size_bytes: number; created_at: number }> =>
+    _fetch<{ ok: boolean; path: string; size_bytes: number; created_at: number }>("POST", "/backup/trigger"),
+
+  listBackups: (): Promise<{ backups: BackupEntry[] }> =>
+    _fetch<{ backups: BackupEntry[] }>("GET", "/backup/list"),
+
+  restoreBackup: (backup_path: string, passphrase: string): Promise<{ ok: boolean; message: string }> =>
+    _fetch<{ ok: boolean; message: string }>("POST", "/backup/restore", { backup_path, passphrase }),
 };

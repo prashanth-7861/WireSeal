@@ -9,6 +9,7 @@ import { About } from "./pages/About";
 import { Admin } from "./pages/Admin";
 import { Admins } from "./pages/Admins";
 import { Dns } from "./pages/Dns";
+import { Backup } from "./pages/Backup";
 
 export const router = createBrowserRouter([
   {
@@ -23,6 +24,7 @@ export const router = createBrowserRouter([
       { path: "admin", Component: Admin },
       { path: "admins", Component: Admins },
       { path: "dns", Component: Dns },
+      { path: "backup", Component: Backup },
       { path: "about", Component: About },
     ],
   },

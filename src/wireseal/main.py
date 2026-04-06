@@ -2541,5 +2541,72 @@ def serve(host: str, port: int, no_gui: bool, background: bool, stop: bool) -> N
     _serve(host=host, port=port, gui=not no_gui)
 
 
+@cli.command("backup")
+@click.option("--dest", default=None, help="Override local destination path")
+def backup_cmd(dest: str | None) -> None:
+    """Create a timestamped vault backup."""
+    from wireseal.security.vault import Vault
+    from wireseal.backup.manager import BackupManager
+    vault_path = DEFAULT_VAULT_PATH
+    if not vault_path.exists():
+        click.echo("Error: vault not found. Run 'wireseal init' first.", err=True)
+        raise SystemExit(1)
+    passphrase = click.prompt("Passphrase", hide_input=True)
+    vault = Vault(vault_path)
+    pass_bytes = bytearray(passphrase.encode())
+    try:
+        with vault.open(pass_bytes) as state:
+            cfg = dict(state.data.get("backup_config", {}))
+        if dest:
+            cfg["destination"] = "local"
+            cfg["local_path"] = dest
+            cfg["enabled"] = True
+        if not cfg.get("local_path") and not cfg.get("ssh_host") and not cfg.get("webdav_url"):
+            click.echo(
+                "Error: no backup destination configured. "
+                "Set backup_config in the dashboard or use --dest.",
+                err=True,
+            )
+            raise SystemExit(1)
+        if not cfg.get("enabled") and not dest:
+            click.echo("Warning: backup is disabled in config. Proceeding anyway.", err=True)
+        cfg["enabled"] = True  # allow CLI trigger regardless of enabled flag
+        mgr = BackupManager()
+        entry = mgr.create_backup(vault_path, cfg)
+        click.echo(f"Backup created: {entry.path} ({entry.size_bytes} bytes)")
+    except SystemExit:
+        raise
+    except Exception as exc:
+        click.echo(f"Error: {exc}", err=True)
+        raise SystemExit(1)
+    finally:
+        for i in range(len(pass_bytes)):
+            pass_bytes[i] = 0
+
+
+@cli.command("restore")
+@click.argument("src")
+def restore_cmd(src: str) -> None:
+    """Restore vault from a backup file (verifies decryptable first)."""
+    from wireseal.backup.manager import BackupManager
+    vault_path = DEFAULT_VAULT_PATH
+    if not vault_path.exists():
+        click.echo("Error: vault not found.", err=True)
+        raise SystemExit(1)
+    passphrase = click.prompt("Passphrase for backup file", hide_input=True)
+    click.confirm(f"Replace live vault with {src!r}? This cannot be undone.", abort=True)
+    pass_bytes = bytearray(passphrase.encode())
+    try:
+        mgr = BackupManager()
+        mgr.restore_backup(src, vault_path, pass_bytes)
+        click.echo("Vault restored. Re-unlock to continue.")
+    except Exception as exc:
+        click.echo(f"Error: {exc}", err=True)
+        raise SystemExit(1)
+    finally:
+        for i in range(len(pass_bytes)):
+            pass_bytes[i] = 0
+
+
 if __name__ == "__main__":
     cli()

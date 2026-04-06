@@ -5,7 +5,7 @@ import {
   Lock, Play, Eye, EyeOff, AlertCircle, CheckCircle,
   Shield, Sparkles, Wifi, WifiOff, Circle, RotateCcw,
   KeyRound, Hash, ArrowLeft, Trash2, ShieldAlert, Timer,
-  Users, Globe,
+  Users, Globe, HardDrive,
 } from "lucide-react";
 import { api, VAULT_LOCKED_EVENT, type Status } from "../api";
 
@@ -336,6 +336,7 @@ export function Layout() {
     { to: "/security", label: "Security", icon: Shield },
     { to: "/admins", label: "Admins", icon: Users },
     { to: "/dns", label: "DNS", icon: Globe },
+    { to: "/backup", label: "Backup", icon: HardDrive },
     { to: "/settings", label: "Settings", icon: Settings },
     ...(adminActive ? [{ to: "/admin", label: "Admin Panel", icon: ShieldAlert, end: false }] : []),
     { to: "/about", label: "About", icon: Info },
