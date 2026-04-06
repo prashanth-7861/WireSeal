@@ -139,12 +139,12 @@ Plans:
 
 Plans:
 - [x] 07-01-PLAN.md — Schema migration + FORMAT_VERSION 3 keyslot vault (security/keyslot.py, security/vault.py, security/exceptions.py)
-- [ ] 07-02-PLAN.md — Multi-admin API, CLI commands, Dashboard Admins page (api.py, main.py, Dashboard)
-- [ ] 07-03-PLAN.md — TOTP 2FA: RFC 6238 stdlib-only, enrollment flow, backup codes (security/totp.py, api.py, Dashboard)
-- [ ] 07-04-PLAN.md — Ephemeral keys TTL + ExpiryWatcher thread + heartbeat endpoint (core/expiry.py, api.py, Dashboard)
-- [ ] 07-05-PLAN.md — Split-DNS via dnsmasq: config writer, reload, DNS settings page (dns/dnsmasq.py, api.py, Dashboard)
-- [ ] 07-06-PLAN.md — Encrypted local backup: local/SSH/WebDAV destinations, restore safety (backup/manager.py, api.py, Dashboard)
-- [ ] 07-07-PLAN.md — Integration hardening: audit actor fields, cross-feature tests, stress test
+- [x] 07-02-PLAN.md — Multi-admin API, CLI commands, Dashboard Admins page (api.py, main.py, Dashboard)
+- [x] 07-03-PLAN.md — TOTP 2FA: RFC 6238 stdlib-only, enrollment flow, backup codes (security/totp.py, api.py, Dashboard)
+- [x] 07-04-PLAN.md — Ephemeral keys TTL + ExpiryWatcher thread + heartbeat endpoint (core/expiry.py, api.py, Dashboard)
+- [x] 07-05-PLAN.md — Split-DNS via dnsmasq: config writer, reload, DNS settings page (dns/dnsmasq.py, api.py, Dashboard)
+- [x] 07-06-PLAN.md — Encrypted local backup: local/SSH/WebDAV destinations, restore safety (backup/manager.py, api.py, Dashboard)
+- [x] 07-07-PLAN.md — Integration hardening: audit actor fields, cross-feature tests, stress test
 
 ## Progress
 
@@ -159,4 +159,4 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 5 -> 6 -> 7
 | 4. CLI and Client Management | 3/4 | In Progress|  |
 | 5. Tests and Packaging | 3/3 | Complete    | 2026-03-21 |
 | 6. Dashboard Accuracy and Display Quality | 3/3 | Complete    | 2026-04-02 |
-| 7. ZTNA Foundation | 3/7 | In Progress|  |
+| 7. ZTNA Foundation | 7/7 | Complete | 2026-04-06 |

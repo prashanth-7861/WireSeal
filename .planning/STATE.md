@@ -10,11 +10,11 @@ See: .planning/PROJECT.md (updated 2026-03-17)
 ## Current Position
 
 Phase: 7 of 7 (ZTNA Foundation)
-Plan: 6 of 8 in current phase (07-06 complete)
+Plan: 7 of 8 in current phase (07-07 complete)
 Status: In Progress
-Last activity: 2026-04-06 -- Completed plan 07-06 (Encrypted Local Backup — BackupManager, API endpoints, Dashboard Backup page)
+Last activity: 2026-04-06 -- Completed plan 07-07 (Integration Hardening — audit actor fields, production Argon2id params, 22-test suite)
 
-Progress: [████████████░░░░░] 81% (22/27 plans complete)
+Progress: [█████████████░░░░] 85% (23/27 plans complete)
 
 ## Performance Metrics
 
@@ -42,6 +42,7 @@ Progress: [████████████░░░░░] 81% (22/27 plans
 | Phase 07-ztna-foundation P07-01 | 25 min | 4 tasks | 3 files modified, 1 created |
 | Phase 07-ztna-foundation P07-02 | 35 min | 3 tasks | 5 files modified, 2 created |
 | Phase 07-ztna-foundation P07-06 | 20 min | 3 tasks | 5 files modified, 3 created |
+| Phase 07-ztna-foundation P07-07 | 25 min | 2 tasks | 5 files modified, 3 created |
 
 ## Accumulated Context
 
@@ -113,6 +114,9 @@ Recent decisions affecting current work:
 - [07-06]: restore_backup uses os.replace (atomic on POSIX) via tmp file to avoid partial-write corruption; live vault never touched on wrong passphrase
 - [07-06]: webdav_pass excluded from GET /api/backup/config response to avoid credential exposure in dashboard
 - [07-02]: Admins cache snapshot added to _refresh_cache() so handlers read admin data without re-opening vault
+- [07-07]: _ARGON2_SEMAPHORE already existed in vault.py (uppercase); imported lazily in keyslot._derive_wrapping_key to extend coverage without circular import
+- [07-07]: unlock_keyslot accepts **_ignored_kdf_params so test code can pass _DEV_FAST_PARAMS uniformly; stored slot params always used for actual KDF
+- [07-07]: actor kwarg added to AuditLog.log(); injected into metadata only if not already present (preserves existing calls that embed actor directly)
 
 ### Pending Todos
 
@@ -127,5 +131,5 @@ None.
 ## Session Continuity
 
 Last session: 2026-04-06
-Stopped at: Completed 07-06-PLAN.md (Encrypted Local Backup — BackupManager, five API endpoints, Dashboard Backup page)
+Stopped at: Completed 07-07-PLAN.md (Integration Hardening — audit actor attribution, production Argon2id keyslot params, 22-test suite)
 Resume file: None
