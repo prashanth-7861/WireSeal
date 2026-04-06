@@ -74,7 +74,7 @@ FORMAT_VERSION_3 = 3  # v3: v2 payload + LUKS-style keyslots
 
 # CRITICAL: memory_cost is in KiB. 256 MiB = 262144 KiB. Passing 256 = catastrophically weak.
 ARGON2_MEMORY_COST_KIB = 262144  # 256 MiB
-ARGON2_TIME_COST = 10
+ARGON2_TIME_COST = 13            # Calibrated: ≥500ms minimum (512ms measured, time_cost=13)
 ARGON2_PARALLELISM = 4
 ARGON2_HASH_LEN = 32   # Argon2id master key length (HKDF input)
 ARGON2_SALT_LEN = 32   # v2: 256-bit salt (was 16 bytes in v1)

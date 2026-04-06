@@ -31,7 +31,7 @@ from .secret_types import SecretBytes
 # ---------------------------------------------------------------------------
 # Default Argon2id parameters for new keyslots (production values per SECURITY-SPEC §1.2)
 # ---------------------------------------------------------------------------
-KEYSLOT_TIME_COST = 10
+KEYSLOT_TIME_COST = 13           # Calibrated: ≥500ms minimum (512ms measured, time_cost=13)
 KEYSLOT_MEMORY_COST_KIB = 262144  # 256 MiB
 KEYSLOT_PARALLELISM = 4
 KEYSLOT_HASH_LEN = 32
