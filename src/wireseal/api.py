@@ -2754,6 +2754,8 @@ def _h_add_admin(req: "_Handler", _groups: tuple) -> dict:
     role       = body.get("role", "admin")
     if not admin_id or not passphrase:
         raise _ApiError("admin_id and passphrase required", 400)
+    if len(passphrase) < 12:
+        raise _ApiError("passphrase must be at least 12 characters", 400)
     if role not in ("owner", "admin", "readonly"):
         raise _ApiError("role must be owner, admin, or readonly", 400)
 
@@ -2782,7 +2784,8 @@ def _h_add_admin(req: "_Handler", _groups: tuple) -> dict:
     except Exception as exc:
         raise _ApiError(str(exc), 409)
     finally:
-        new_bytes[:] = b"\x00" * len(new_bytes)
+        from wireseal.security.secrets_wipe import wipe_bytes
+        wipe_bytes(new_bytes)
 
     from wireseal.security.audit import AuditLog
     AuditLog(_AUDIT_PATH).log("add-admin", {
@@ -2858,6 +2861,8 @@ def _h_change_admin_passphrase(req: "_Handler", groups: tuple) -> dict:
     old_passphrase = body.get("old_passphrase", "")
     if not new_passphrase:
         raise _ApiError("new_passphrase required", 400)
+    if len(new_passphrase) < 12:
+        raise _ApiError("new_passphrase must be at least 12 characters", 400)
 
     # Non-owner changing their own passphrase must provide old_passphrase
     if acting_role != "owner" and not old_passphrase:
@@ -2888,8 +2893,9 @@ def _h_change_admin_passphrase(req: "_Handler", groups: tuple) -> dict:
     except Exception as exc:
         raise _ApiError(str(exc), 400)
     finally:
-        new_bytes[:] = b"\x00" * len(new_bytes)
-        old_bytes[:] = b"\x00" * len(old_bytes)
+        from wireseal.security.secrets_wipe import wipe_bytes
+        wipe_bytes(new_bytes)
+        wipe_bytes(old_bytes)
 
     from wireseal.security.audit import AuditLog
     AuditLog(_AUDIT_PATH).log("change-passphrase", {
@@ -3327,7 +3333,7 @@ def _h_backup_restore(req, _groups):
     if admin_id is None:
         admin_id = session_admin_id
     vault_path = vault._path
-    from wireseal.security.secrets_wipe import wipe_string
+    from wireseal.security.secrets_wipe import wipe_bytes, wipe_string
     passphrase_ba = bytearray(passphrase_str.encode("utf-8"))
     try:
         from wireseal.security.exceptions import VaultUnlockError
@@ -3342,8 +3348,7 @@ def _h_backup_restore(req, _groups):
             raise _ApiError("Restore failed — wrong passphrase or corrupted backup.", 401)
         raise _ApiError(str(exc), 500)
     finally:
-        for i in range(len(passphrase_ba)):
-            passphrase_ba[i] = 0
+        wipe_bytes(passphrase_ba)
         wipe_string(passphrase_str)
     # Lock the in-memory vault — caller must re-unlock with the restored vault
     with _lock:
