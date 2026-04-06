@@ -41,12 +41,12 @@ passphrase, no cryptographic material is exposed.
 ### Vault & Encryption
 - **Zero plaintext secrets on disk** — all WireGuard private keys and PSKs live only inside
   the encrypted vault; config files never contain raw key material
-- **Dual-layer AEAD vault** (FORMAT_VERSION 2):
-  - Argon2id KDF: `time_cost=10`, `memory_cost=256 MiB`, `parallelism=4`
+- **Dual-layer AEAD vault** (FORMAT_VERSION 3 with LUKS-style keyslots):
+  - Argon2id KDF: `time_cost=13`, `memory_cost=256 MiB`, `parallelism=4` — calibrated to ≥500ms
   - HKDF-SHA512 key separation — two independent 256-bit subkeys
   - **Layer 1 (inner): ChaCha20-Poly1305** — stream cipher, quantum-resistant family
   - **Layer 2 (outer): AES-256-GCM-SIV** — nonce-misuse resistant
-  - Both layers authenticated with the full 76-byte header as AAD
+  - Both layers authenticated with the full header as AAD
 - **Per-peer pre-shared keys** (os.urandom(32)) for additional post-quantum resistance
 - **Atomic writes** — every vault and config update uses `os.replace()`, never partially written
 
@@ -57,6 +57,21 @@ passphrase, no cryptographic material is exposed.
 - **Automated network setup** — IP forwarding, firewalld port opening, and OpenSSH server
   configured automatically during `wireseal init`
 - **Optional DuckDNS** dynamic DNS with 2-of-3 IP consensus
+
+### Zero-Trust Network Access (ZTNA — v0.7)
+- **Multi-admin vault** — LUKS-style keyslots (FORMAT_VERSION 3); each admin holds an
+  independent 144-byte keyslot with their own Argon2id-derived wrapping key
+- **Role-based access** — `owner`, `admin`, and `readonly` roles enforced at every API endpoint
+- **TOTP 2FA** (RFC 6238, stdlib-only) — per-admin TOTP with QR enrollment, backup codes
+  hashed with PBKDF2-HMAC-SHA256, and atomic anti-replay protection
+- **Ephemeral client keys** — optional TTL on any peer; heartbeat resets the timer;
+  expired peers are automatically removed from WireGuard by a background watcher
+- **Split-DNS** — dnsmasq config writer maps internal hostnames to VPN IPs;
+  hot-reloaded via SIGHUP; hostname and IP validated against strict allowlists
+- **Encrypted remote backup** — push vault snapshots to local path, SSH (rsync), or
+  WebDAV; two-phase restore verifies decryption before touching the live vault
+- **Admin management API & Dashboard** — add/remove admins, change passphrases, view
+  roles; full Admin, TOTP, DNS, and Backup pages in the dashboard
 
 ### Production Hardening
 - **API rate limiting** — sliding-window throttle on unlock endpoints (5 attempts per
@@ -77,6 +92,8 @@ passphrase, no cryptographic material is exposed.
 - **Real-time status** — API server and WireGuard tunnel indicators in the sidebar
 - **Client management** — add, remove, rotate keys, view QR codes, download `.conf` files
 - **Live peers table** with connection status, handshake times, and transfer stats
+- **Admin & TOTP pages** — manage admins, enroll/disable TOTP, view backup codes
+- **DNS & Backup pages** — manage split-DNS mappings, configure and trigger vault backups
 - **PIN management** — set, remove, and use PIN from the lock screen and sidebar
 - **Enhanced audit log** — Events, Sessions, and File Activity (SFTP) tabs
 - **System tray icon** — Open Dashboard, Stop Server, peer count, and Quit
