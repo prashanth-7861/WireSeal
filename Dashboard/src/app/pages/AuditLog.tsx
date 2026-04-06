@@ -68,11 +68,14 @@ const FILE_OP_LABELS: Record<string, { label: string; icon: typeof FileText; col
 
 type Tab = "events" | "sessions" | "files";
 
+// Module-level cache — survives navigation, avoids blank loading flash
+let _auditCache: { entries: AuditEntry[]; summary: SessionSummary | null; fileEvents: FileActivityEvent[] } | null = null;
+
 export function AuditLog() {
-  const [entries, setEntries] = useState<AuditEntry[]>([]);
-  const [summary, setSummary] = useState<SessionSummary | null>(null);
-  const [fileEvents, setFileEvents] = useState<FileActivityEvent[]>([]);
-  const [loading, setLoading] = useState(true);
+  const [entries, setEntries] = useState<AuditEntry[]>(_auditCache?.entries ?? []);
+  const [summary, setSummary] = useState<SessionSummary | null>(_auditCache?.summary ?? null);
+  const [fileEvents, setFileEvents] = useState<FileActivityEvent[]>(_auditCache?.fileEvents ?? []);
+  const [loading, setLoading] = useState(_auditCache === null);
   const [error, setError] = useState("");
   const [tab, setTab] = useState<Tab>("events");
 
@@ -84,6 +87,7 @@ export function AuditLog() {
         api.sessionSummary(),
         api.fileActivity(),
       ]);
+      _auditCache = { entries: logRes.entries, summary: sumRes, fileEvents: fileRes.events };
       setEntries(logRes.entries);
       setSummary(sumRes);
       setFileEvents(fileRes.events);

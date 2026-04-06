@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from "react";
-import { NavLink, Outlet, useNavigate } from "react-router";
+import { NavLink, Outlet, useNavigate, useLocation } from "react-router";
 import {
   Server, ScrollText, Monitor, Settings, LogOut, Info,
   Lock, Play, Eye, EyeOff, AlertCircle, CheckCircle,
@@ -13,6 +13,7 @@ type VaultState = "loading" | "uninitialized" | "locked" | "unlocked";
 
 export function Layout() {
   const navigate = useNavigate();
+  const location = useLocation();
   const [vaultState, setVaultState] = useState<VaultState>("loading");
 
   // Passphrase dialog state
@@ -99,13 +100,13 @@ export function Layout() {
         const s = await api.adminStatus();
         setAdminActive(s.active);
         setAdminExpiresIn(s.expires_in);
-        if (!s.active) navigate("/");   // redirect away from /admin if expired
+        if (!s.active && location.pathname === "/admin") navigate("/");   // redirect away from /admin if expired
       } catch { /* ignore */ }
     };
     poll();
     const id = window.setInterval(poll, 30_000);
     return () => clearInterval(id);
-  }, [vaultState, navigate]);
+  }, [vaultState, navigate, location.pathname]);
 
   // ── Listen for 401 events from any page's API calls ───────────────────────
   useEffect(() => {

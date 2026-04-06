@@ -6,9 +6,12 @@ import {
 } from "lucide-react";
 import { api, type SecurityStatus } from "../api";
 
+// Module-level cache — survives navigation, avoids blank loading flash
+let _securityCache: SecurityStatus | null = null;
+
 export function Security() {
-  const [status, setStatus] = useState<SecurityStatus | null>(null);
-  const [loading, setLoading] = useState(true);
+  const [status, setStatus] = useState<SecurityStatus | null>(_securityCache);
+  const [loading, setLoading] = useState(_securityCache === null);
   const [error, setError] = useState("");
   const [hardening, setHardening] = useState(false);
   const [hardenResult, setHardenResult] = useState<string[] | null>(null);
@@ -18,6 +21,7 @@ export function Security() {
     setLoading(true);
     try {
       const s = await api.securityStatus();
+      _securityCache = s;
       setStatus(s);
       setLastScanned(new Date());
       setError("");

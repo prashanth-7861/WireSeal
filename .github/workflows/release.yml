@@ -418,6 +418,10 @@ jobs:
       contents: write
 
     steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: scripts
+
       - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
@@ -432,11 +436,6 @@ jobs:
           cd dist/release
           sha256sum * > sha256sums.txt
           echo "=== sha256sums.txt ===" && cat sha256sums.txt
-
-      - uses: actions/checkout@v4
-        with:
-          sparse-checkout: scripts
-          clean: false
 
       - name: Copy install scripts to release
         run: |

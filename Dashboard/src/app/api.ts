@@ -356,4 +356,7 @@ export const api = {
 
   restoreBackup: (backup_path: string, passphrase: string): Promise<{ ok: boolean; message: string }> =>
     _fetch<{ ok: boolean; message: string }>("POST", "/backup/restore", { backup_path, passphrase }),
+
+  health: (): Promise<{ status: string; vault_initialized: boolean; vault_locked: boolean; uptime_seconds: number }> =>
+    _fetch<{ status: string; vault_initialized: boolean; vault_locked: boolean; uptime_seconds: number }>("GET", "/health"),
 };

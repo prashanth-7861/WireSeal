@@ -8,6 +8,9 @@ import { ClientTtlBadge } from "../components/ClientTtlBadge";
 
 const QR_TTL = 60; // seconds before QR auto-dismisses
 
+// Module-level cache — survives navigation, avoids blank loading flash
+let _clientsCache: Client[] | null = null;
+
 interface QrPanel {
   name: string;
   qr: string;
@@ -16,8 +19,8 @@ interface QrPanel {
 }
 
 export function Clients() {
-  const [clients, setClients] = useState<Client[]>([]);
-  const [loading, setLoading] = useState(true);
+  const [clients, setClients] = useState<Client[]>(_clientsCache ?? []);
+  const [loading, setLoading] = useState(_clientsCache === null);
   const [error, setError] = useState("");
   const [success, setSuccess] = useState("");
   const [peerStatus, setPeerStatus] = useState<Status | null>(null);
@@ -54,7 +57,9 @@ export function Clients() {
   // ── Load clients ──────────────────────────────────────────────────────────
   const fetchClients = useCallback(async () => {
     try {
-      setClients(await api.listClients());
+      const data = await api.listClients();
+      _clientsCache = data;
+      setClients(data);
       setError("");
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : "Failed to load clients");
@@ -145,7 +150,9 @@ export function Clients() {
       const a = document.createElement("a");
       a.href = url;
       a.download = `${name}.conf`;
+      document.body.appendChild(a);
       a.click();
+      document.body.removeChild(a);
       URL.revokeObjectURL(url);
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : "Failed to download config");

@@ -17,10 +17,13 @@ function formatDate(ts: number): string {
   return new Date(ts * 1000).toLocaleString();
 }
 
+// Module-level cache — survives navigation, avoids blank loading flash
+let _backupCache: { config: BackupConfig; backups: BackupEntry[] } | null = null;
+
 export function Backup() {
-  const [config, setConfig] = useState<BackupConfig | null>(null);
-  const [backups, setBackups] = useState<BackupEntry[]>([]);
-  const [loading, setLoading] = useState(true);
+  const [config, setConfig] = useState<BackupConfig | null>(_backupCache?.config ?? null);
+  const [backups, setBackups] = useState<BackupEntry[]>(_backupCache?.backups ?? []);
+  const [loading, setLoading] = useState(_backupCache === null);
   const [error, setError] = useState<string | null>(null);
 
   // Config form state
@@ -53,6 +56,7 @@ export function Backup() {
     Promise.all([api.getBackupConfig(), api.listBackups()])
       .then(([cfgRes, listRes]) => {
         const c = cfgRes.backup_config;
+        _backupCache = { config: c, backups: listRes.backups };
         setConfig(c);
         setDest((c.destination as "local" | "ssh" | "webdav") ?? "local");
         setLocalPath(c.local_path ?? "");

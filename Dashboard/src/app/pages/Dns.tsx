@@ -2,9 +2,12 @@ import { useState, useEffect } from "react";
 import { Globe, Plus, Trash2, AlertTriangle } from "lucide-react";
 import { api } from "../api";
 
+// Module-level cache — survives navigation, avoids blank loading flash
+let _dnsCache: { mappings: Record<string, string>; dnsmasqAvailable: boolean } | null = null;
+
 export function Dns() {
-  const [mappings, setMappings] = useState<Record<string, string>>({});
-  const [dnsmasqAvailable, setDnsmasqAvailable] = useState(false);
+  const [mappings, setMappings] = useState<Record<string, string>>(_dnsCache?.mappings ?? {});
+  const [dnsmasqAvailable, setDnsmasqAvailable] = useState(_dnsCache?.dnsmasqAvailable ?? false);
   const [newHostname, setNewHostname] = useState("");
   const [newIp, setNewIp] = useState("");
   const [error, setError] = useState("");
@@ -13,6 +16,7 @@ export function Dns() {
   const fetchDns = async () => {
     try {
       const res = await api.getDns();
+      _dnsCache = { mappings: res.mappings, dnsmasqAvailable: res.dnsmasq_available };
       setMappings(res.mappings);
       setDnsmasqAvailable(res.dnsmasq_available);
     } catch {

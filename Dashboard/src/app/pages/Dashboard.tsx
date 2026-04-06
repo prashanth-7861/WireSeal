@@ -34,10 +34,17 @@ export function Dashboard() {
   // ── Uptime counter ────────────────────────────────────────────────────────
   useEffect(() => {
     if (!status?.running) { uptimeRef.current = 0; setUptime(0); return; }
-    const id = window.setInterval(() => {
-      uptimeRef.current += 1;
-      setUptime(uptimeRef.current);
-    }, 1000);
+    let id: number;
+    // Seed from real server uptime so navigation doesn't reset the counter
+    api.health().then((h) => {
+      uptimeRef.current = h.uptime_seconds;
+      setUptime(h.uptime_seconds);
+    }).catch(() => { /* keep current value if health unavailable */ }).finally(() => {
+      id = window.setInterval(() => {
+        uptimeRef.current += 1;
+        setUptime(uptimeRef.current);
+      }, 1000);
+    });
     return () => clearInterval(id);
   }, [status?.running]);
 

@@ -3,9 +3,12 @@ import { api } from "../api";
 import type { AdminInfo } from "../api";
 import { AdminRoleBadge } from "../components/AdminRoleBadge";
 
+// Module-level cache — survives navigation, avoids blank loading flash
+let _adminsCache: AdminInfo[] | null = null;
+
 export function Admins() {
-  const [admins, setAdmins] = useState<AdminInfo[]>([]);
-  const [loading, setLoading] = useState(true);
+  const [admins, setAdmins] = useState<AdminInfo[]>(_adminsCache ?? []);
+  const [loading, setLoading] = useState(_adminsCache === null);
   const [error, setError] = useState<string | null>(null);
 
   // Add form state
@@ -18,7 +21,7 @@ export function Admins() {
   const load = () => {
     setLoading(true);
     api.listAdmins()
-      .then(data => { setAdmins(data.admins); setError(null); })
+      .then(data => { _adminsCache = data.admins; setAdmins(data.admins); setError(null); })
       .catch((err: unknown) => setError(err instanceof Error ? err.message : "Failed to load admins"))
       .finally(() => setLoading(false));
   };
