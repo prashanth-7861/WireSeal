@@ -6,10 +6,21 @@ import {
 } from "lucide-react";
 import { api, type Status } from "../api";
 
+// Module-level — survives navigation between pages
+let _statusCache: Status | null = null;
+// Snapshot of server uptime at the moment we last fetched it, plus when we fetched it
+let _uptimeSnap: { uptime_seconds: number; fetchedAt: number } | null = null;
+
+function _computeUptime(): number {
+  if (!_uptimeSnap) return 0;
+  return _uptimeSnap.uptime_seconds + Math.floor((Date.now() - _uptimeSnap.fetchedAt) / 1000);
+}
+
 export function Dashboard() {
-  const [status, setStatus] = useState<Status | null>(null);
-  const [uptime, setUptime] = useState(0);
-  const uptimeRef = useRef(0);
+  const [status, setStatus] = useState<Status | null>(_statusCache);
+  const initialUptime = _computeUptime();
+  const [uptime, setUptime] = useState(initialUptime);
+  const uptimeRef = useRef(initialUptime);
   const [stopping, setStopping] = useState(false);
   const [starting, setStarting] = useState(false);
   const [error, setError] = useState("");
@@ -18,6 +29,7 @@ export function Dashboard() {
   const fetchStatus = useCallback(async () => {
     try {
       const s = await api.status();
+      _statusCache = s;
       setStatus(s);
       setError("");
     } catch {
@@ -33,17 +45,39 @@ export function Dashboard() {
 
   // ── Uptime counter ────────────────────────────────────────────────────────
   useEffect(() => {
-    if (!status?.running) { uptimeRef.current = 0; setUptime(0); return; }
-    let id: number;
-    // Seed from real server uptime so navigation doesn't reset the counter
-    api.health().then((h) => {
-      uptimeRef.current = h.uptime_seconds;
-      setUptime(h.uptime_seconds);
-    }).catch(() => { /* keep current value if health unavailable */ }).finally(() => {
-      id = window.setInterval(() => {
-        uptimeRef.current += 1;
-        setUptime(uptimeRef.current);
+    if (!status?.running) {
+      _uptimeSnap = null;
+      uptimeRef.current = 0;
+      setUptime(0);
+      return;
+    }
+
+    const startTicking = () => {
+      return window.setInterval(() => {
+        const v = _computeUptime();
+        uptimeRef.current = v;
+        setUptime(v);
       }, 1000);
+    };
+
+    if (_uptimeSnap) {
+      // Already have a snapshot — resume counting immediately, no flash
+      const id = startTicking();
+      return () => clearInterval(id);
+    }
+
+    // First time running: fetch real uptime from server, then tick
+    let id: number;
+    api.health().then((h) => {
+      _uptimeSnap = { uptime_seconds: h.uptime_seconds, fetchedAt: Date.now() };
+      const v = _computeUptime();
+      uptimeRef.current = v;
+      setUptime(v);
+    }).catch(() => {
+      // Fallback: start counting from 0 if health unavailable
+      _uptimeSnap = { uptime_seconds: 0, fetchedAt: Date.now() };
+    }).finally(() => {
+      id = startTicking();
     });
     return () => clearInterval(id);
   }, [status?.running]);
