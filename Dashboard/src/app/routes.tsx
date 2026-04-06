@@ -8,6 +8,7 @@ import { Settings } from "./pages/Settings";
 import { About } from "./pages/About";
 import { Admin } from "./pages/Admin";
 import { Admins } from "./pages/Admins";
+import { Dns } from "./pages/Dns";
 
 export const router = createBrowserRouter([
   {
@@ -21,6 +22,7 @@ export const router = createBrowserRouter([
       { path: "settings", Component: Settings },
       { path: "admin", Component: Admin },
       { path: "admins", Component: Admins },
+      { path: "dns", Component: Dns },
       { path: "about", Component: About },
     ],
   },

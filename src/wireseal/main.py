@@ -975,6 +975,99 @@ def remove_client(name: str) -> None:
         wipe_string(passphrase_str)
 
 
+@cli.command("dns-add")
+@click.argument("hostname")
+@click.argument("ip")
+@click.pass_context
+def dns_add(ctx: click.Context, hostname: str, ip: str) -> None:
+    """Map a hostname to an IP for VPN clients (split-DNS)."""
+    from wireseal.dns.dnsmasq import DnsmasqManager, validate_hostname, validate_ip
+    try:
+        validate_hostname(hostname)
+        validate_ip(ip)
+    except ValueError as e:
+        click.echo(f"Error: {e}", err=True)
+        ctx.exit(1)
+        return
+    passphrase_str: str = click.prompt("Vault passphrase", hide_input=True)
+    try:
+        from wireseal.security.secret_types import SecretBytes
+        from wireseal.security.vault import Vault
+        passphrase = SecretBytes(passphrase_str.encode())
+        vault = Vault(DEFAULT_VAULT_PATH)
+        with vault.open(passphrase) as state:
+            state.data.setdefault("dns_mappings", {})[hostname] = ip
+            mappings = dict(state.data["dns_mappings"])
+            vault.save(state, passphrase)
+        mgr = DnsmasqManager("wg0")
+        reloaded = False
+        if mgr.is_available():
+            mgr.write_config(mappings)
+            reloaded = mgr.reload()
+        click.echo(f"Added: {hostname} -> {ip}")
+        if reloaded:
+            click.echo("dnsmasq reloaded.")
+        elif mgr.is_available():
+            click.echo("Warning: dnsmasq reload failed.")
+        else:
+            click.echo("Note: dnsmasq not found — mapping saved but not active.")
+    finally:
+        passphrase_str = "0" * len(passphrase_str)
+
+
+@cli.command("dns-remove")
+@click.argument("hostname")
+@click.pass_context
+def dns_remove(ctx: click.Context, hostname: str) -> None:
+    """Remove a split-DNS hostname mapping."""
+    passphrase_str: str = click.prompt("Vault passphrase", hide_input=True)
+    try:
+        from wireseal.security.secret_types import SecretBytes
+        from wireseal.security.vault import Vault
+        passphrase = SecretBytes(passphrase_str.encode())
+        vault = Vault(DEFAULT_VAULT_PATH)
+        with vault.open(passphrase) as state:
+            if hostname not in state.data.get("dns_mappings", {}):
+                click.echo(f"Error: hostname '{hostname}' not found.", err=True)
+                ctx.exit(1)
+                return
+            del state.data["dns_mappings"][hostname]
+            mappings = dict(state.data.get("dns_mappings", {}))
+            vault.save(state, passphrase)
+        from wireseal.dns.dnsmasq import DnsmasqManager
+        mgr = DnsmasqManager("wg0")
+        if mgr.is_available():
+            mgr.write_config(mappings)
+            mgr.reload()
+        click.echo(f"Removed: {hostname}")
+    finally:
+        passphrase_str = "0" * len(passphrase_str)
+
+
+@cli.command("dns-list")
+@click.pass_context
+def dns_list(ctx: click.Context) -> None:
+    """List all split-DNS hostname mappings."""
+    passphrase_str: str = click.prompt("Vault passphrase", hide_input=True)
+    try:
+        from wireseal.security.secret_types import SecretBytes
+        from wireseal.security.vault import Vault
+        passphrase = SecretBytes(passphrase_str.encode())
+        vault = Vault(DEFAULT_VAULT_PATH)
+        with vault.open(passphrase) as state:
+            mappings: dict = state.data.get("dns_mappings", {})
+        if not mappings:
+            click.echo("No DNS mappings configured.")
+            return
+        col_w = max(len(h) for h in mappings) + 2
+        click.echo(f"{'HOSTNAME':<{col_w}}  IP ADDRESS")
+        click.echo("-" * (col_w + 16))
+        for hostname, ip in sorted(mappings.items()):
+            click.echo(f"{hostname:<{col_w}}  {ip}")
+    finally:
+        passphrase_str = "0" * len(passphrase_str)
+
+
 @cli.command("list-clients")
 def list_clients() -> None:
     """List all registered WireGuard clients (name, IP, last handshake)."""

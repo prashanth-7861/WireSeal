@@ -151,6 +151,12 @@ export interface ExecResult {
   stderr: string;
 }
 
+export interface DnsStatus {
+  mappings: Record<string, string>;
+  dnsmasq_available: boolean;
+  dnsmasq_running: boolean;
+}
+
 export interface SessionSummary {
   sessions: {
     start: string;
@@ -302,4 +308,17 @@ export const api = {
 
   changeAdminPassphrase: (admin_id: string, new_passphrase: string): Promise<void> =>
     _fetch<void>("POST", `/admins/${encodeURIComponent(admin_id)}/change-passphrase`, { new_passphrase }),
+
+  // ── Split-DNS (7.4) ───────────────────────────────────────────────────────
+  getDns: () =>
+    _fetch<DnsStatus>("GET", "/dns"),
+
+  setDns: (mappings: Record<string, string>) =>
+    _fetch<{ ok: boolean; reloaded: boolean }>("POST", "/dns", { mappings }),
+
+  addDnsMapping: (hostname: string, ip: string) =>
+    _fetch<{ ok: boolean }>("POST", `/dns/${encodeURIComponent(hostname)}`, { ip }),
+
+  removeDnsMapping: (hostname: string) =>
+    _fetch<{ ok: boolean }>("DELETE", `/dns/${encodeURIComponent(hostname)}`),
 };
