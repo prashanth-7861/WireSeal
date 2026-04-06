@@ -88,20 +88,48 @@ def generate_backup_codes(n: int = 8) -> list[str]:
 
 
 def hash_backup_code(code: str) -> str:
-    """SHA-256 hex digest of a backup code (stored in vault instead of plaintext)."""
-    return hashlib.sha256(code.encode("ascii")).hexdigest()
+    """Hash a backup code with PBKDF2-HMAC-SHA256 + random 16-byte salt.
+
+    Stored format: 'pbkdf2:sha256:100000:<salt_hex>:<hash_hex>'
+    The prefix ensures future algorithm changes are detectable.
+    """
+    salt = os.urandom(16)
+    dk = hashlib.pbkdf2_hmac(
+        "sha256",
+        code.upper().strip().encode("ascii"),
+        salt,
+        100_000,
+    )
+    return f"pbkdf2:sha256:100000:{salt.hex()}:{dk.hex()}"
+
+
+def _verify_one_backup(code_normalized: str, stored: str) -> bool:
+    """Constant-time verify code against one stored hash (PBKDF2 or legacy SHA-256)."""
+    if stored.startswith("pbkdf2:sha256:"):
+        try:
+            _, _, iters_str, salt_hex, hash_hex = stored.split(":", 4)
+            salt = bytes.fromhex(salt_hex)
+            expected = bytes.fromhex(hash_hex)
+            actual = hashlib.pbkdf2_hmac(
+                "sha256", code_normalized.encode("ascii"), salt, int(iters_str)
+            )
+            return hmac.compare_digest(actual, expected)
+        except Exception:
+            return False
+    # Legacy: plain SHA-256 hex string (backward compat for existing vaults)
+    legacy_hash = hashlib.sha256(code_normalized.encode("ascii")).hexdigest()
+    return hmac.compare_digest(legacy_hash, stored)
 
 
 def verify_backup_code(code: str, hashed_codes: list[str]) -> str | None:
     """Verify a backup code against a list of hashed codes.
 
     Returns the matched hash string (for removal from vault) or None if no
-    match.  Constant-time comparison against all codes to prevent timing
-    attacks — we iterate the full list even after a match.
+    match.  Iterates the full list even after a match to resist timing leaks.
     """
-    code_hash = hash_backup_code(code.upper().strip())
+    code_normalized = code.upper().strip()
     matched: str | None = None
     for h in hashed_codes:
-        if hmac.compare_digest(code_hash, h):
+        if _verify_one_backup(code_normalized, h):
             matched = h
     return matched

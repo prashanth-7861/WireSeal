@@ -11,6 +11,7 @@ never touches the live vault file.
 """
 from __future__ import annotations
 
+import re
 import shutil
 import subprocess
 import urllib.request
@@ -19,6 +20,24 @@ import urllib.error
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+
+# Allowlist patterns for SSH target components — reject anything that could
+# inject extra rsync arguments or confuse host:path parsing.
+_SSH_HOST_RE = re.compile(r'^[a-zA-Z0-9][a-zA-Z0-9.\-]{0,252}$')
+_SSH_USER_RE = re.compile(r'^[a-zA-Z0-9._\-]{1,64}$')
+_SSH_PATH_RE = re.compile(r'^[a-zA-Z0-9/_.\-]{1,1024}$')
+
+
+def _validate_ssh_component(value: str, name: str, pattern: re.Pattern) -> None:
+    """Raise ValueError if an SSH target component contains unsafe characters."""
+    if not value:
+        raise ValueError(f"backup_config.{name} is required")
+    if ".." in value:
+        raise ValueError(f"backup_config.{name} must not contain '..'")
+    if not pattern.match(value):
+        raise ValueError(
+            f"backup_config.{name} contains invalid characters: {value!r}"
+        )
 
 
 @dataclass
@@ -84,11 +103,15 @@ class BackupManager:
         )
 
     def _create_ssh(self, vault_path: Path, cfg: dict, fname: str) -> BackupEntry:
-        host = cfg.get("ssh_host")
-        user = cfg.get("ssh_user")
-        remote_path = cfg.get("ssh_path")
+        host = cfg.get("ssh_host", "")
+        user = cfg.get("ssh_user", "")
+        remote_path = cfg.get("ssh_path", "")
         if not host or not remote_path:
             raise ValueError("backup_config.ssh_host and ssh_path required for SSH destination")
+        _validate_ssh_component(host, "ssh_host", _SSH_HOST_RE)
+        _validate_ssh_component(remote_path, "ssh_path", _SSH_PATH_RE)
+        if user:
+            _validate_ssh_component(user, "ssh_user", _SSH_USER_RE)
         target = f"{user}@{host}:{remote_path}/{fname}" if user else f"{host}:{remote_path}/{fname}"
         result = subprocess.run(
             ["rsync", "-az", str(vault_path), target],

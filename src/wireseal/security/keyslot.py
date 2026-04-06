@@ -191,8 +191,11 @@ def find_and_unlock(store: KeyslotStore, admin_id: str,
 def serialize_keyslot(slot: Keyslot) -> bytes:
     """Serialize a keyslot to exactly 144 bytes."""
     admin_id_bytes = slot.admin_id.encode("utf-8")
-    # Truncate or pad to exactly 40 bytes
-    admin_id_padded = admin_id_bytes[:_ADMIN_ID_FIELD_LEN].ljust(_ADMIN_ID_FIELD_LEN, b"\x00")
+    if len(admin_id_bytes) > _ADMIN_ID_FIELD_LEN:
+        raise ValueError(
+            f"admin_id too long: {len(admin_id_bytes)} bytes (max {_ADMIN_ID_FIELD_LEN})"
+        )
+    admin_id_padded = admin_id_bytes.ljust(_ADMIN_ID_FIELD_LEN, b"\x00")
 
     header = _SLOT_STRUCT.pack(slot.memory_cost, slot.time_cost, slot.parallelism)
     result = slot.salt + header + slot.nonce + slot.wrapped_key + admin_id_padded
@@ -209,6 +212,19 @@ def deserialize_keyslot(data: bytes, *, role: str = "admin") -> Keyslot:
 
     salt = data[0:32]
     memory_cost, time_cost, parallelism = _SLOT_STRUCT.unpack(data[32:44])
+
+    # Bounds-check KDF parameters to prevent absurdly weak keys on restore.
+    _MIN_MEM_KIB = 65_536   # 64 MiB
+    _MIN_TIME = 1
+    if memory_cost < _MIN_MEM_KIB:
+        raise ValueError(
+            f"Keyslot memory_cost {memory_cost} KiB is below minimum {_MIN_MEM_KIB}"
+        )
+    if time_cost < _MIN_TIME:
+        raise ValueError(f"Keyslot time_cost {time_cost} is below minimum {_MIN_TIME}")
+    if parallelism < 1 or parallelism > 255:
+        raise ValueError(f"Keyslot parallelism {parallelism} out of range [1, 255]")
+
     nonce = data[44:56]
     wrapped_key = data[56:104]
     admin_id_raw = data[104:144]

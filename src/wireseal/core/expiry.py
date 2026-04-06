@@ -38,11 +38,13 @@ class ExpiryWatcher(threading.Thread):
         self._stop_event.set()
 
     def run(self):
+        import logging
+        _log = logging.getLogger(__name__)
         while not self._stop_event.wait(self._interval):
             try:
                 self._check_expiry()
-            except Exception:
-                pass  # Never crash the watcher thread
+            except Exception as exc:
+                _log.warning("ExpiryWatcher: unhandled error in _check_expiry: %s", exc)
 
     def _check_expiry(self):
         import time as _time

@@ -147,6 +147,10 @@ _UNLOCK_MAX    = 5     # max failures per window
 _heartbeat_cooldown: dict[str, float] = {}
 _HEARTBEAT_MIN_INTERVAL = 30.0  # seconds between heartbeat resets per client
 
+# TOTP anti-replay: maps admin_id → set of recently-used 6-digit codes.
+# Guarded by _lock.  Cleared on lock to prevent unbounded growth.
+_totp_used_codes: dict[str, set[str]] = {}
+
 # Maps peer public_key → last_handshake_seconds from previous _h_status call.
 # Used to detect new handshake events for the audit log (DASH-06).
 _peer_handshake_cache: dict[str, int] = {}
@@ -851,7 +855,12 @@ def _h_unlock(req: "_Handler", _groups: tuple) -> dict:
                     if not totp_code:
                         raise _ApiError("totp_code required", 401)
                     totp_secret = b32_to_secret(totp_b32)
-                    if not verify_totp(totp_secret, str(totp_code)):
+                    totp_str = str(totp_code)
+                    # Hold _lock during check+record to make anti-replay atomic.
+                    with _lock:
+                        used_set = _totp_used_codes.setdefault(admin_id, set())
+                        totp_ok = verify_totp(totp_secret, totp_str, used_codes=used_set)
+                    if not totp_ok:
                         raise _ApiError("invalid_totp", 401)
 
                 cache = _refresh_cache(st)
@@ -910,6 +919,8 @@ def _h_lock(req: "_Handler", _groups: tuple) -> dict:
             _session["passphrase"].wipe()
         _session.update(vault=None, passphrase=None, cache=None,
                         admin_id=None, admin_role=None)
+        # Clear used TOTP codes for this admin to prevent unbounded set growth.
+        _totp_used_codes.pop(_lock_actor, None)
     AuditLog(_AUDIT_PATH).log("lock", {}, actor=_lock_actor)
     return {"ok": True}
 
@@ -1140,11 +1151,12 @@ def _h_heartbeat(req: "_Handler", groups: tuple) -> dict:
     import time as _time
     name = groups[0]
 
-    # Rate limiting
+    # Rate limiting — guard _heartbeat_cooldown with _lock for thread safety.
     now = _time.time()
-    last = _heartbeat_cooldown.get(name, 0)
-    if now - last < _HEARTBEAT_MIN_INTERVAL:
-        raise _ApiError("Heartbeat rate limit exceeded.", 429)
+    with _lock:
+        last = _heartbeat_cooldown.get(name, 0)
+        if now - last < _HEARTBEAT_MIN_INTERVAL:
+            raise _ApiError("Heartbeat rate limit exceeded.", 429)
 
     with _lock:
         cache      = _session.get("cache") or {}
@@ -1164,7 +1176,8 @@ def _h_heartbeat(req: "_Handler", groups: tuple) -> dict:
 
     ttl_seconds = client.get("ttl_seconds") or 86400
     new_expires = now + ttl_seconds
-    _heartbeat_cooldown[name] = now
+    with _lock:
+        _heartbeat_cooldown[name] = now
 
     # Update vault
     with vault.open(passphrase, admin_id=admin_id) as state:
@@ -2031,10 +2044,11 @@ def _h_unlock_pin(req: "_Handler", _groups: tuple) -> dict:
     if not _PIN_PATH.exists():
         raise _ApiError("No PIN set. Use passphrase to unlock.", 400)
 
-    if _pin_fail_count >= _PIN_MAX_ATTEMPTS:
-        _pin_wipe()
-        _pin_fail_count = 0
-        raise _ApiError("Too many wrong PIN attempts. PIN removed — use your passphrase.", 403)
+    with _lock:
+        if _pin_fail_count >= _PIN_MAX_ATTEMPTS:
+            _pin_wipe()
+            _pin_fail_count = 0
+            raise _ApiError("Too many wrong PIN attempts. PIN removed — use your passphrase.", 403)
 
     body = req._json()
     pin = body.get("pin", "")
@@ -2043,12 +2057,15 @@ def _h_unlock_pin(req: "_Handler", _groups: tuple) -> dict:
 
     passphrase_bytes = _pin_load(pin)
     if passphrase_bytes is None:
-        _pin_fail_count += 1
+        with _lock:
+            _pin_fail_count += 1
+            current_fails = _pin_fail_count
         _record_unlock_failure(client_ip)
-        remaining = _PIN_MAX_ATTEMPTS - _pin_fail_count
-        if _pin_fail_count >= _PIN_MAX_ATTEMPTS:
+        remaining = _PIN_MAX_ATTEMPTS - current_fails
+        if current_fails >= _PIN_MAX_ATTEMPTS:
             _pin_wipe()
-            _pin_fail_count = 0
+            with _lock:
+                _pin_fail_count = 0
             raise _ApiError("Wrong PIN. PIN removed after too many attempts — use your passphrase.", 403)
         raise _ApiError(f"Wrong PIN. {remaining} attempt{'s' if remaining != 1 else ''} remaining.", 401)
 
@@ -2074,8 +2091,7 @@ def _h_unlock_pin(req: "_Handler", _groups: tuple) -> dict:
             if _session["passphrase"]:
                 _session["passphrase"].wipe()
             _session.update(vault=vault, passphrase=passphrase, cache=cache)
-
-        _pin_fail_count = 0  # Reset on success
+            _pin_fail_count = 0  # Reset on success (under lock)
         _clear_unlock_failures(client_ip)
         AuditLog(_AUDIT_PATH).log("unlock-pin", {}, actor="system")
 
@@ -3311,6 +3327,7 @@ def _h_backup_restore(req, _groups):
     if admin_id is None:
         admin_id = session_admin_id
     vault_path = vault._path
+    from wireseal.security.secrets_wipe import wipe_string
     passphrase_ba = bytearray(passphrase_str.encode("utf-8"))
     try:
         from wireseal.security.exceptions import VaultUnlockError
@@ -3327,6 +3344,7 @@ def _h_backup_restore(req, _groups):
     finally:
         for i in range(len(passphrase_ba)):
             passphrase_ba[i] = 0
+        wipe_string(passphrase_str)
     # Lock the in-memory vault — caller must re-unlock with the restored vault
     with _lock:
         if _session["passphrase"]:

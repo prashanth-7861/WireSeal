@@ -26,9 +26,13 @@ def validate_ip(ip: str) -> None:
     """Raise ValueError if IP is not a valid IPv4 address."""
     if not _IPV4_RE.match(ip):
         raise ValueError(f"Invalid IPv4 address: {ip!r}")
-    octets = [int(o) for o in ip.split(".")]
-    if not all(0 <= o <= 255 for o in octets):
-        raise ValueError(f"IPv4 octet out of range: {ip!r}")
+    parts = ip.split(".")
+    for part in parts:
+        # Reject leading zeros — "010" is ambiguous (decimal 10 vs octal 8).
+        if len(part) > 1 and part[0] == "0":
+            raise ValueError(f"IPv4 octet has leading zero: {part!r} in {ip!r}")
+        if not (0 <= int(part) <= 255):
+            raise ValueError(f"IPv4 octet out of range: {ip!r}")
 
 
 class DnsmasqManager:
