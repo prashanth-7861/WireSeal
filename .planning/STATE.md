@@ -10,11 +10,11 @@ See: .planning/PROJECT.md (updated 2026-03-17)
 ## Current Position
 
 Phase: 7 of 7 (ZTNA Foundation)
-Plan: 2 of 8 in current phase (07-02 complete)
+Plan: 6 of 8 in current phase (07-06 complete)
 Status: In Progress
-Last activity: 2026-04-05 -- Completed plan 07-02 (Multi-Admin API + CLI + Dashboard Admins page)
+Last activity: 2026-04-06 -- Completed plan 07-06 (Encrypted Local Backup — BackupManager, API endpoints, Dashboard Backup page)
 
-Progress: [██████████░░░░░░░] 67% (18/27 plans complete)
+Progress: [████████████░░░░░] 81% (22/27 plans complete)
 
 ## Performance Metrics
 
@@ -41,6 +41,7 @@ Progress: [██████████░░░░░░░] 67% (18/27 plans
 | Phase 05-tests-and-packaging P05-02 | 3 | 2 tasks | 6 files |
 | Phase 07-ztna-foundation P07-01 | 25 min | 4 tasks | 3 files modified, 1 created |
 | Phase 07-ztna-foundation P07-02 | 35 min | 3 tasks | 5 files modified, 2 created |
+| Phase 07-ztna-foundation P07-06 | 20 min | 3 tasks | 5 files modified, 3 created |
 
 ## Accumulated Context
 
@@ -108,6 +109,9 @@ Recent decisions affecting current work:
 - [07-01]: VaultState.__exit__ auto-saves v3 format on clean exit (no exception) so keyslot mutations persist without explicit save()
 - [07-02]: _require_owner() raises _ApiError(403) directly (not callback pattern) -- consistent with _require_unlocked() style
 - [07-02]: Owner changing another admin's passphrase bypasses old_passphrase by direct keyslot re-wrap using session master_key via vault._session_store
+- [07-06]: BackupManager instantiated as module-level singleton (_backup_manager) — stateless class, safe to share across requests
+- [07-06]: restore_backup uses os.replace (atomic on POSIX) via tmp file to avoid partial-write corruption; live vault never touched on wrong passphrase
+- [07-06]: webdav_pass excluded from GET /api/backup/config response to avoid credential exposure in dashboard
 - [07-02]: Admins cache snapshot added to _refresh_cache() so handlers read admin data without re-opening vault
 
 ### Pending Todos
@@ -122,6 +126,6 @@ None.
 
 ## Session Continuity
 
-Last session: 2026-04-04
-Stopped at: Completed 07-01-PLAN.md (FORMAT_VERSION 3 keyslot vault, Argon2id+AES-256-GCM wrapping, multi-admin management)
+Last session: 2026-04-06
+Stopped at: Completed 07-06-PLAN.md (Encrypted Local Backup — BackupManager, five API endpoints, Dashboard Backup page)
 Resume file: None
