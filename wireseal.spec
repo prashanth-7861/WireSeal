@@ -108,18 +108,31 @@ a = Analysis(
         'gi.repository.Gio',
         'gi.repository.Pango',
         'gi.repository.cairo',
-        # pythonnet / clr_loader for WinForms backend (Windows only)
+        # pythonnet / clr_loader for WinForms backend (Windows only).
+        # All submodules listed explicitly — PyInstaller may miss dynamically
+        # imported sub-packages when only the top-level name is given.
         'clr',
         'clr_loader',
+        'clr_loader.ffi',
+        'clr_loader.ffi.hostfxr',
+        'clr_loader.ffi.mono',
+        'clr_loader.ffi.netfx',
+        'clr_loader.netfx',
+        'clr_loader.types',
+        'clr_loader.util',
+        'clr_loader.util.find',
+        'clr_loader.util.runtime_spec',
         'pythonnet',
+        'cffi',
+        'cffi._cffi_backend',
         # QR code generation for client configs
         'qrcode',
         'qrcode.image.pil',
         'PIL',
     ],
-    hookspath=[],
+    hookspath=['hooks'],
     hooksconfig={},
-    runtime_hooks=[],
+    runtime_hooks=['hooks/rthook_pythonnet_frozen.py'],
     excludes=[
         # Exclude heavy Qt — pywebview uses EdgeChromium (no Qt needed)
         'PySide6', 'PySide6.QtCore', 'PySide6.QtGui', 'PySide6.QtWidgets',

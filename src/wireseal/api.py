@@ -3747,19 +3747,25 @@ def serve(host: str = "127.0.0.1", port: int = 8080, gui: bool = True) -> None:
             "WireSeal", url, width=1200, height=800, min_size=(900, 600),
         )
         webview.start()  # blocks until the native window is closed
-    except ImportError:
-        if not _quiet:
-            print("[wireseal] Native window not available — falling back to system browser.")
-            print("[wireseal] Press Ctrl+C to stop.")
-        webbrowser.open(url)
+    except (ImportError, Exception) as exc:
+        # Always log to file — in quiet/GUI mode on Windows there is no console,
+        # so this is the only way to see what went wrong.
         try:
-            server_thread.join()
-        except KeyboardInterrupt:
+            import datetime, traceback
+            _log_dir = os.path.join(
+                os.environ.get("APPDATA", os.path.expanduser("~")), "WireSeal"
+            )
+            os.makedirs(_log_dir, exist_ok=True)
+            with open(os.path.join(_log_dir, "wireseal-gui.log"), "a", encoding="utf-8") as _lf:
+                _lf.write(f"\n[{datetime.datetime.now().isoformat()}] GUI fallback\n")
+                _lf.write(traceback.format_exc())
+        except Exception:
             pass
-    except Exception as exc:
         if not _quiet:
             print(f"[wireseal] GUI failed ({exc}) — falling back to system browser.")
-            if sys.platform == "linux":
+            if sys.platform == "linux" and not isinstance(exc, ImportError):
+                pass
+            elif sys.platform == "linux":
                 print("[wireseal] Install GUI dependencies for a native window:")
                 print("[wireseal]   Arch:   sudo pacman -S python-gobject webkit2gtk")
                 print("[wireseal]   Debian: sudo apt install python3-gi gir1.2-webkit2-4.1")
