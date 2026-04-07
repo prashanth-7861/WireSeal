@@ -47,10 +47,17 @@ BrandingText "${APPNAME} ${VERSION}"
 !insertmacro MUI_PAGE_DIRECTORY
 !insertmacro MUI_PAGE_INSTFILES
 
-; Finish page — offer to launch the app
-!define MUI_FINISHPAGE_RUN "$INSTDIR\${EXENAME}"
+; Finish page — offer to launch the app (de-elevated via explorer.exe so
+; that WebView2 can render; it refuses to work inside an elevated process).
+!define MUI_FINISHPAGE_RUN_FUNCTION LaunchApp
 !define MUI_FINISHPAGE_RUN_TEXT "Launch ${APPNAME}"
 !insertmacro MUI_PAGE_FINISH
+
+Function LaunchApp
+  ; Spawn through explorer so the child process gets the normal user token,
+  ; not the admin token inherited from the installer.
+  Exec '"$WINDIR\explorer.exe" "$INSTDIR\${EXENAME}"'
+FunctionEnd
 
 ; Uninstaller pages
 !insertmacro MUI_UNPAGE_CONFIRM
@@ -86,7 +93,8 @@ Section "WireSeal (required)" SecMain
                  "" "$INSTDIR\${EXENAME}" 0
 
   ; ── Add $INSTDIR to PATH (for CLI usage from terminal) ──
-  ExecWait '$WINDIR\System32\WindowsPowerShell\v1.0\powershell.exe -NoProfile -ExecutionPolicy Bypass -Command \
+  ExecWait '$WINDIR\System32\WindowsPowerShell\v1.0\powershell.exe \
+    -NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -Command \
     "$p = [Environment]::GetEnvironmentVariable(\"PATH\", \"Machine\"); \
      $parts = $p -split \";\"; \
      if ($parts -notcontains \"$INSTDIR\") { \
@@ -132,7 +140,8 @@ Section "Uninstall"
   Delete "$DESKTOP\${APPNAME}.lnk"
 
   ; Remove $INSTDIR from system PATH
-  ExecWait '$WINDIR\System32\WindowsPowerShell\v1.0\powershell.exe -NoProfile -ExecutionPolicy Bypass -Command \
+  ExecWait '$WINDIR\System32\WindowsPowerShell\v1.0\powershell.exe \
+    -NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -Command \
     "[Environment]::SetEnvironmentVariable(\"PATH\", \
       (([Environment]::GetEnvironmentVariable(\"PATH\", \"Machine\") -split \";\") | \
        Where-Object { $_ -ne \"$INSTDIR\" }) -join \";\", \"Machine\")"'
