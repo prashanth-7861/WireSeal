@@ -38,6 +38,23 @@ _extra_datas = []
 if os.path.isdir(_webview_lib):
     _extra_datas.append((_webview_lib, os.path.join('webview', 'lib')))
 
+# Windows: bundle pythonnet DLLs needed by the WinForms backend.
+#   ClrLoader.dll  — C++/CLI bridge; clr_loader.ffi.load_netfx() looks for it at
+#                    Path(__file__).parent / "dlls" / arch / "ClrLoader.dll"
+#                    which resolves to sys._MEIPASS/clr_loader/ffi/dlls/amd64/
+#   Python.Runtime.dll — .NET assembly loaded by pythonnet.load() from
+#                        Path(__file__).parent / "runtime" / "Python.Runtime.dll"
+#                        which resolves to sys._MEIPASS/pythonnet/runtime/
+if sys.platform == 'win32':
+    import platform as _plat
+    _arch = 'amd64' if _plat.machine().lower() in ('amd64', 'x86_64') else 'x86'
+    _clrloader_dll = os.path.join(_site, 'clr_loader', 'ffi', 'dlls', _arch, 'ClrLoader.dll')
+    if os.path.isfile(_clrloader_dll):
+        _extra_datas.append((_clrloader_dll, os.path.join('clr_loader', 'ffi', 'dlls', _arch)))
+    _python_runtime_dll = os.path.join(_site, 'pythonnet', 'runtime', 'Python.Runtime.dll')
+    if os.path.isfile(_python_runtime_dll):
+        _extra_datas.append((_python_runtime_dll, os.path.join('pythonnet', 'runtime')))
+
 # Linux: collect system typelib files for gi (GObject Introspection).
 # Typelibs are ABI-stable metadata — safe to collect from CI and use on target.
 if sys.platform == 'linux':
@@ -68,9 +85,9 @@ a = Analysis(
         'wireseal.platform.linux',
         'wireseal.platform.macos',
         'wireseal.platform.windows',
-        # pywebview — EdgeChromium on Windows, WKWebView on macOS, WebKitGTK on Linux
+        # pywebview — WinForms on Windows, WKWebView on macOS, WebKitGTK on Linux
         'webview',
-        'webview.platforms.edgechromium',  # Windows (Edge WebView2 via pythonnet)
+        'webview.platforms.winforms',      # Windows (WinForms + pythonnet, pywebview 6.x)
         'webview.platforms.cocoa',         # macOS (WKWebView)
         'webview.platforms.gtk',           # Linux (WebKit2GTK)
         # PyGObject (gi) — bundled with matching Python version; typelibs from system
@@ -91,7 +108,7 @@ a = Analysis(
         'gi.repository.Gio',
         'gi.repository.Pango',
         'gi.repository.cairo',
-        # pythonnet / clr_loader for EdgeChromium backend
+        # pythonnet / clr_loader for WinForms backend (Windows only)
         'clr',
         'clr_loader',
         'pythonnet',

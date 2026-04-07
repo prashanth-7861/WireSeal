@@ -3742,7 +3742,7 @@ def serve(host: str = "127.0.0.1", port: int = 8080, gui: bool = True) -> None:
                 parts = ([existing] if existing else []) + extra
                 os.environ["GI_TYPELIB_PATH"] = os.pathsep.join(parts)
 
-        import webview  # pywebview — EdgeChromium on Windows, WKWebView on macOS, WebKitGTK on Linux
+        import webview  # pywebview — WinForms on Windows, WKWebView on macOS, WebKitGTK on Linux
         window = webview.create_window(
             "WireSeal", url, width=1200, height=800, min_size=(900, 600),
         )
