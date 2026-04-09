@@ -28,8 +28,17 @@
 
 import sys
 import os
+from PyInstaller.utils.hooks import collect_submodules, collect_data_files, collect_dynamic_libs
 
 block_cipher = None
+
+# Force-collect ALL webview (pywebview) submodules.  PyInstaller's import
+# tracing can miss the package entirely when a transitive dependency
+# (proxy_tools) is not found during analysis.  collect_submodules walks
+# the installed package tree directly — no import required.
+_webview_hiddenimports = collect_submodules('webview')
+_webview_datas = collect_data_files('webview')
+_webview_binaries = collect_dynamic_libs('webview')
 
 # Locate pywebview's bundled lib directory (contains WebView2 interop DLLs)
 _site = os.path.join(sys.prefix, 'Lib', 'site-packages')
@@ -75,17 +84,18 @@ if sys.platform == 'linux':
 a = Analysis(
     ['src/wireseal/main.py'],
     pathex=[],
-    binaries=[],
+    binaries=[] + _webview_binaries,
     datas=[
         ('src/wireseal/templates', 'wireseal/templates'),
         ('Dashboard/dist',         'dashboard'),
-    ] + _extra_datas,
+    ] + _extra_datas + _webview_datas,
     hiddenimports=[
         # Platform adapters imported by string name at runtime
         'wireseal.platform.linux',
         'wireseal.platform.macos',
         'wireseal.platform.windows',
-        # pywebview — WinForms on Windows, WKWebView on macOS, WebKitGTK on Linux
+        # pywebview — force-collected via collect_submodules above; keep
+        # explicit entries as belt-and-suspenders for the platform backends
         'webview',
         'webview.platforms.winforms',      # Windows (WinForms + pythonnet, pywebview 6.x)
         'webview.platforms.cocoa',         # macOS (WKWebView)
@@ -125,16 +135,18 @@ a = Analysis(
         'pythonnet',
         'cffi',
         'cffi._cffi_backend',
+        # pywebview transitive dependency (imported in webview/__init__.py)
+        'proxy_tools',
         # QR code generation for client configs
         'qrcode',
         'qrcode.image.pil',
         'PIL',
-    ],
+    ] + _webview_hiddenimports,
     hookspath=['hooks'],
     hooksconfig={},
     runtime_hooks=['hooks/rthook_pythonnet_frozen.py'],
     excludes=[
-        # Exclude heavy Qt — pywebview uses EdgeChromium (no Qt needed)
+        # Exclude heavy Qt — pywebview uses WinForms/GTK/Cocoa (no Qt needed)
         'PySide6', 'PySide6.QtCore', 'PySide6.QtGui', 'PySide6.QtWidgets',
         'PySide6.QtWebEngineWidgets', 'PySide6.QtWebEngineCore',
         'PySide6.QtWebChannel', 'PySide6.QtNetwork',
