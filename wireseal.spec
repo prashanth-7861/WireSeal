@@ -42,24 +42,25 @@ _extra_datas = []
 _webview_binaries = collect_dynamic_libs('webview')
 _webview_hiddenimports = []
 
+import warnings as _w
 for _pkg in ['webview', 'proxy_tools', 'bottle']:
     try:
         _sp = _ilu.find_spec(_pkg)
         if _sp and _sp.submodule_search_locations:
             _src = _sp.submodule_search_locations[0]
-            print(f'[wireseal.spec] Collecting package {_pkg} from {_src}')
+            _w.warn(f'[wireseal.spec] Collecting package {_pkg} from {_src}')
             _extra_datas.append((_src, _pkg))
         elif _sp and _sp.origin:
-            print(f'[wireseal.spec] Collecting module {_pkg} from {_sp.origin}')
+            _w.warn(f'[wireseal.spec] Collecting module {_pkg} from {_sp.origin}')
             _extra_datas.append((_sp.origin, '.'))
         else:
-            print(f'[wireseal.spec] WARNING: {_pkg} spec found but no location')
+            _w.warn(f'[wireseal.spec] WARNING: {_pkg} spec found but no location')
     except Exception as _e:
-        print(f'[wireseal.spec] WARNING: failed to find {_pkg}: {_e}')
+        _w.warn(f'[wireseal.spec] WARNING: failed to find {_pkg}: {_e}')
 
-print(f'[wireseal.spec] Total extra datas: {len(_extra_datas)}')
+_w.warn(f'[wireseal.spec] Total extra datas: {len(_extra_datas)}')
 for _src, _dst in _extra_datas:
-    print(f'[wireseal.spec]   {_dst} <- {_src}')
+    _w.warn(f'[wireseal.spec]   {_dst} <- {_src}')
 
 # Locate pywebview's bundled lib directory (contains WebView2 interop DLLs)
 _site = os.path.join(sys.prefix, 'Lib', 'site-packages')

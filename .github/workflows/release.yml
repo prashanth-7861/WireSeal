@@ -98,6 +98,55 @@ jobs:
       - name: Build GUI binary (desktop app)
         run: pyinstaller wireseal.spec
 
+      - name: Verify webview in frozen binary (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          python -c "
+          import sys, os
+
+          # 1. Check the Analysis TOC
+          toc_file = 'build/wireseal/Analysis-00.toc'
+          if os.path.exists(toc_file):
+              with open(toc_file, 'rb') as f:
+                  import pickle
+                  toc = pickle.load(f)
+              webview_entries = [e for e in toc if 'webview' in str(e).lower()]
+              print(f'Analysis TOC: {len(webview_entries)} webview entries')
+              for e in webview_entries[:20]:
+                  print(f'  {e}')
+          else:
+              print(f'WARNING: {toc_file} not found')
+
+          # 2. Check the PYZ TOC
+          pyz_toc = 'build/wireseal/PYZ-00.toc'
+          if os.path.exists(pyz_toc):
+              with open(pyz_toc, 'rb') as f:
+                  ptoc = pickle.load(f)
+              wv_pyz = [e for e in ptoc if 'webview' in str(e).lower()]
+              print(f'PYZ TOC: {len(wv_pyz)} webview entries')
+              for e in wv_pyz[:20]:
+                  print(f'  {e}')
+          else:
+              print(f'WARNING: {pyz_toc} not found')
+
+          # 3. Check if webview files exist in build tree
+          build_dir = 'build/wireseal'
+          wv_files = []
+          for root, dirs, files in os.walk(build_dir):
+              for fn in files:
+                  full = os.path.join(root, fn)
+                  if 'webview' in full.lower():
+                      wv_files.append(full)
+          print(f'webview files in build/: {len(wv_files)}')
+          for f in wv_files[:20]:
+              print(f'  {f}')
+
+          if not wv_files:
+              print('FATAL: No webview files in build tree!')
+              sys.exit(1)
+          "
+
       - name: Build CLI binary (terminal)
         run: pyinstaller wireseal-cli.spec
 
