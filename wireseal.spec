@@ -32,13 +32,18 @@ from PyInstaller.utils.hooks import collect_submodules, collect_data_files, coll
 
 block_cipher = None
 
-# Force-collect ALL webview (pywebview) submodules.  PyInstaller's import
-# tracing can miss the package entirely when a transitive dependency
-# (proxy_tools) is not found during analysis.  collect_submodules walks
-# the installed package tree directly — no import required.
+# Force-collect the entire webview (pywebview) package as DATA files
+# (include_py_files=True).  This extracts .py source files directly into
+# sys._MEIPASS/webview/ at runtime, where Python's regular importer finds
+# them — completely bypassing the PYZ archive.  Previous attempts using
+# collect_submodules + hiddenimports still resulted in an empty PYZ for
+# webview despite the modules being analysed during the build.
 _webview_hiddenimports = collect_submodules('webview')
-_webview_datas = collect_data_files('webview')
+_webview_datas = collect_data_files('webview', include_py_files=True)
 _webview_binaries = collect_dynamic_libs('webview')
+
+# Same treatment for proxy_tools (pywebview transitive dep)
+_webview_datas += collect_data_files('proxy_tools', include_py_files=True)
 
 # Locate pywebview's bundled lib directory (contains WebView2 interop DLLs)
 _site = os.path.join(sys.prefix, 'Lib', 'site-packages')
