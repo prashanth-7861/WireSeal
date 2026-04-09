@@ -3759,19 +3759,21 @@ def serve(host: str = "127.0.0.1", port: int = 8080, gui: bool = True) -> None:
             with open(os.path.join(_log_dir, "wireseal-gui.log"), "a", encoding="utf-8") as _lf:
                 _lf.write(f"\n[{datetime.datetime.now().isoformat()}] GUI fallback\n")
                 _lf.write(traceback.format_exc())
-                # Diagnostic: log frozen state, available modules, DLL paths
+                # Diagnostic: log frozen state, extraction directory contents
                 _lf.write(f"sys.frozen={getattr(sys, 'frozen', 'N/A')}\n")
-                _lf.write(f"sys._MEIPASS={getattr(sys, '_MEIPASS', 'N/A')}\n")
-                _diag_mods = ['webview', 'webview.platforms.winforms', 'clr',
-                              'clr_loader', 'pythonnet', 'proxy_tools']
-                for _m in _diag_mods:
-                    _lf.write(f"  {_m} in sys.modules: {_m in sys.modules}\n")
-                if hasattr(sys, '_MEIPASS'):
-                    import glob as _glob
-                    _clr_dlls = _glob.glob(os.path.join(sys._MEIPASS, '**', 'ClrLoader.dll'), recursive=True)
-                    _rt_dlls = _glob.glob(os.path.join(sys._MEIPASS, '**', 'Python.Runtime.dll'), recursive=True)
-                    _lf.write(f"  ClrLoader.dll found: {_clr_dlls}\n")
-                    _lf.write(f"  Python.Runtime.dll found: {_rt_dlls}\n")
+                _meipass = getattr(sys, '_MEIPASS', None)
+                _lf.write(f"sys._MEIPASS={_meipass}\n")
+                _lf.write(f"sys.path={sys.path}\n")
+                if _meipass and os.path.isdir(_meipass):
+                    _top = sorted(os.listdir(_meipass))
+                    _lf.write(f"_MEIPASS top-level ({len(_top)} entries): {_top[:50]}\n")
+                    _wv_dir = os.path.join(_meipass, 'webview')
+                    _lf.write(f"webview dir exists: {os.path.isdir(_wv_dir)}\n")
+                    _wv_init = os.path.join(_wv_dir, '__init__.py')
+                    _lf.write(f"webview/__init__.py exists: {os.path.isfile(_wv_init)}\n")
+                    if os.path.isdir(_wv_dir):
+                        _wv_contents = sorted(os.listdir(_wv_dir))
+                        _lf.write(f"webview/ contents: {_wv_contents}\n")
         except Exception:
             pass
         if not _quiet:
