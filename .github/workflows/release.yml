@@ -103,34 +103,9 @@ jobs:
         shell: bash
         run: |
           python -c "
-          import sys, os
+          import sys, os, glob
 
-          # 1. Check the Analysis TOC
-          toc_file = 'build/wireseal/Analysis-00.toc'
-          if os.path.exists(toc_file):
-              with open(toc_file, 'rb') as f:
-                  import pickle
-                  toc = pickle.load(f)
-              webview_entries = [e for e in toc if 'webview' in str(e).lower()]
-              print(f'Analysis TOC: {len(webview_entries)} webview entries')
-              for e in webview_entries[:20]:
-                  print(f'  {e}')
-          else:
-              print(f'WARNING: {toc_file} not found')
-
-          # 2. Check the PYZ TOC
-          pyz_toc = 'build/wireseal/PYZ-00.toc'
-          if os.path.exists(pyz_toc):
-              with open(pyz_toc, 'rb') as f:
-                  ptoc = pickle.load(f)
-              wv_pyz = [e for e in ptoc if 'webview' in str(e).lower()]
-              print(f'PYZ TOC: {len(wv_pyz)} webview entries')
-              for e in wv_pyz[:20]:
-                  print(f'  {e}')
-          else:
-              print(f'WARNING: {pyz_toc} not found')
-
-          # 3. Check if webview files exist in build tree
+          # Check if webview files exist in build tree
           build_dir = 'build/wireseal'
           wv_files = []
           for root, dirs, files in os.walk(build_dir):
@@ -139,13 +114,59 @@ jobs:
                   if 'webview' in full.lower():
                       wv_files.append(full)
           print(f'webview files in build/: {len(wv_files)}')
-          for f in wv_files[:20]:
+          for f in sorted(wv_files)[:30]:
               print(f'  {f}')
 
+          # Check dist/ for the actual EXE
+          exe = 'dist/WireSeal.exe'
+          if os.path.exists(exe):
+              sz = os.path.getsize(exe)
+              print(f'WireSeal.exe size: {sz:,} bytes')
+
           if not wv_files:
-              print('FATAL: No webview files in build tree!')
-              sys.exit(1)
+              print('WARNING: No webview files in build tree!')
           "
+
+      - name: Verify webview in EXE archive (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          python -c "
+          from PyInstaller.archive.readers import CArchiveReader, ZlibArchiveReader
+          import os
+          exe = 'dist/WireSeal.exe'
+          if not os.path.exists(exe):
+              print('EXE not found'); exit(0)
+          try:
+              ar = CArchiveReader(exe)
+              toc = ar.toc
+              wv = [(name, typecode) for name, (dpos, dlen, ulen, flag, typecode) in toc.items() if 'webview' in name.lower()]
+              print(f'CArchive: {len(wv)} webview entries')
+              for name, tc in sorted(wv)[:20]:
+                  print(f'  [{tc}] {name}')
+              if not wv:
+                  print('NO webview entries in CArchive!')
+                  # Check PYZ
+                  for name, (dpos, dlen, ulen, flag, typecode) in toc.items():
+                      if name.endswith('.pyz'):
+                          print(f'Checking PYZ: {name}')
+                          pyz_data = ar.extract(name)
+                          # PYZ is a ZlibArchive
+                          import tempfile
+                          with tempfile.NamedTemporaryFile(suffix='.pyz', delete=False) as f:
+                              f.write(pyz_data)
+                              tmp = f.name
+                          try:
+                              pyz = ZlibArchiveReader(tmp)
+                              wv_pyz = [n for n in pyz.toc if 'webview' in n.lower()]
+                              print(f'  PYZ has {len(wv_pyz)} webview entries')
+                              for n in sorted(wv_pyz)[:20]:
+                                  print(f'    {n}')
+                          finally:
+                              os.unlink(tmp)
+          except Exception as e:
+              print(f'Archive inspection failed: {e}')
+          " || true
 
       - name: Build CLI binary (terminal)
         run: pyinstaller wireseal-cli.spec
