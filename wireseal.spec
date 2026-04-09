@@ -28,27 +28,42 @@
 
 import sys
 import os
-from PyInstaller.utils.hooks import collect_submodules, collect_data_files, collect_dynamic_libs
+from PyInstaller.utils.hooks import collect_dynamic_libs
 
 block_cipher = None
 
-# Force-collect the entire webview (pywebview) package as DATA files
-# (include_py_files=True).  This extracts .py source files directly into
-# sys._MEIPASS/webview/ at runtime, where Python's regular importer finds
-# them — completely bypassing the PYZ archive.  Previous attempts using
-# collect_submodules + hiddenimports still resulted in an empty PYZ for
-# webview despite the modules being analysed during the build.
-_webview_hiddenimports = collect_submodules('webview')
-_webview_datas = collect_data_files('webview', include_py_files=True)
+# ── Force-bundle pywebview and its deps as raw package directories ──
+# Neither collect_submodules (hiddenimports→PYZ) nor collect_data_files
+# (include_py_files=True) resulted in webview appearing in the frozen
+# binary.  Bypass ALL PyInstaller collection machinery and copy the
+# installed package directories directly into the extraction tree.
+import importlib.util as _ilu
+_extra_datas = []
 _webview_binaries = collect_dynamic_libs('webview')
+_webview_hiddenimports = []
 
-# Same treatment for proxy_tools (pywebview transitive dep)
-_webview_datas += collect_data_files('proxy_tools', include_py_files=True)
+for _pkg in ['webview', 'proxy_tools', 'bottle']:
+    try:
+        _sp = _ilu.find_spec(_pkg)
+        if _sp and _sp.submodule_search_locations:
+            _src = _sp.submodule_search_locations[0]
+            print(f'[wireseal.spec] Collecting package {_pkg} from {_src}')
+            _extra_datas.append((_src, _pkg))
+        elif _sp and _sp.origin:
+            print(f'[wireseal.spec] Collecting module {_pkg} from {_sp.origin}')
+            _extra_datas.append((_sp.origin, '.'))
+        else:
+            print(f'[wireseal.spec] WARNING: {_pkg} spec found but no location')
+    except Exception as _e:
+        print(f'[wireseal.spec] WARNING: failed to find {_pkg}: {_e}')
+
+print(f'[wireseal.spec] Total extra datas: {len(_extra_datas)}')
+for _src, _dst in _extra_datas:
+    print(f'[wireseal.spec]   {_dst} <- {_src}')
 
 # Locate pywebview's bundled lib directory (contains WebView2 interop DLLs)
 _site = os.path.join(sys.prefix, 'Lib', 'site-packages')
 _webview_lib = os.path.join(_site, 'webview', 'lib')
-_extra_datas = []
 if os.path.isdir(_webview_lib):
     _extra_datas.append((_webview_lib, os.path.join('webview', 'lib')))
 
@@ -93,7 +108,7 @@ a = Analysis(
     datas=[
         ('src/wireseal/templates', 'wireseal/templates'),
         ('Dashboard/dist',         'dashboard'),
-    ] + _extra_datas + _webview_datas,
+    ] + _extra_datas,
     hiddenimports=[
         # Platform adapters imported by string name at runtime
         'wireseal.platform.linux',
