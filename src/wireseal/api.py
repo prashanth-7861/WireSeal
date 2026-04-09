@@ -3759,6 +3759,19 @@ def serve(host: str = "127.0.0.1", port: int = 8080, gui: bool = True) -> None:
             with open(os.path.join(_log_dir, "wireseal-gui.log"), "a", encoding="utf-8") as _lf:
                 _lf.write(f"\n[{datetime.datetime.now().isoformat()}] GUI fallback\n")
                 _lf.write(traceback.format_exc())
+                # Diagnostic: log frozen state, available modules, DLL paths
+                _lf.write(f"sys.frozen={getattr(sys, 'frozen', 'N/A')}\n")
+                _lf.write(f"sys._MEIPASS={getattr(sys, '_MEIPASS', 'N/A')}\n")
+                _diag_mods = ['webview', 'webview.platforms.winforms', 'clr',
+                              'clr_loader', 'pythonnet', 'proxy_tools']
+                for _m in _diag_mods:
+                    _lf.write(f"  {_m} in sys.modules: {_m in sys.modules}\n")
+                if hasattr(sys, '_MEIPASS'):
+                    import glob as _glob
+                    _clr_dlls = _glob.glob(os.path.join(sys._MEIPASS, '**', 'ClrLoader.dll'), recursive=True)
+                    _rt_dlls = _glob.glob(os.path.join(sys._MEIPASS, '**', 'Python.Runtime.dll'), recursive=True)
+                    _lf.write(f"  ClrLoader.dll found: {_clr_dlls}\n")
+                    _lf.write(f"  Python.Runtime.dll found: {_rt_dlls}\n")
         except Exception:
             pass
         if not _quiet:
