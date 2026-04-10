@@ -98,87 +98,70 @@ jobs:
       - name: Build GUI binary (desktop app)
         run: pyinstaller wireseal.spec
 
-      - name: Verify webview in frozen binary (Windows)
+      - name: Verify webview in onedir tree (Windows)
         if: runner.os == 'Windows'
         shell: bash
         run: |
+          # Windows uses onedir mode — the webview package is staged to disk
+          # inside dist/WireSeal/_internal/webview/ and imported via normal
+          # sys.path at runtime. Verify it exists before packaging.
           python -c "
-          import sys, os, glob
-
-          # Check if webview files exist in build tree
-          build_dir = 'build/wireseal'
-          wv_files = []
-          for root, dirs, files in os.walk(build_dir):
-              for fn in files:
-                  full = os.path.join(root, fn)
-                  if 'webview' in full.lower():
-                      wv_files.append(full)
-          print(f'webview files in build/: {len(wv_files)}')
-          for f in sorted(wv_files)[:30]:
-              print(f'  {f}')
-
-          # Check dist/ for the actual EXE
-          exe = 'dist/WireSeal.exe'
-          if os.path.exists(exe):
-              sz = os.path.getsize(exe)
-              print(f'WireSeal.exe size: {sz:,} bytes')
-
-          if not wv_files:
-              print('WARNING: No webview files in build tree!')
+          import os, sys
+          app_dir = 'dist/WireSeal'
+          if not os.path.isdir(app_dir):
+              print(f'FATAL: onedir output missing: {app_dir}')
+              sys.exit(1)
+          wv_init_candidates = [
+              os.path.join(app_dir, '_internal', 'webview', '__init__.py'),
+              os.path.join(app_dir, 'webview', '__init__.py'),
+          ]
+          found = None
+          for c in wv_init_candidates:
+              if os.path.isfile(c):
+                  found = c
+                  break
+          if not found:
+              print('FATAL: webview/__init__.py not found in onedir tree')
+              for root, dirs, files in os.walk(app_dir):
+                  if 'webview' in root.lower():
+                      print(f'  {root}: {files[:5]}')
+              sys.exit(1)
+          print(f'OK: webview package located at {found}')
+          wv_dir = os.path.dirname(found)
+          py_files = [f for f in os.listdir(wv_dir) if f.endswith('.py')]
+          print(f'     webview/ contains {len(py_files)} .py files')
+          exe = os.path.join(app_dir, 'WireSeal.exe')
+          if os.path.isfile(exe):
+              print(f'     WireSeal.exe: {os.path.getsize(exe):,} bytes')
           "
-
-      - name: Verify webview in EXE archive (Windows)
-        if: runner.os == 'Windows'
-        shell: bash
-        run: |
-          python -c "
-          from PyInstaller.archive.readers import CArchiveReader, ZlibArchiveReader
-          import os
-          exe = 'dist/WireSeal.exe'
-          if not os.path.exists(exe):
-              print('EXE not found'); exit(0)
-          try:
-              ar = CArchiveReader(exe)
-              toc = ar.toc
-              wv = [(name, typecode) for name, (dpos, dlen, ulen, flag, typecode) in toc.items() if 'webview' in name.lower()]
-              print(f'CArchive: {len(wv)} webview entries')
-              for name, tc in sorted(wv)[:20]:
-                  print(f'  [{tc}] {name}')
-              if not wv:
-                  print('NO webview entries in CArchive!')
-                  # Check PYZ
-                  for name, (dpos, dlen, ulen, flag, typecode) in toc.items():
-                      if name.endswith('.pyz'):
-                          print(f'Checking PYZ: {name}')
-                          pyz_data = ar.extract(name)
-                          # PYZ is a ZlibArchive
-                          import tempfile
-                          with tempfile.NamedTemporaryFile(suffix='.pyz', delete=False) as f:
-                              f.write(pyz_data)
-                              tmp = f.name
-                          try:
-                              pyz = ZlibArchiveReader(tmp)
-                              wv_pyz = [n for n in pyz.toc if 'webview' in n.lower()]
-                              print(f'  PYZ has {len(wv_pyz)} webview entries')
-                              for n in sorted(wv_pyz)[:20]:
-                                  print(f'    {n}')
-                          finally:
-                              os.unlink(tmp)
-          except Exception as e:
-              print(f'Archive inspection failed: {e}')
-          " || true
 
       - name: Build CLI binary (terminal)
         run: pyinstaller wireseal-cli.spec
 
-      - name: Stage binaries
+      - name: Stage binaries (Linux/macOS — onefile)
+        if: runner.os != 'Windows'
         shell: bash
         run: |
           mkdir -p dist/release
-          find dist -maxdepth 1 \( -name "WireSeal" -o -name "WireSeal.exe" \) \
+          find dist -maxdepth 1 \( -name "WireSeal" \) \
             -exec cp {} dist/release/${{ matrix.gui_name }} \;
-          find dist -maxdepth 1 \( -name "wireseal-cli" -o -name "wireseal-cli.exe" \) \
+          find dist -maxdepth 1 \( -name "wireseal-cli" \) \
             -exec cp {} dist/release/${{ matrix.cli_name }} \;
+
+      - name: Stage binaries (Windows — onedir GUI + onefile CLI)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          mkdir -p dist/release
+          # CLI is still onefile (no pywebview dependency) — stage as before
+          cp dist/wireseal-cli.exe "dist/release/${{ matrix.cli_name }}"
+          # GUI is onedir — zip the whole directory for downstream consumption.
+          # The NSIS packaging job unzips this and uses `File /r` to install it.
+          python -c "
+          import shutil
+          shutil.make_archive('dist/release/WireSeal-windows-x86_64-onedir', 'zip', 'dist', 'WireSeal')
+          "
+          ls -lh dist/release/
 
       - uses: actions/upload-artifact@v4
         with:
@@ -453,23 +436,48 @@ jobs:
         shell: powershell
         run: choco install nsis --yes --no-progress
 
+      - name: Extract onedir GUI tree
+        shell: powershell
+        run: |
+          # The build job uploaded WireSeal-windows-x86_64-onedir.zip which
+          # contains the full dist/WireSeal/ directory (onedir PyInstaller output).
+          # NSIS will install the extracted tree with `File /r`.
+          Expand-Archive `
+            -Path "dist\release\WireSeal-windows-x86_64-onedir.zip" `
+            -DestinationPath "dist\release\extracted" `
+            -Force
+          Get-ChildItem "dist\release\extracted\WireSeal" | Select-Object -First 10
+          if (-not (Test-Path "dist\release\extracted\WireSeal\WireSeal.exe")) {
+            Write-Error "WireSeal.exe missing from extracted onedir tree"
+            exit 1
+          }
+
       - name: Build NSIS installer
         shell: powershell
         run: |
           $version = "${{ steps.ver.outputs.version }}"
           $nsis    = "C:\Program Files (x86)\NSIS\makensis.exe"
-          $guiSrc  = (Resolve-Path "dist\release\WireSeal-windows-x86_64.exe").Path
+          $guiDir  = (Resolve-Path "dist\release\extracted\WireSeal").Path
           $cliSrc  = (Resolve-Path "dist\release\wireseal-cli-windows-x86_64.exe").Path
-          & $nsis /DVERSION="$version" "/DSRCBINARY=$guiSrc" "/DCLIBINARY=$cliSrc" installer\wireseal.nsi
+          & $nsis /DVERSION="$version" "/DSRCDIR=$guiDir" "/DCLIBINARY=$cliSrc" installer\wireseal.nsi
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-      - name: Build .zip (portable — GUI + CLI)
+      - name: Build .zip (portable — onedir GUI tree + CLI)
         shell: powershell
         run: |
           $version = "${{ steps.ver.outputs.version }}"
+          # Stage both the full onedir GUI tree and the CLI exe into a
+          # single portable zip. Users unzip to any location and run
+          # WireSeal\WireSeal.exe.
+          $stage = "dist\release\portable-stage"
+          New-Item -ItemType Directory -Force -Path $stage | Out-Null
+          Copy-Item -Recurse -Force "dist\release\extracted\WireSeal" "$stage\WireSeal"
+          Copy-Item -Force "dist\release\wireseal-cli-windows-x86_64.exe" "$stage\wireseal-cli.exe"
           Compress-Archive `
-            -Path "dist\release\WireSeal-windows-x86_64.exe","dist\release\wireseal-cli-windows-x86_64.exe" `
-            -DestinationPath "dist\release\wireseal-${version}-windows-x86_64.zip"
+            -Path "$stage\*" `
+            -DestinationPath "dist\release\wireseal-${version}-windows-x86_64.zip" `
+            -Force
+          Remove-Item -Recurse -Force $stage
 
       - uses: actions/upload-artifact@v4
         with:
@@ -500,6 +508,14 @@ jobs:
 
       - name: List artifacts
         run: ls -lh dist/release/
+
+      - name: Drop intermediate Windows onedir zip
+        run: |
+          # WireSeal-windows-x86_64-onedir.zip is an intermediate artifact
+          # consumed only by the package-windows job (via `File /r` in NSIS).
+          # It's not a user-facing download — the NSIS installer and the
+          # renamed portable zip (wireseal-<ver>-windows-x86_64.zip) supersede it.
+          rm -f dist/release/WireSeal-windows-x86_64-onedir.zip
 
       - name: Generate SHA-256 checksums
         run: |

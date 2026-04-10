@@ -3767,13 +3767,22 @@ def serve(host: str = "127.0.0.1", port: int = 8080, gui: bool = True) -> None:
                 if _meipass and os.path.isdir(_meipass):
                     _top = sorted(os.listdir(_meipass))
                     _lf.write(f"_MEIPASS top-level ({len(_top)} entries): {_top[:50]}\n")
-                    _wv_dir = os.path.join(_meipass, 'webview')
-                    _lf.write(f"webview dir exists: {os.path.isdir(_wv_dir)}\n")
-                    _wv_init = os.path.join(_wv_dir, '__init__.py')
-                    _lf.write(f"webview/__init__.py exists: {os.path.isfile(_wv_init)}\n")
-                    if os.path.isdir(_wv_dir):
-                        _wv_contents = sorted(os.listdir(_wv_dir))
-                        _lf.write(f"webview/ contents: {_wv_contents}\n")
+                    # Onedir (Windows) puts packages under _internal/, onefile
+                    # puts them at _MEIPASS root. Check both.
+                    for _wv_dir in (
+                        os.path.join(_meipass, 'webview'),
+                        os.path.join(_meipass, '_internal', 'webview'),
+                    ):
+                        _exists = os.path.isdir(_wv_dir)
+                        _lf.write(f"{_wv_dir} exists: {_exists}\n")
+                        if _exists:
+                            _wv_init = os.path.join(_wv_dir, '__init__.py')
+                            _lf.write(
+                                f"  __init__.py exists: {os.path.isfile(_wv_init)}\n"
+                            )
+                            _lf.write(
+                                f"  contents: {sorted(os.listdir(_wv_dir))[:30]}\n"
+                            )
         except Exception:
             pass
         if not _quiet:

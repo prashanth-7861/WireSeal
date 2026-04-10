@@ -63,8 +63,14 @@ jobs:
       - name: Stage binaries
         shell: bash
         run: |
+          # Windows GUI is built as PyInstaller onedir (dist/WireSeal/) to avoid
+          # the onefile bootloader's unreliable pywebview extraction. Zip the
+          # whole tree as a single CI artifact for smoke testing downstream jobs.
           mkdir -p dist/release
-          cp dist/WireSeal.exe dist/release/WireSeal-windows-x86_64.exe
+          python -c "
+          import shutil
+          shutil.make_archive('dist/release/WireSeal-windows-x86_64-onedir', 'zip', 'dist', 'WireSeal')
+          "
           cp dist/wireseal-cli.exe dist/release/wireseal-cli-windows-x86_64.exe
 
       - uses: actions/upload-artifact@v4

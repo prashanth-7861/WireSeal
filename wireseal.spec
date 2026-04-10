@@ -194,25 +194,67 @@ a = Analysis(
 
 pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
 
-exe = EXE(
-    pyz,
-    a.scripts,
-    a.binaries,
-    a.zipfiles,
-    a.datas,
-    [],
-    name='WireSeal',
-    debug=False,
-    bootloader_ignore_signals=False,
-    strip=False,
-    upx=False,
-    upx_exclude=[],
-    runtime_tmpdir=None,
-    console=False,
-    disable_windowed_traceback=False,
-    argv_emulation=False,
-    target_arch=None,
-    codesign_identity=None,
-    entitlements_file=None,
-    icon='assets/wireseal.ico' if sys.platform == 'win32' else None,
-)
+# ── Build mode selection ─────────────────────────────────────────────────────
+# Windows: onedir mode. PyInstaller's onefile bootloader has proven unreliable
+#          at extracting pywebview's Python source into _MEIPASS at runtime,
+#          causing `ModuleNotFoundError: No module named 'webview'` even when
+#          CArchive verification confirms 103 webview entries are bundled.
+#          Onedir sidesteps the bootloader extraction entirely — all files are
+#          laid out on disk at install time, and Python imports them via normal
+#          sys.path resolution. The NSIS installer ships the whole dist/WireSeal
+#          tree so the end user still sees a single installer.
+# Linux/macOS: onefile mode (known working, simpler artifact).
+# ─────────────────────────────────────────────────────────────────────────────
+if sys.platform == 'win32':
+    exe = EXE(
+        pyz,
+        a.scripts,
+        [],
+        exclude_binaries=True,  # keep binaries separate so COLLECT can stage them
+        name='WireSeal',
+        debug=False,
+        bootloader_ignore_signals=False,
+        strip=False,
+        upx=False,
+        upx_exclude=[],
+        console=False,
+        disable_windowed_traceback=False,
+        argv_emulation=False,
+        target_arch=None,
+        codesign_identity=None,
+        entitlements_file=None,
+        icon='assets/wireseal.ico',
+    )
+    coll = COLLECT(
+        exe,
+        a.binaries,
+        a.zipfiles,
+        a.datas,
+        strip=False,
+        upx=False,
+        upx_exclude=[],
+        name='WireSeal',  # → dist/WireSeal/ containing WireSeal.exe + _internal/
+    )
+else:
+    exe = EXE(
+        pyz,
+        a.scripts,
+        a.binaries,
+        a.zipfiles,
+        a.datas,
+        [],
+        name='WireSeal',
+        debug=False,
+        bootloader_ignore_signals=False,
+        strip=False,
+        upx=False,
+        upx_exclude=[],
+        runtime_tmpdir=None,
+        console=False,
+        disable_windowed_traceback=False,
+        argv_emulation=False,
+        target_arch=None,
+        codesign_identity=None,
+        entitlements_file=None,
+        icon=None,
+    )

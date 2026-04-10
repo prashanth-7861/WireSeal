@@ -11,8 +11,11 @@ Unicode True
 !ifndef VERSION
   !define VERSION "dev"
 !endif
-!ifndef SRCBINARY
-  !define SRCBINARY "..\dist\release\WireSeal-windows-x86_64.exe"
+; SRCDIR is the root of the PyInstaller onedir output (dist\WireSeal\).
+; It must contain WireSeal.exe at the top and _internal\ beneath it.
+; The whole tree is installed recursively with `File /r`.
+!ifndef SRCDIR
+  !define SRCDIR "..\dist\WireSeal"
 !endif
 !ifndef CLIBINARY
   !define CLIBINARY "..\dist\release\wireseal-cli-windows-x86_64.exe"
@@ -73,8 +76,17 @@ Section "WireSeal (required)" SecMain
 
   SetOutPath "$INSTDIR"
 
-  ; Copy the GUI desktop app
-  File /oname=${EXENAME} "${SRCBINARY}"
+  ; Recursively install the full PyInstaller onedir tree:
+  ;   $INSTDIR\WireSeal.exe
+  ;   $INSTDIR\_internal\          (Python runtime + pywebview + all deps)
+  ;     ├── webview\                 (native webview package — Python sources on disk)
+  ;     ├── clr_loader\              (pythonnet ffi helpers)
+  ;     ├── python312.dll
+  ;     └── ...
+  ;
+  ; Switching from onefile to onedir eliminates the runtime extraction bug
+  ; that was preventing pywebview from loading.
+  File /r "${SRCDIR}\*.*"
 
   ; Copy the CLI binary (for terminal usage)
   File /oname=${CLINAME} "${CLIBINARY}"
@@ -125,10 +137,13 @@ SectionEnd
 ; Uninstall section
 ;---------------------------------------------------------------------------
 Section "Uninstall"
-  ; Remove files
+  ; Remove the entire onedir tree (WireSeal.exe + _internal\ + all deps).
+  ; The whole directory was installed with `File /r`, so we RMDir /r the
+  ; installation root. This is safe because the installer owns $INSTDIR.
+  Delete "$INSTDIR\uninstall.exe"
+  RMDir /r "$INSTDIR\_internal"
   Delete "$INSTDIR\${EXENAME}"
   Delete "$INSTDIR\${CLINAME}"
-  Delete "$INSTDIR\uninstall.exe"
   RMDir  "$INSTDIR"
 
   ; Remove Start Menu shortcuts
