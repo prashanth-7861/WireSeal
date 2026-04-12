@@ -1,4 +1,16 @@
-import { Shield, Lock, Key, Layers, Github, Terminal, Globe, ExternalLink, User } from "lucide-react";
+import { useState, useEffect, useCallback } from "react";
+import {
+  Shield, Lock, Key, Layers, Github, Terminal, Globe, ExternalLink, User,
+  RefreshCw, CheckCircle, AlertTriangle, ArrowUpRight, Heart, BookOpen,
+  Tag, Clock, ChevronDown, ChevronUp,
+} from "lucide-react";
+
+/* ───────────────────────── Constants ───────────────────────── */
+
+const CURRENT_VERSION = "0.7.2";
+const GITHUB_REPO = "prashanth-7861/WireSeal";
+const GITHUB_API = `https://api.github.com/repos/${GITHUB_REPO}/releases/latest`;
+const GITHUB_URL = `https://github.com/${GITHUB_REPO}`;
 
 const FEATURES = [
   {
@@ -39,7 +51,198 @@ const FEATURES = [
   },
 ];
 
+interface ChangelogEntry {
+  version: string;
+  date: string;
+  highlights: string[];
+}
+
+const CHANGELOG: ChangelogEntry[] = [
+  {
+    version: "0.7.2",
+    date: "2026-04-12",
+    highlights: [
+      "Custom wax-seal app icon across all platforms (Windows EXE, NSIS installer, Dashboard favicon)",
+      "Multi-size ICO (16–256px) embedded in Windows builds",
+    ],
+  },
+  {
+    version: "0.7.1",
+    date: "2026-04-12",
+    highlights: [
+      "Fixed Windows installer: CLI binary moved to bin\\ subdirectory to avoid NTFS case-insensitive collision with GUI bootloader",
+      "PATH updated to $INSTDIR\\bin for CLI; stale entries from pre-fix installs are scrubbed automatically",
+    ],
+  },
+  {
+    version: "0.7.0",
+    date: "2026-04-10",
+    highlights: [
+      "Windows GUI switched from PyInstaller onefile to onedir — fixes pywebview native window loading",
+      "NSIS installer with Start Menu + Desktop shortcuts, de-elevated launch for WebView2 compatibility",
+      "Portable zip and setup.exe published as release assets with Sigstore signatures",
+    ],
+  },
+  {
+    version: "0.6.0",
+    date: "2026-04-09",
+    highlights: [
+      "Multi-admin vault with role-based access (owner / admin / viewer)",
+      "TOTP two-factor authentication enrollment and verification",
+      "Ephemeral client keys with configurable TTL and auto-expiry",
+      "Split-DNS configuration support",
+      "Local encrypted backup and restore",
+    ],
+  },
+  {
+    version: "0.5.0",
+    date: "2026-04-07",
+    highlights: [
+      "Web Dashboard with real-time WireGuard status monitoring",
+      "Client management UI (add, remove, QR codes)",
+      "Audit log viewer with filtering",
+      "Security settings and passphrase management",
+    ],
+  },
+];
+
+interface Credit {
+  name: string;
+  url: string;
+  description: string;
+  license: string;
+}
+
+const CREDITS: Credit[] = [
+  {
+    name: "WireGuard",
+    url: "https://www.wireguard.com",
+    description: "Fast, modern, secure VPN tunnel. The core protocol that WireSeal automates and manages.",
+    license: "GPL-2.0",
+  },
+  {
+    name: "Python",
+    url: "https://www.python.org",
+    description: "The programming language powering the WireSeal backend, CLI, and vault engine.",
+    license: "PSF License",
+  },
+  {
+    name: "pywebview",
+    url: "https://pywebview.flowrl.com",
+    description: "Lightweight cross-platform webview wrapper that gives WireSeal its native desktop window.",
+    license: "BSD-3-Clause",
+  },
+  {
+    name: "cryptography",
+    url: "https://cryptography.io",
+    description: "The Python cryptographic library providing ChaCha20-Poly1305, AES-256-GCM-SIV, HKDF, and X25519.",
+    license: "Apache-2.0 / BSD-3-Clause",
+  },
+  {
+    name: "argon2-cffi",
+    url: "https://argon2-cffi.readthedocs.io",
+    description: "Argon2id password hashing — the memory-hard KDF protecting your vault passphrase.",
+    license: "MIT",
+  },
+  {
+    name: "React",
+    url: "https://react.dev",
+    description: "The UI library powering this Dashboard.",
+    license: "MIT",
+  },
+  {
+    name: "Tailwind CSS",
+    url: "https://tailwindcss.com",
+    description: "Utility-first CSS framework used for all Dashboard styling.",
+    license: "MIT",
+  },
+  {
+    name: "Radix UI",
+    url: "https://www.radix-ui.com",
+    description: "Unstyled, accessible UI primitives for the Dashboard's dialogs, menus, and controls.",
+    license: "MIT",
+  },
+  {
+    name: "Vite",
+    url: "https://vite.dev",
+    description: "Next-generation frontend build tool for the Dashboard.",
+    license: "MIT",
+  },
+  {
+    name: "Lucide",
+    url: "https://lucide.dev",
+    description: "Beautiful, consistent icon set used throughout the Dashboard.",
+    license: "ISC",
+  },
+  {
+    name: "Click",
+    url: "https://click.palletsprojects.com",
+    description: "Python CLI framework for the wireseal command-line interface.",
+    license: "BSD-3-Clause",
+  },
+  {
+    name: "PyInstaller",
+    url: "https://pyinstaller.org",
+    description: "Bundles WireSeal into standalone executables for Windows, macOS, and Linux.",
+    license: "GPL-2.0 (bootloader: Apache-2.0)",
+  },
+  {
+    name: "Jinja2",
+    url: "https://jinja.palletsprojects.com",
+    description: "Template engine for generating WireGuard configuration files.",
+    license: "BSD-3-Clause",
+  },
+  {
+    name: "Sigstore",
+    url: "https://www.sigstore.dev",
+    description: "Keyless code signing for release binaries — every artifact is verifiable without a long-lived key.",
+    license: "Apache-2.0",
+  },
+];
+
+/* ───────────────────────── Check for Updates ───────────────────────── */
+
+type UpdateState = "idle" | "checking" | "up-to-date" | "update-available" | "error";
+
+interface UpdateInfo {
+  latestVersion: string;
+  releaseUrl: string;
+  publishedAt: string;
+}
+
+function useUpdateCheck() {
+  const [state, setState] = useState<UpdateState>("idle");
+  const [info, setInfo] = useState<UpdateInfo | null>(null);
+  const [error, setError] = useState("");
+
+  const check = useCallback(async () => {
+    setState("checking");
+    setError("");
+    try {
+      const res = await fetch(GITHUB_API);
+      if (!res.ok) throw new Error(`GitHub API returned ${res.status}`);
+      const data = await res.json();
+      const latest = (data.tag_name as string).replace(/^v/, "");
+      const releaseUrl = data.html_url as string;
+      const publishedAt = data.published_at as string;
+      setInfo({ latestVersion: latest, releaseUrl, publishedAt });
+      setState(latest === CURRENT_VERSION ? "up-to-date" : "update-available");
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : "Failed to check for updates");
+      setState("error");
+    }
+  }, []);
+
+  return { state, info, error, check };
+}
+
+/* ───────────────────────── Component ───────────────────────── */
+
 export function About() {
+  const update = useUpdateCheck();
+  const [changelogExpanded, setChangelogExpanded] = useState(false);
+  const visibleChangelog = changelogExpanded ? CHANGELOG : CHANGELOG.slice(0, 3);
+
   return (
     <div>
       <div className="mb-8">
@@ -50,12 +253,17 @@ export function About() {
       {/* Hero card */}
       <div className="bg-gradient-to-br from-blue-600 to-blue-800 rounded-xl p-8 mb-8 text-white">
         <div className="flex items-center gap-4 mb-4">
-          <div className="w-16 h-16 bg-white/20 rounded-2xl flex items-center justify-center">
-            <Shield className="w-9 h-9 text-white" />
-          </div>
+          <img
+            src="/wireseal-192.png"
+            alt="WireSeal"
+            width={64}
+            height={64}
+            className="rounded-xl drop-shadow-lg"
+          />
           <div>
             <h2 className="text-2xl font-bold">WireSeal</h2>
             <p className="text-blue-200 text-sm">Secure · Automated · Cross-platform</p>
+            <p className="text-blue-300/70 text-xs mt-0.5 font-mono">v{CURRENT_VERSION}</p>
           </div>
         </div>
         <p className="text-blue-100 leading-relaxed max-w-xl">
@@ -66,7 +274,7 @@ export function About() {
 
         <div className="mt-6 flex flex-wrap gap-3">
           <a
-            href="https://github.com/prashanth-7861/WireSeal"
+            href={GITHUB_URL}
             target="_blank"
             rel="noreferrer"
             className="inline-flex items-center gap-2 bg-white/20 hover:bg-white/30 transition-colors px-4 py-2 rounded-lg text-sm font-medium"
@@ -77,7 +285,50 @@ export function About() {
           <span className="inline-flex items-center gap-2 bg-white/10 px-4 py-2 rounded-lg text-sm">
             MIT License
           </span>
+          {/* Check for Updates button */}
+          <button
+            onClick={update.check}
+            disabled={update.state === "checking"}
+            className="inline-flex items-center gap-2 bg-white/20 hover:bg-white/30 disabled:opacity-60 transition-colors px-4 py-2 rounded-lg text-sm font-medium cursor-pointer disabled:cursor-wait"
+          >
+            <RefreshCw className={`w-4 h-4 ${update.state === "checking" ? "animate-spin" : ""}`} />
+            {update.state === "checking" ? "Checking..." : "Check for Updates"}
+          </button>
         </div>
+
+        {/* Update result banner */}
+        {update.state === "up-to-date" && (
+          <div className="mt-4 flex items-center gap-2 bg-green-500/20 border border-green-400/30 rounded-lg px-4 py-2.5 text-sm">
+            <CheckCircle className="w-4 h-4 text-green-300 flex-shrink-0" />
+            <span className="text-green-100">You're on the latest version (v{CURRENT_VERSION}).</span>
+          </div>
+        )}
+        {update.state === "update-available" && update.info && (
+          <div className="mt-4 flex items-center justify-between bg-amber-500/20 border border-amber-400/30 rounded-lg px-4 py-2.5 text-sm">
+            <div className="flex items-center gap-2">
+              <AlertTriangle className="w-4 h-4 text-amber-300 flex-shrink-0" />
+              <span className="text-amber-100">
+                Update available: <strong>v{update.info.latestVersion}</strong>
+                <span className="text-amber-200/60 ml-1">(you have v{CURRENT_VERSION})</span>
+              </span>
+            </div>
+            <a
+              href={update.info.releaseUrl}
+              target="_blank"
+              rel="noreferrer"
+              className="inline-flex items-center gap-1 text-amber-200 hover:text-white transition-colors font-medium ml-3 flex-shrink-0"
+            >
+              Download
+              <ArrowUpRight className="w-3.5 h-3.5" />
+            </a>
+          </div>
+        )}
+        {update.state === "error" && (
+          <div className="mt-4 flex items-center gap-2 bg-red-500/20 border border-red-400/30 rounded-lg px-4 py-2.5 text-sm">
+            <AlertTriangle className="w-4 h-4 text-red-300 flex-shrink-0" />
+            <span className="text-red-200">{update.error}</span>
+          </div>
+        )}
 
         {/* Developer info */}
         <div className="mt-6 pt-6 border-t border-white/20">
@@ -131,6 +382,98 @@ export function About() {
             </div>
           </div>
         ))}
+      </div>
+
+      {/* Changelog */}
+      <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-6 mb-8">
+        <div className="flex items-center gap-2 mb-5">
+          <BookOpen className="w-5 h-5 text-gray-700" />
+          <h2 className="text-lg font-semibold text-gray-900">Changelog</h2>
+        </div>
+        <div className="space-y-5">
+          {visibleChangelog.map((entry, idx) => (
+            <div key={entry.version} className={idx > 0 ? "pt-5 border-t border-gray-100" : ""}>
+              <div className="flex items-center gap-3 mb-2">
+                <span className="inline-flex items-center gap-1.5 bg-blue-100 text-blue-700 px-2.5 py-0.5 rounded-full text-sm font-semibold">
+                  <Tag className="w-3.5 h-3.5" />
+                  v{entry.version}
+                </span>
+                <span className="inline-flex items-center gap-1 text-gray-400 text-xs">
+                  <Clock className="w-3 h-3" />
+                  {entry.date}
+                </span>
+                {idx === 0 && (
+                  <span className="bg-green-100 text-green-700 text-xs px-2 py-0.5 rounded-full font-medium">
+                    Latest
+                  </span>
+                )}
+              </div>
+              <ul className="space-y-1 ml-1">
+                {entry.highlights.map((h, i) => (
+                  <li key={i} className="text-sm text-gray-600 leading-relaxed flex items-start gap-2">
+                    <span className="text-blue-400 mt-1.5 flex-shrink-0">&#x2022;</span>
+                    {h}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          ))}
+        </div>
+        {CHANGELOG.length > 3 && (
+          <button
+            onClick={() => setChangelogExpanded((prev) => !prev)}
+            className="mt-4 flex items-center gap-1.5 text-sm text-blue-600 hover:text-blue-800 transition-colors font-medium"
+          >
+            {changelogExpanded ? (
+              <>
+                <ChevronUp className="w-4 h-4" />
+                Show less
+              </>
+            ) : (
+              <>
+                <ChevronDown className="w-4 h-4" />
+                Show older releases ({CHANGELOG.length - 3} more)
+              </>
+            )}
+          </button>
+        )}
+      </div>
+
+      {/* Credits & Acknowledgements */}
+      <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-6 mb-8">
+        <div className="flex items-center gap-2 mb-2">
+          <Heart className="w-5 h-5 text-rose-500" />
+          <h2 className="text-lg font-semibold text-gray-900">Credits &amp; Acknowledgements</h2>
+        </div>
+        <p className="text-sm text-gray-500 mb-5">
+          WireSeal is built on the shoulders of these incredible open-source projects.
+        </p>
+        <div className="grid grid-cols-2 gap-3">
+          {CREDITS.map(({ name, url, description, license }) => (
+            <a
+              key={name}
+              href={url}
+              target="_blank"
+              rel="noreferrer"
+              className="group flex items-start gap-3 p-3 rounded-lg border border-gray-100 hover:border-blue-200 hover:bg-blue-50/50 transition-colors"
+            >
+              <div className="w-8 h-8 bg-gray-100 group-hover:bg-blue-100 rounded-md flex items-center justify-center flex-shrink-0 mt-0.5 transition-colors">
+                <ExternalLink className="w-3.5 h-3.5 text-gray-400 group-hover:text-blue-600 transition-colors" />
+              </div>
+              <div className="min-w-0">
+                <div className="flex items-center gap-2">
+                  <span className="font-medium text-gray-900 text-sm group-hover:text-blue-700 transition-colors">
+                    {name}
+                  </span>
+                  <span className="text-[10px] text-gray-400 bg-gray-100 px-1.5 py-0.5 rounded font-mono">
+                    {license}
+                  </span>
+                </div>
+                <p className="text-xs text-gray-500 leading-relaxed mt-0.5">{description}</p>
+              </div>
+            </a>
+          ))}
+        </div>
       </div>
 
       {/* Quick reference */}

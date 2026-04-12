@@ -370,9 +370,13 @@ export function Layout() {
       <div className="min-h-screen bg-gradient-to-br from-slate-900 via-blue-950 to-slate-900 flex items-center justify-center">
         <div className="flex flex-col items-center text-center gap-8 max-w-lg w-full mx-4 animate-fade-in">
           {/* Logo */}
-          <div className="w-24 h-24 bg-blue-600/20 rounded-3xl flex items-center justify-center border border-blue-500/30 shadow-lg shadow-blue-500/10">
-            <Shield className="w-14 h-14 text-blue-400" />
-          </div>
+          <img
+            src="/wireseal-192.png"
+            alt="WireSeal"
+            width={96}
+            height={96}
+            className="drop-shadow-[0_4px_24px_rgba(59,130,246,0.35)]"
+          />
 
           {/* Welcome text */}
           <div>
