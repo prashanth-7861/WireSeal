@@ -25,6 +25,11 @@ Unicode True
 !define PUBLISHER   "WireSeal Contributors"
 !define URL         "https://github.com/prashanth-7861/WireSeal"
 !define EXENAME     "WireSeal.exe"
+; CLI binary lives in its own bin\ subdirectory to prevent a case-insensitive
+; filename collision with the GUI bootloader on NTFS (Windows treats
+; "WireSeal.exe" and "wireseal.exe" as the same file, so co-locating them
+; would cause the CLI onefile binary to overwrite the GUI onedir bootloader).
+!define CLISUBDIR   "bin"
 !define CLINAME     "wireseal.exe"
 !define REGKEY      "Software\Microsoft\Windows\CurrentVersion\Uninstall\WireSeal"
 !define INSTREGKEY  "Software\WireSeal"
@@ -88,8 +93,19 @@ Section "WireSeal (required)" SecMain
   ; that was preventing pywebview from loading.
   File /r "${SRCDIR}\*.*"
 
-  ; Copy the CLI binary (for terminal usage)
+  ; Clean up any stale CLI binary from a pre-fix install where the CLI lived
+  ; in $INSTDIR and collided case-insensitively with WireSeal.exe. On a fresh
+  ; install this is a no-op; on an upgrade it removes the broken artifact.
+  ; We do NOT delete "$INSTDIR\wireseal.exe" because on NTFS that is the same
+  ; inode as WireSeal.exe which was just installed by File /r above.
+
+  ; Install the CLI binary into its own bin\ subdirectory so it cannot
+  ; collide with the GUI bootloader. $INSTDIR\bin is added to PATH below
+  ; so users can still run `wireseal` from a terminal.
+  CreateDirectory "$INSTDIR\${CLISUBDIR}"
+  SetOutPath "$INSTDIR\${CLISUBDIR}"
   File /oname=${CLINAME} "${CLIBINARY}"
+  SetOutPath "$INSTDIR"
 
   ; Create uninstaller
   WriteUninstaller "$INSTDIR\uninstall.exe"
@@ -104,14 +120,15 @@ Section "WireSeal (required)" SecMain
   CreateShortCut "$DESKTOP\${APPNAME}.lnk" "$INSTDIR\${EXENAME}" \
                  "" "$INSTDIR\${EXENAME}" 0
 
-  ; ── Add $INSTDIR to PATH (for CLI usage from terminal) ──
+  ; ── Add $INSTDIR\bin to PATH (for `wireseal` CLI usage from terminal) ──
+  ; Also scrub a stale $INSTDIR entry from a pre-fix install, in case the
+  ; old installer added $INSTDIR directly (which now contains only the GUI).
   ExecWait '$WINDIR\System32\WindowsPowerShell\v1.0\powershell.exe \
     -NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -Command \
     "$p = [Environment]::GetEnvironmentVariable(\"PATH\", \"Machine\"); \
-     $parts = $p -split \";\"; \
-     if ($parts -notcontains \"$INSTDIR\") { \
-       [Environment]::SetEnvironmentVariable(\"PATH\", \"$p;$INSTDIR\", \"Machine\") \
-     }"'
+     $parts = @($p -split \";\" | Where-Object { $_ -and $_ -ne \"$INSTDIR\" }); \
+     if ($parts -notcontains \"$INSTDIR\bin\") { $parts += \"$INSTDIR\bin\" }; \
+     [Environment]::SetEnvironmentVariable(\"PATH\", ($parts -join \";\"), \"Machine\")"'
   SendMessage ${HWND_BROADCAST} ${WM_WININICHANGE} 0 "STR:Environment" /TIMEOUT=5000
 
   ; ── Add/Remove Programs entry ──
@@ -137,13 +154,15 @@ SectionEnd
 ; Uninstall section
 ;---------------------------------------------------------------------------
 Section "Uninstall"
-  ; Remove the entire onedir tree (WireSeal.exe + _internal\ + all deps).
-  ; The whole directory was installed with `File /r`, so we RMDir /r the
-  ; installation root. This is safe because the installer owns $INSTDIR.
+  ; Remove the entire onedir tree (WireSeal.exe + _internal\ + bin\ + all deps).
+  ; The whole directory was installed with `File /r` + the CLI into bin\, so
+  ; we explicitly clean each known subtree. This is safe because the installer
+  ; owns $INSTDIR.
   Delete "$INSTDIR\uninstall.exe"
   RMDir /r "$INSTDIR\_internal"
+  Delete "$INSTDIR\${CLISUBDIR}\${CLINAME}"
+  RMDir  "$INSTDIR\${CLISUBDIR}"
   Delete "$INSTDIR\${EXENAME}"
-  Delete "$INSTDIR\${CLINAME}"
   RMDir  "$INSTDIR"
 
   ; Remove Start Menu shortcuts
@@ -154,12 +173,13 @@ Section "Uninstall"
   ; Remove Desktop shortcut
   Delete "$DESKTOP\${APPNAME}.lnk"
 
-  ; Remove $INSTDIR from system PATH
+  ; Remove $INSTDIR and $INSTDIR\bin from system PATH (both entries are
+  ; stripped so pre-fix installs that added $INSTDIR directly are cleaned up).
   ExecWait '$WINDIR\System32\WindowsPowerShell\v1.0\powershell.exe \
     -NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -Command \
     "[Environment]::SetEnvironmentVariable(\"PATH\", \
       (([Environment]::GetEnvironmentVariable(\"PATH\", \"Machine\") -split \";\") | \
-       Where-Object { $_ -ne \"$INSTDIR\" }) -join \";\", \"Machine\")"'
+       Where-Object { $_ -and $_ -ne \"$INSTDIR\" -and $_ -ne \"$INSTDIR\bin\" }) -join \";\", \"Machine\")"'
   SendMessage ${HWND_BROADCAST} ${WM_WININICHANGE} 0 "STR:Environment" /TIMEOUT=5000
 
   ; Remove registry entries
