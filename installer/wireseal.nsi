@@ -48,6 +48,8 @@ BrandingText "${APPNAME} ${VERSION}"
 !include "MUI2.nsh"
 !include "FileFunc.nsh"
 
+!define MUI_ICON   "..\assets\wireseal.ico"
+!define MUI_UNICON "..\assets\wireseal.ico"
 !define MUI_ABORTWARNING
 
 ; Installer pages
