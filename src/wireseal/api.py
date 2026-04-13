@@ -1558,6 +1558,49 @@ def _h_client_config(req: "_Handler", groups: tuple) -> dict:
     return {"name": name, "config": config_str}
 
 
+def _h_client_config_download(req: "_Handler", groups: tuple) -> None:
+    """Serve the client WireGuard config as a direct file download."""
+    _require_unlocked()
+    name = (groups[0] if groups else "").strip()
+    if not name:
+        raise _ApiError("client name is required", 400)
+
+    with _lock:
+        vault      = _session["vault"]
+        passphrase = _session["passphrase"]
+        _actor_id  = _session.get("admin_id", "owner")
+
+    from wireseal.core.config_builder import ConfigBuilder
+    from wireseal.security.audit      import AuditLog
+
+    with vault.open(passphrase) as state:
+        if name not in state.clients:
+            raise _ApiError(f"Client '{name}' not found.", 404)
+        cdata = state.clients[name]
+        config_str = ConfigBuilder().render_client_config(
+            client_private_key=_extract(cdata["private_key"]),
+            client_ip=cdata["ip"],
+            dns_server="1.1.1.1, 8.8.8.8",
+            server_public_key=_extract(state.server["public_key"]),
+            psk=_extract(cdata["psk"]),
+            server_endpoint=_resolve_client_endpoint(state.server),
+            mtu=_detect_mtu(),
+        )
+
+    AuditLog(_AUDIT_PATH).log("export-config", {"client": name}, actor=_actor_id)
+
+    body = config_str.encode("utf-8")
+    safe_name = re.sub(r"[^a-zA-Z0-9_\-.]", "_", name)
+    req.send_response(200)
+    req.send_header("Content-Type", "application/octet-stream")
+    req.send_header("Content-Disposition", f'attachment; filename="{safe_name}.conf"')
+    req.send_header("Content-Length", str(len(body)))
+    req._cors()
+    req.end_headers()
+    req.wfile.write(body)
+    return None  # Signal to _dispatch that response is already written
+
+
 def _h_audit_log(req: "_Handler", _groups: tuple) -> dict:
     if not _AUDIT_PATH.exists():
         return {"entries": []}
@@ -3570,6 +3613,7 @@ _ROUTES: list[tuple[str, re.Pattern, Any]] = [
     ("POST",   re.compile(r"^/api/clients$"),                _h_add_client),
     # QR must come before the generic DELETE so GET .../qr is matched first
     ("GET",    re.compile(r"^/api/clients/([^/]+)/qr$"),     _h_client_qr),
+    ("GET",    re.compile(r"^/api/clients/([^/]+)/config/download$"), _h_client_config_download),
     ("GET",    re.compile(r"^/api/clients/([^/]+)/config$"), _h_client_config),
     ("POST",   re.compile(r"^/api/clients/([^/]+)/rotate$"), _h_rotate_client_keys),
     ("POST",   re.compile(r"^/api/clients/([^/]+)/ttl$"),   _h_set_client_ttl),
@@ -3675,7 +3719,9 @@ class _Handler(BaseHTTPRequestHandler):
             m = pattern.match(path)
             if m:
                 try:
-                    self._send(handler(self, m.groups()))
+                    result = handler(self, m.groups())
+                    if result is not None:
+                        self._send(result)
                 except _ApiError as exc:
                     self._send({"error": str(exc)}, exc.status)
                 except Exception as exc:

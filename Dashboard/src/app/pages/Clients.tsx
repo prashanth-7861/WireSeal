@@ -142,21 +142,10 @@ export function Clients() {
   };
 
   // ── Download config ──────────────────────────────────────────────────────
-  const handleDownloadConfig = async (name: string) => {
-    try {
-      const res = await api.clientConfig(name);
-      const blob = new Blob([res.config], { type: "text/plain" });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = `${name}.conf`;
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      URL.revokeObjectURL(url);
-    } catch (e: unknown) {
-      setError(e instanceof Error ? e.message : "Failed to download config");
-    }
+  const handleDownloadConfig = (name: string) => {
+    // Direct download via backend — serves the .conf file with
+    // Content-Disposition: attachment so pywebview and browsers handle it natively.
+    window.open(`/api/clients/${encodeURIComponent(name)}/config/download`, "_blank");
   };
 
   // ── Progress ring for countdown ───────────────────────────────────────────
