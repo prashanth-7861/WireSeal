@@ -629,6 +629,8 @@ class VaultState:
             self._data["dns_mappings"] = data["dns_mappings"]
         if "backup_config" in data:
             self._data["backup_config"] = data["backup_config"]
+        if "client_configs" in data:
+            self._data["client_configs"] = data["client_configs"]
         self._wiped = False
         # Reference back to the owning Vault instance (for keyslot management)
         self.vault: Vault | None = vault
@@ -703,6 +705,8 @@ class VaultState:
             d["dns_mappings"] = self._data["dns_mappings"]
         if "backup_config" in self._data:
             d["backup_config"] = self._data["backup_config"]
+        if "client_configs" in self._data:
+            d["client_configs"] = self._data["client_configs"]
         return d
 
     def wipe(self) -> None:

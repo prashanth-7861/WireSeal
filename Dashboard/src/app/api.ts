@@ -196,6 +196,24 @@ export interface SessionSummary {
 
 // ─── Endpoints ───────────────────────────────────────────────────────────────
 
+export interface ClientConfig {
+  name: string;
+  imported_at: string;
+  server_endpoint: string;
+  interface_ip: string;
+}
+
+export interface ClientConfigFull extends ClientConfig {
+  config_text: string;
+}
+
+export interface ClientTunnelStatus {
+  connected: boolean;
+  profile: string | null;
+  interface: string;
+  wg_output?: string;
+}
+
 export const api = {
   vaultInfo: () =>
     _fetch<VaultInfo>("GET", "/vault-info"),
@@ -359,4 +377,30 @@ export const api = {
 
   health: (): Promise<{ status: string; vault_initialized: boolean; vault_locked: boolean; uptime_seconds: number }> =>
     _fetch<{ status: string; vault_initialized: boolean; vault_locked: boolean; uptime_seconds: number }>("GET", "/health"),
+
+  // ── Client mode — config management + tunnel ──────────────────────────────
+  clientListConfigs: () =>
+    _fetch<{ configs: ClientConfig[] }>("GET", "/client/configs"),
+
+  clientImportConfig: (name: string, config_text: string) =>
+    _fetch<{ ok: boolean; name: string; server_endpoint?: string; interface_ip?: string; imported_at: string }>(
+      "POST", "/client/configs", { name, config_text }
+    ),
+
+  clientGetConfig: (name: string) =>
+    _fetch<ClientConfigFull>("GET", `/client/configs/${encodeURIComponent(name)}`),
+
+  clientDeleteConfig: (name: string) =>
+    _fetch<{ ok: boolean }>("DELETE", `/client/configs/${encodeURIComponent(name)}`),
+
+  clientTunnelUp: (name: string) =>
+    _fetch<{ interface: string; profile: string; status: string }>(
+      "POST", `/client/tunnel/up/${encodeURIComponent(name)}`
+    ),
+
+  clientTunnelDown: () =>
+    _fetch<{ interface: string; profile: string; status: string }>("POST", "/client/tunnel/down"),
+
+  clientTunnelStatus: () =>
+    _fetch<ClientTunnelStatus>("GET", "/client/tunnel/status"),
 };

@@ -3595,6 +3595,176 @@ def _h_update_install(req: "_Handler", _groups: tuple) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Client mode — import configs, manage WireGuard client tunnel
+# ---------------------------------------------------------------------------
+
+
+def _h_client_import_config(req: "_Handler", _groups: tuple) -> dict:
+    """POST /api/client/configs — Import a WireGuard .conf into the vault."""
+    _require_unlocked()
+    body = req._json()
+    name = body.get("name", "").strip()
+    config_text = body.get("config_text", "")
+
+    if not name:
+        raise _ApiError("name is required", 400)
+    if not re.fullmatch(r"[a-zA-Z0-9_-]{1,32}", name):
+        raise _ApiError("Name must be alphanumeric, hyphens, or underscores (max 32 chars)", 400)
+    if not config_text:
+        raise _ApiError("config_text is required", 400)
+
+    from wireseal.client.config_store import import_config, validate_conf
+
+    errors = validate_conf(config_text)
+    if errors:
+        raise _ApiError(f"Invalid config: {'; '.join(errors)}", 400)
+
+    with _lock:
+        vault = _session["vault"]
+        passphrase = _session["passphrase"]
+
+    from wireseal.security.audit import AuditLog
+
+    with vault.open(passphrase) as state:
+        try:
+            meta = import_config(state._data, name, config_text)
+        except ValueError as exc:
+            raise _ApiError(str(exc), 409)
+        vault.save(state, passphrase)
+
+    AuditLog(_VAULT_DIR / "audit.log").log(
+        "client-config-import",
+        {"name": name, **meta},
+        actor=_session.get("admin_id", "owner"),
+    )
+    return {"ok": True, "name": name, **meta}
+
+
+def _h_client_list_configs(req: "_Handler", _groups: tuple) -> dict:
+    """GET /api/client/configs — List all imported client configs."""
+    _require_unlocked()
+
+    with _lock:
+        vault = _session["vault"]
+        passphrase = _session["passphrase"]
+
+    from wireseal.client.config_store import list_configs
+
+    with vault.open(passphrase) as state:
+        configs = list_configs(state._data)
+
+    return {"configs": configs}
+
+
+def _h_client_get_config(req: "_Handler", groups: tuple) -> dict:
+    """GET /api/client/configs/<name> — Get a single config by name."""
+    _require_unlocked()
+    name = groups[0]
+
+    with _lock:
+        vault = _session["vault"]
+        passphrase = _session["passphrase"]
+
+    from wireseal.client.config_store import get_config
+
+    with vault.open(passphrase) as state:
+        try:
+            config = get_config(state._data, name)
+        except KeyError:
+            raise _ApiError(f"Profile '{name}' not found", 404)
+
+    return config
+
+
+def _h_client_delete_config(req: "_Handler", groups: tuple) -> dict:
+    """DELETE /api/client/configs/<name> — Delete an imported config."""
+    _require_unlocked()
+    name = groups[0]
+
+    with _lock:
+        vault = _session["vault"]
+        passphrase = _session["passphrase"]
+
+    from wireseal.client.config_store import delete_config
+    from wireseal.security.audit import AuditLog
+
+    with vault.open(passphrase) as state:
+        try:
+            delete_config(state._data, name)
+        except KeyError:
+            raise _ApiError(f"Profile '{name}' not found", 404)
+        vault.save(state, passphrase)
+
+    AuditLog(_VAULT_DIR / "audit.log").log(
+        "client-config-delete",
+        {"name": name},
+        actor=_session.get("admin_id", "owner"),
+    )
+    return {"ok": True}
+
+
+def _h_client_tunnel_up(req: "_Handler", groups: tuple) -> dict:
+    """POST /api/client/tunnel/up — Bring up the WireGuard client tunnel."""
+    _require_unlocked()
+    name = groups[0]
+
+    with _lock:
+        vault = _session["vault"]
+        passphrase = _session["passphrase"]
+
+    from wireseal.client.config_store import get_config
+    from wireseal.client.tunnel import tunnel_up
+    from wireseal.security.audit import AuditLog
+
+    with vault.open(passphrase) as state:
+        try:
+            config = get_config(state._data, name)
+        except KeyError:
+            raise _ApiError(f"Profile '{name}' not found", 404)
+
+    try:
+        result = tunnel_up(config["config_text"], name)
+    except RuntimeError as exc:
+        raise _ApiError(str(exc), 500)
+
+    AuditLog(_VAULT_DIR / "audit.log").log(
+        "client-tunnel-up",
+        {"profile": name},
+        actor=_session.get("admin_id", "owner"),
+    )
+    return result
+
+
+def _h_client_tunnel_down(req: "_Handler", _groups: tuple) -> dict:
+    """POST /api/client/tunnel/down — Bring down the WireGuard client tunnel."""
+    _require_unlocked()
+
+    from wireseal.client.tunnel import tunnel_down
+    from wireseal.security.audit import AuditLog
+
+    try:
+        result = tunnel_down()
+    except RuntimeError as exc:
+        raise _ApiError(str(exc), 500)
+
+    AuditLog(_VAULT_DIR / "audit.log").log(
+        "client-tunnel-down",
+        {"profile": result.get("profile")},
+        actor=_session.get("admin_id", "owner"),
+    )
+    return result
+
+
+def _h_client_tunnel_status(req: "_Handler", _groups: tuple) -> dict:
+    """GET /api/client/tunnel/status — Get current tunnel status."""
+    _require_unlocked()
+
+    from wireseal.client.tunnel import tunnel_status
+
+    return tunnel_status()
+
+
+# ---------------------------------------------------------------------------
 # Routing table  — order matters for overlapping patterns
 # ---------------------------------------------------------------------------
 
@@ -3663,6 +3833,14 @@ _ROUTES: list[tuple[str, re.Pattern, Any]] = [
     # Auto-update
     ("GET",    re.compile(r"^/api/update/check$"),          _h_update_check),
     ("POST",   re.compile(r"^/api/update/install$"),        _h_update_install),
+    # Client mode — config management + tunnel
+    ("GET",    re.compile(r"^/api/client/configs$"),                     _h_client_list_configs),
+    ("POST",   re.compile(r"^/api/client/configs$"),                     _h_client_import_config),
+    ("GET",    re.compile(r"^/api/client/configs/([^/]+)$"),             _h_client_get_config),
+    ("DELETE", re.compile(r"^/api/client/configs/([^/]+)$"),             _h_client_delete_config),
+    ("POST",   re.compile(r"^/api/client/tunnel/up/([^/]+)$"),          _h_client_tunnel_up),
+    ("POST",   re.compile(r"^/api/client/tunnel/down$"),                _h_client_tunnel_down),
+    ("GET",    re.compile(r"^/api/client/tunnel/status$"),              _h_client_tunnel_status),
 ]
 
 # ---------------------------------------------------------------------------
