@@ -1,16 +1,14 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useCallback } from "react";
 import {
   Shield, Lock, Key, Layers, Github, Terminal, Globe, ExternalLink, User,
   RefreshCw, CheckCircle, AlertTriangle, ArrowUpRight, Heart, BookOpen,
-  Tag, Clock, ChevronDown, ChevronUp,
+  Tag, Clock, ChevronDown, ChevronUp, Download,
 } from "lucide-react";
 
 /* ───────────────────────── Constants ───────────────────────── */
 
-const CURRENT_VERSION = "0.7.2";
-const GITHUB_REPO = "prashanth-7861/WireSeal";
-const GITHUB_API = `https://api.github.com/repos/${GITHUB_REPO}/releases/latest`;
-const GITHUB_URL = `https://github.com/${GITHUB_REPO}`;
+const CURRENT_VERSION = "0.7.4";
+const GITHUB_URL = "https://github.com/prashanth-7861/WireSeal";
 
 const FEATURES = [
   {
@@ -58,6 +56,23 @@ interface ChangelogEntry {
 }
 
 const CHANGELOG: ChangelogEntry[] = [
+  {
+    version: "0.7.4",
+    date: "2026-04-13",
+    highlights: [
+      "Auto-update: Check for Updates now downloads and installs new releases automatically",
+      "Backend /api/update/check and /api/update/install endpoints for cross-platform updates",
+      "Silent NSIS installer upgrade on Windows; atomic binary replace on Linux/macOS",
+    ],
+  },
+  {
+    version: "0.7.3",
+    date: "2026-04-13",
+    highlights: [
+      "Welcome screen shows wax-seal logo instead of generic icon",
+      "About page: Check for Updates button, expandable Changelog, Credits & Acknowledgements",
+    ],
+  },
   {
     version: "0.7.2",
     date: "2026-04-12",
@@ -200,46 +215,84 @@ const CREDITS: Credit[] = [
   },
 ];
 
-/* ───────────────────────── Check for Updates ───────────────────────── */
+/* ───────────────────────── Auto-Update Hook ───────────────────────── */
 
-type UpdateState = "idle" | "checking" | "up-to-date" | "update-available" | "error";
+type UpdateState =
+  | "idle"
+  | "checking"
+  | "up-to-date"
+  | "update-available"
+  | "downloading"
+  | "installing"
+  | "done"
+  | "error";
 
 interface UpdateInfo {
   latestVersion: string;
   releaseUrl: string;
   publishedAt: string;
+  assetName: string;
 }
 
-function useUpdateCheck() {
+function useAutoUpdate() {
   const [state, setState] = useState<UpdateState>("idle");
   const [info, setInfo] = useState<UpdateInfo | null>(null);
   const [error, setError] = useState("");
+  const [message, setMessage] = useState("");
 
   const check = useCallback(async () => {
     setState("checking");
     setError("");
+    setMessage("");
     try {
-      const res = await fetch(GITHUB_API);
-      if (!res.ok) throw new Error(`GitHub API returned ${res.status}`);
+      const res = await fetch("/api/update/check");
+      if (!res.ok) throw new Error(`Server returned ${res.status}`);
       const data = await res.json();
-      const latest = (data.tag_name as string).replace(/^v/, "");
-      const releaseUrl = data.html_url as string;
-      const publishedAt = data.published_at as string;
-      setInfo({ latestVersion: latest, releaseUrl, publishedAt });
-      setState(latest === CURRENT_VERSION ? "up-to-date" : "update-available");
+      setInfo({
+        latestVersion: data.latest_version,
+        releaseUrl: data.release_url,
+        publishedAt: data.published_at,
+        assetName: data.asset_name,
+      });
+      if (data.update_available) {
+        setState("update-available");
+      } else {
+        setState("up-to-date");
+      }
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : "Failed to check for updates");
       setState("error");
     }
   }, []);
 
-  return { state, info, error, check };
+  const install = useCallback(async () => {
+    setState("downloading");
+    setError("");
+    setMessage("");
+    try {
+      // Brief pause so UI shows "downloading" state
+      setState("installing");
+      const res = await fetch("/api/update/install", { method: "POST" });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({ error: `HTTP ${res.status}` }));
+        throw new Error(data.error || `Install failed (${res.status})`);
+      }
+      const data = await res.json();
+      setMessage(data.message);
+      setState("done");
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : "Update failed");
+      setState("error");
+    }
+  }, []);
+
+  return { state, info, error, message, check, install };
 }
 
 /* ───────────────────────── Component ───────────────────────── */
 
 export function About() {
-  const update = useUpdateCheck();
+  const update = useAutoUpdate();
   const [changelogExpanded, setChangelogExpanded] = useState(false);
   const visibleChangelog = changelogExpanded ? CHANGELOG : CHANGELOG.slice(0, 3);
 
@@ -288,7 +341,7 @@ export function About() {
           {/* Check for Updates button */}
           <button
             onClick={update.check}
-            disabled={update.state === "checking"}
+            disabled={update.state === "checking" || update.state === "downloading" || update.state === "installing"}
             className="inline-flex items-center gap-2 bg-white/20 hover:bg-white/30 disabled:opacity-60 transition-colors px-4 py-2 rounded-lg text-sm font-medium cursor-pointer disabled:cursor-wait"
           >
             <RefreshCw className={`w-4 h-4 ${update.state === "checking" ? "animate-spin" : ""}`} />
@@ -296,7 +349,7 @@ export function About() {
           </button>
         </div>
 
-        {/* Update result banner */}
+        {/* Update result banners */}
         {update.state === "up-to-date" && (
           <div className="mt-4 flex items-center gap-2 bg-green-500/20 border border-green-400/30 rounded-lg px-4 py-2.5 text-sm">
             <CheckCircle className="w-4 h-4 text-green-300 flex-shrink-0" />
@@ -304,23 +357,51 @@ export function About() {
           </div>
         )}
         {update.state === "update-available" && update.info && (
-          <div className="mt-4 flex items-center justify-between bg-amber-500/20 border border-amber-400/30 rounded-lg px-4 py-2.5 text-sm">
-            <div className="flex items-center gap-2">
-              <AlertTriangle className="w-4 h-4 text-amber-300 flex-shrink-0" />
-              <span className="text-amber-100">
-                Update available: <strong>v{update.info.latestVersion}</strong>
-                <span className="text-amber-200/60 ml-1">(you have v{CURRENT_VERSION})</span>
-              </span>
+          <div className="mt-4 bg-amber-500/20 border border-amber-400/30 rounded-lg px-4 py-3 text-sm">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <AlertTriangle className="w-4 h-4 text-amber-300 flex-shrink-0" />
+                <span className="text-amber-100">
+                  Update available: <strong>v{update.info.latestVersion}</strong>
+                  <span className="text-amber-200/60 ml-1">(you have v{CURRENT_VERSION})</span>
+                </span>
+              </div>
+              <div className="flex items-center gap-2 ml-3 flex-shrink-0">
+                <button
+                  onClick={update.install}
+                  className="inline-flex items-center gap-1.5 bg-amber-500 hover:bg-amber-400 text-white px-3 py-1.5 rounded-md text-sm font-medium transition-colors cursor-pointer"
+                >
+                  <Download className="w-3.5 h-3.5" />
+                  Install Now
+                </button>
+                <a
+                  href={update.info.releaseUrl}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="inline-flex items-center gap-1 text-amber-200 hover:text-white transition-colors text-xs"
+                >
+                  Release notes
+                  <ArrowUpRight className="w-3 h-3" />
+                </a>
+              </div>
             </div>
-            <a
-              href={update.info.releaseUrl}
-              target="_blank"
-              rel="noreferrer"
-              className="inline-flex items-center gap-1 text-amber-200 hover:text-white transition-colors font-medium ml-3 flex-shrink-0"
-            >
-              Download
-              <ArrowUpRight className="w-3.5 h-3.5" />
-            </a>
+            {update.info.assetName && (
+              <p className="text-amber-200/50 text-xs mt-1.5 ml-6">{update.info.assetName}</p>
+            )}
+          </div>
+        )}
+        {(update.state === "downloading" || update.state === "installing") && (
+          <div className="mt-4 flex items-center gap-2 bg-blue-500/20 border border-blue-400/30 rounded-lg px-4 py-2.5 text-sm">
+            <RefreshCw className="w-4 h-4 text-blue-300 flex-shrink-0 animate-spin" />
+            <span className="text-blue-100">
+              {update.state === "downloading" ? "Downloading update..." : "Installing update..."}
+            </span>
+          </div>
+        )}
+        {update.state === "done" && (
+          <div className="mt-4 flex items-center gap-2 bg-green-500/20 border border-green-400/30 rounded-lg px-4 py-2.5 text-sm">
+            <CheckCircle className="w-4 h-4 text-green-300 flex-shrink-0" />
+            <span className="text-green-100">{update.message}</span>
           </div>
         )}
         {update.state === "error" && (

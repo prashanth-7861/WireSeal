@@ -3366,6 +3366,192 @@ def _h_backup_restore(req, _groups):
 
 
 # ---------------------------------------------------------------------------
+# Auto-update — check GitHub releases and install
+# ---------------------------------------------------------------------------
+
+_GITHUB_REPO = "prashanth-7861/WireSeal"
+_GITHUB_API_LATEST = f"https://api.github.com/repos/{_GITHUB_REPO}/releases/latest"
+
+# Asset name patterns per platform
+_ASSET_PATTERNS: dict[str, str] = {
+    "win32":  r"wireseal-[\d.]+-windows-x86_64-setup\.exe$",
+    "linux":  r"wireseal-[\d.]+-linux-x86_64\.tar\.gz$",
+    "darwin": r"wireseal-[\d.]+-macos-arm64\.tar\.gz$",
+}
+
+
+def _current_version() -> str:
+    """Return the running WireSeal version from the tag embedded at build time."""
+    # PyInstaller builds inject __version__ via the spec; fallback to init.
+    from wireseal import __version__
+    return __version__
+
+
+def _parse_version(v: str) -> tuple[int, ...]:
+    """Parse '0.7.3' into (0, 7, 3) for comparison."""
+    return tuple(int(x) for x in re.sub(r"^v", "", v).split("."))
+
+
+def _h_update_check(req: "_Handler", _groups: tuple) -> dict:
+    """Check GitHub for the latest release. No auth required."""
+    import urllib.request
+    import urllib.error
+
+    current = _current_version()
+    try:
+        gh_req = urllib.request.Request(
+            _GITHUB_API_LATEST,
+            headers={"Accept": "application/vnd.github.v3+json",
+                     "User-Agent": "WireSeal-Updater"},
+        )
+        with urllib.request.urlopen(gh_req, timeout=15) as resp:
+            data = json.loads(resp.read())
+    except (urllib.error.URLError, OSError, json.JSONDecodeError) as exc:
+        raise _ApiError(f"Failed to reach GitHub: {exc}", 502)
+
+    latest = data.get("tag_name", "").lstrip("v")
+    release_url = data.get("html_url", "")
+    published = data.get("published_at", "")
+
+    # Find the matching asset for this platform
+    pattern = _ASSET_PATTERNS.get(sys.platform, "")
+    asset_url = ""
+    asset_name = ""
+    for asset in data.get("assets", []):
+        if pattern and re.search(pattern, asset["name"]):
+            asset_url = asset["browser_download_url"]
+            asset_name = asset["name"]
+            break
+
+    try:
+        update_available = _parse_version(latest) > _parse_version(current)
+    except (ValueError, TypeError):
+        update_available = latest != current
+
+    return {
+        "current_version": current,
+        "latest_version": latest,
+        "update_available": update_available,
+        "release_url": release_url,
+        "published_at": published,
+        "asset_url": asset_url,
+        "asset_name": asset_name,
+        "platform": sys.platform,
+    }
+
+
+def _h_update_install(req: "_Handler", _groups: tuple) -> dict:
+    """Download and install the latest release. Runs the platform installer."""
+    import tempfile
+    import urllib.request
+    import urllib.error
+
+    # First, check what's available
+    check = _h_update_check(req, _groups)
+    if not check["update_available"]:
+        return {"ok": True, "message": "Already on the latest version.", "restarting": False}
+
+    asset_url = check["asset_url"]
+    asset_name = check["asset_name"]
+    if not asset_url:
+        raise _ApiError(
+            f"No installer asset found for platform '{sys.platform}'. "
+            f"Download manually from: {check['release_url']}", 404,
+        )
+
+    # Download the asset to a temp directory
+    tmp_dir = tempfile.mkdtemp(prefix="wireseal-update-")
+    tmp_path = os.path.join(tmp_dir, asset_name)
+
+    try:
+        dl_req = urllib.request.Request(
+            asset_url,
+            headers={"User-Agent": "WireSeal-Updater"},
+        )
+        with urllib.request.urlopen(dl_req, timeout=120) as resp:
+            with open(tmp_path, "wb") as f:
+                while True:
+                    chunk = resp.read(65536)
+                    if not chunk:
+                        break
+                    f.write(chunk)
+    except (urllib.error.URLError, OSError) as exc:
+        raise _ApiError(f"Download failed: {exc}", 502)
+
+    # Platform-specific install
+    if sys.platform == "win32":
+        # Run the NSIS setup.exe silently — it upgrades in-place
+        # /S = silent, /D= overrides install dir (optional).
+        # Use subprocess.Popen so we don't block the HTTP response.
+        subprocess.Popen(
+            [tmp_path, "/S"],
+            creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP,
+        )
+        return {
+            "ok": True,
+            "message": f"Installer launched silently (v{check['latest_version']}). "
+                       "The app will restart automatically when the install completes.",
+            "restarting": True,
+            "version": check["latest_version"],
+        }
+
+    elif sys.platform == "linux":
+        # Extract tarball and replace the current binary
+        import tarfile
+        with tarfile.open(tmp_path, "r:gz") as tar:
+            tar.extractall(tmp_dir)
+        # Find the GUI binary in extracted contents
+        gui_bin = os.path.join(tmp_dir, f"WireSeal-linux-x86_64")
+        if not os.path.exists(gui_bin):
+            # Try to find it in the extracted directory
+            for name in os.listdir(tmp_dir):
+                if name.startswith("WireSeal") and not name.endswith(".tar.gz"):
+                    gui_bin = os.path.join(tmp_dir, name)
+                    break
+        current_exe = sys.executable
+        if os.path.exists(gui_bin):
+            os.chmod(gui_bin, 0o755)
+            # Atomic replace: copy new binary over current
+            import shutil
+            shutil.copy2(gui_bin, current_exe + ".new")
+            os.rename(current_exe + ".new", current_exe)
+            return {
+                "ok": True,
+                "message": f"Updated to v{check['latest_version']}. Restart WireSeal to apply.",
+                "restarting": False,
+                "version": check["latest_version"],
+            }
+        raise _ApiError("Could not locate binary in downloaded archive.", 500)
+
+    elif sys.platform == "darwin":
+        # macOS: extract tarball and replace binary (same as Linux)
+        import tarfile
+        with tarfile.open(tmp_path, "r:gz") as tar:
+            tar.extractall(tmp_dir)
+        gui_bin = os.path.join(tmp_dir, "WireSeal-macos-arm64")
+        if not os.path.exists(gui_bin):
+            for name in os.listdir(tmp_dir):
+                if name.startswith("WireSeal") and not name.endswith(".tar.gz"):
+                    gui_bin = os.path.join(tmp_dir, name)
+                    break
+        current_exe = sys.executable
+        if os.path.exists(gui_bin):
+            os.chmod(gui_bin, 0o755)
+            import shutil
+            shutil.copy2(gui_bin, current_exe + ".new")
+            os.rename(current_exe + ".new", current_exe)
+            return {
+                "ok": True,
+                "message": f"Updated to v{check['latest_version']}. Restart WireSeal to apply.",
+                "restarting": False,
+                "version": check["latest_version"],
+            }
+        raise _ApiError("Could not locate binary in downloaded archive.", 500)
+
+    raise _ApiError(f"Auto-update not supported on platform '{sys.platform}'.", 501)
+
+
+# ---------------------------------------------------------------------------
 # Routing table  — order matters for overlapping patterns
 # ---------------------------------------------------------------------------
 
@@ -3430,6 +3616,9 @@ _ROUTES: list[tuple[str, re.Pattern, Any]] = [
     ("POST",   re.compile(r"^/api/backup/trigger$"),        _h_backup_trigger),
     ("GET",    re.compile(r"^/api/backup/list$"),           _h_backup_list),
     ("POST",   re.compile(r"^/api/backup/restore$"),        _h_backup_restore),
+    # Auto-update
+    ("GET",    re.compile(r"^/api/update/check$"),          _h_update_check),
+    ("POST",   re.compile(r"^/api/update/install$"),        _h_update_install),
 ]
 
 # ---------------------------------------------------------------------------
