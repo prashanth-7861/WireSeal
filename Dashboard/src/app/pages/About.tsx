@@ -7,7 +7,7 @@ import {
 
 /* ───────────────────────── Constants ───────────────────────── */
 
-const CURRENT_VERSION = "0.7.4";
+const CURRENT_VERSION = "0.7.5";
 const GITHUB_URL = "https://github.com/prashanth-7861/WireSeal";
 
 const FEATURES = [
@@ -56,6 +56,15 @@ interface ChangelogEntry {
 }
 
 const CHANGELOG: ChangelogEntry[] = [
+  {
+    version: "0.7.5",
+    date: "2026-04-13",
+    highlights: [
+      "Client Mode: server/client mode selection after unlock — switch between managing and connecting",
+      "Client layout with emerald-accented sidebar, Connect/Terminal/Settings stubs",
+      "Mode persists across sessions via localStorage; switch freely from either sidebar",
+    ],
+  },
   {
     version: "0.7.4",
     date: "2026-04-13",

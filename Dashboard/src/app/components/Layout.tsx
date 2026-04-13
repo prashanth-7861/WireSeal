@@ -5,15 +5,27 @@ import {
   Lock, Play, Eye, EyeOff, AlertCircle, CheckCircle,
   Shield, Sparkles, Wifi, WifiOff, Circle, RotateCcw,
   KeyRound, Hash, ArrowLeft, Trash2, ShieldAlert, Timer,
-  Users, Globe, HardDrive,
+  Users, Globe, HardDrive, ArrowLeftRight,
 } from "lucide-react";
 import { api, VAULT_LOCKED_EVENT, type Status } from "../api";
+import { AppModeProvider, useAppMode } from "../context/AppModeContext";
+import { ModeSelector } from "./ModeSelector";
+import { ClientLayout } from "./ClientLayout";
 
 type VaultState = "loading" | "uninitialized" | "locked" | "unlocked";
 
 export function Layout() {
+  return (
+    <AppModeProvider>
+      <LayoutInner />
+    </AppModeProvider>
+  );
+}
+
+function LayoutInner() {
   const navigate = useNavigate();
   const location = useLocation();
+  const { mode, setMode, clearMode } = useAppMode();
   const [vaultState, setVaultState] = useState<VaultState>("loading");
 
   // Passphrase dialog state
@@ -744,14 +756,29 @@ export function Layout() {
     );
   }
 
-  // ── Unlocked — show sidebar + page content ──────────────────────────────
+  // ── Unlocked but no mode chosen — show mode selector ─────────────────
+  if (mode === null) {
+    return <ModeSelector />;
+  }
+
+  // ── Client mode — delegate to ClientLayout ──────────────────────────
+  if (mode === "client") {
+    return (
+      <ClientLayout
+        onLock={handleLock}
+        onSwitchMode={() => { clearMode(); navigate("/"); }}
+      />
+    );
+  }
+
+  // ── Server mode — show sidebar + page content ──────────────────────────
   return (
     <div className="min-h-screen bg-gray-50">
       {/* Sidebar */}
       <aside className="fixed left-0 top-0 h-full w-60 bg-white border-r border-gray-200 flex flex-col">
         <div className="p-5 border-b border-gray-100">
           <h1 className="font-bold text-lg text-gray-900 tracking-tight">WireSeal</h1>
-          <p className="text-xs text-gray-400 mt-0.5">WireGuard Dashboard</p>
+          <p className="text-xs text-blue-600 mt-0.5 font-medium">Server Mode</p>
         </div>
 
         <nav className="px-2 py-3 flex-1">
@@ -852,7 +879,14 @@ export function Layout() {
           </div>
         </div>
 
-        <div className="p-2 border-t border-gray-100">
+        <div className="p-2 border-t border-gray-100 space-y-1">
+          <button
+            onClick={() => { clearMode(); navigate("/client"); }}
+            className="flex items-center gap-3 px-3 py-2.5 rounded-lg w-full text-gray-500 hover:bg-gray-100 hover:text-gray-700 transition-colors text-sm"
+          >
+            <ArrowLeftRight className="w-4 h-4" />
+            <span>Switch to Client</span>
+          </button>
           <button
             onClick={handleLock}
             className="flex items-center gap-3 px-3 py-2.5 rounded-lg w-full text-gray-500 hover:bg-gray-100 hover:text-gray-700 transition-colors text-sm"
