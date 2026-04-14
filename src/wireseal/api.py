@@ -884,27 +884,9 @@ def _h_unlock(req: "_Handler", _groups: tuple) -> dict:
         _clear_unlock_failures(client_ip)
         AuditLog(_AUDIT_PATH).log("unlock-web", {"admin_id": admin_id}, actor=admin_id)
 
-        # Auto-start WireGuard tunnel if config exists but tunnel is down
-        try:
-            wg_check = subprocess.run(
-                _sudo(["wg", "show", _WG_IFACE]),
-                capture_output=True, timeout=5,
-                creationflags=_SP_FLAGS,
-            )
-            if wg_check.returncode != 0:
-                # Tunnel not running — try to bring it up
-                conf_path = Path("/etc/wireguard") / f"{_WG_IFACE}.conf"
-                if sys.platform == "win32":
-                    conf_path = Path(os.environ.get("PROGRAMDATA", r"C:\ProgramData")) / "WireGuard" / f"{_WG_IFACE}.conf"
-                if conf_path.exists():
-                    subprocess.run(
-                        _sudo(["wg-quick", "up", _WG_IFACE]),
-                        capture_output=True, timeout=15,
-                        creationflags=_SP_FLAGS,
-                    )
-        except Exception:
-            pass  # Best-effort — don't block unlock
-
+        # Tunnel is NOT auto-started on unlock. The user controls the
+        # WireGuard server lifecycle explicitly from the Dashboard's
+        # Start/Stop buttons (POST /api/start, POST /api/terminate).
         return {"ok": True, "role": admin_role}
     finally:
         wipe_string(passphrase_str)
@@ -2138,26 +2120,8 @@ def _h_unlock_pin(req: "_Handler", _groups: tuple) -> dict:
         _clear_unlock_failures(client_ip)
         AuditLog(_AUDIT_PATH).log("unlock-pin", {}, actor="system")
 
-        # Auto-start WireGuard tunnel (same as passphrase unlock)
-        try:
-            wg_check = subprocess.run(
-                _sudo(["wg", "show", _WG_IFACE]),
-                capture_output=True, timeout=5,
-                creationflags=_SP_FLAGS,
-            )
-            if wg_check.returncode != 0:
-                conf_path = Path("/etc/wireguard") / f"{_WG_IFACE}.conf"
-                if sys.platform == "win32":
-                    conf_path = Path(os.environ.get("PROGRAMDATA", r"C:\ProgramData")) / "WireGuard" / f"{_WG_IFACE}.conf"
-                if conf_path.exists():
-                    subprocess.run(
-                        _sudo(["wg-quick", "up", _WG_IFACE]),
-                        capture_output=True, timeout=15,
-                        creationflags=_SP_FLAGS,
-                    )
-        except Exception:
-            pass
-
+        # Tunnel is NOT auto-started on unlock — user starts explicitly
+        # from the Dashboard Start button (POST /api/start).
         return {"ok": True}
     except _ApiError:
         raise

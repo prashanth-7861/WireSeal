@@ -7,7 +7,7 @@ import {
 
 /* ───────────────────────── Constants ───────────────────────── */
 
-const CURRENT_VERSION = "0.7.6";
+const CURRENT_VERSION = "0.7.7";
 const GITHUB_URL = "https://github.com/prashanth-7861/WireSeal";
 
 const FEATURES = [
@@ -56,6 +56,14 @@ interface ChangelogEntry {
 }
 
 const CHANGELOG: ChangelogEntry[] = [
+  {
+    version: "0.7.7",
+    date: "2026-04-13",
+    highlights: [
+      "Server no longer auto-starts on unlock — user explicitly controls the WireGuard tunnel lifecycle from the Dashboard",
+      "Dashboard shows a green Start Server button when stopped and a red Stop Server button when running",
+    ],
+  },
   {
     version: "0.7.6",
     date: "2026-04-13",

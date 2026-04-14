@@ -402,14 +402,14 @@ function LayoutInner() {
             <h1 className="text-4xl font-bold text-white tracking-tight mb-2">WireSeal</h1>
             <p className="text-blue-300/60 text-sm mb-4">Secure WireGuard Management</p>
             <h2 className="text-lg font-semibold text-blue-200 mb-2">
-              {vaultState === "uninitialized" ? "Let's get you set up" : "Your server is ready"}
+              {vaultState === "uninitialized" ? "Let's get you set up" : "Welcome back"}
             </h2>
             <p className="text-blue-300/50 max-w-sm mx-auto text-sm leading-relaxed">
               {vaultState === "uninitialized"
                 ? "Create a vault passphrase to encrypt your keys and configs. Everything is secured with dual-layer AEAD encryption."
                 : pinSet
-                  ? "Enter your PIN to quickly unlock and start."
-                  : "Unlock the vault with your passphrase to start managing your WireGuard network."}
+                  ? "Enter your PIN to quickly unlock your vault."
+                  : "Unlock the vault with your passphrase to manage your WireGuard network."}
             </p>
           </div>
 
@@ -419,7 +419,7 @@ function LayoutInner() {
             className="flex items-center gap-3 px-8 py-3.5 bg-blue-600 text-white text-lg font-medium rounded-xl hover:bg-blue-500 transition-all shadow-lg shadow-blue-600/30 hover:shadow-blue-500/40 hover:scale-[1.02] active:scale-[0.98]"
           >
             {vaultState === "uninitialized" ? <Play className="w-6 h-6" /> : pinSet ? <KeyRound className="w-6 h-6" /> : <Play className="w-6 h-6" />}
-            {vaultState === "uninitialized" ? "Get Started" : pinSet ? "Enter PIN" : "Unlock & Start"}
+            {vaultState === "uninitialized" ? "Get Started" : pinSet ? "Enter PIN" : "Unlock Vault"}
           </button>
 
           {/* Fresh Start option */}
@@ -572,7 +572,7 @@ function LayoutInner() {
                       <p className="text-sm text-gray-500">
                         {passphraseMode === "setup"
                           ? "Create a passphrase to encrypt your vault"
-                          : "Enter your passphrase to unlock and start"}
+                          : "Enter your passphrase to unlock the vault"}
                       </p>
                     </div>
                   </div>
