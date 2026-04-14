@@ -316,31 +316,41 @@ class AuditLog:
 
         Reads from rotated files (.1, .2, ...) when the current log doesn't
         have enough entries. AUDIT-03.
+
+        Reads newest-first (current log, then audit.log.1, .2, ... up to
+        MAX_ROTATED) and stops as soon as *n* lines have been collected.
+        This ensures the returned entries are always the freshest available,
+        even if older rotated archives still exist on disk.
         """
-        all_lines: list[str] = []
+        newest_first: list[str] = []
 
-        # Collect lines from rotated files (oldest first) then current
-        for i in range(MAX_ROTATED, 0, -1):
-            rotated = self._log_path.parent / f"{self._log_path.name}.{i}"
-            if rotated.exists():
-                try:
-                    all_lines.extend(rotated.read_text(encoding="utf-8").splitlines())
-                except OSError:
-                    continue
-            if len(all_lines) >= n:
-                break
-
-        # Current log file
+        # 1) Current log file first — it holds the newest entries.
         if self._log_path.exists():
             try:
-                all_lines.extend(self._log_path.read_text(encoding="utf-8").splitlines())
+                cur = self._log_path.read_text(encoding="utf-8").splitlines()
+                newest_first.extend(reversed(cur))
             except OSError:
                 pass
 
-        if not all_lines:
+        # 2) Then walk rotated files from newest (.1) to oldest (.MAX_ROTATED).
+        for i in range(1, MAX_ROTATED + 1):
+            if len(newest_first) >= n:
+                break
+            rotated = self._log_path.parent / f"{self._log_path.name}.{i}"
+            if not rotated.exists():
+                continue
+            try:
+                rot = rotated.read_text(encoding="utf-8").splitlines()
+                newest_first.extend(reversed(rot))
+            except OSError:
+                continue
+
+        if not newest_first:
             return []
 
-        recent_lines = all_lines[-n:] if len(all_lines) > n else all_lines
+        # Take the n freshest (still in newest-first order), then reverse to
+        # oldest-first for the caller.
+        recent_lines = list(reversed(newest_first[:n]))
 
         entries: list[AuditEntry] = []
         for line in recent_lines:
