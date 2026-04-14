@@ -3765,6 +3765,90 @@ def _h_client_tunnel_status(req: "_Handler", _groups: tuple) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# SSH bridge — one-time token issuance for WebSocket connections
+# ---------------------------------------------------------------------------
+
+
+def _h_ssh_token(req: "_Handler", _groups: tuple) -> dict:
+    """POST /api/ssh/token — Issue a one-time token for a WebSocket SSH session.
+
+    Body: {host, port, username, password, profile_name}
+    Returns: {token, ws_url, expires_in}
+
+    The token is consumed on first use by ws://localhost:8081/ssh?token=<token>.
+    Requires the client tunnel to be active (we only allow SSH over the VPN).
+    """
+    _require_unlocked()
+    body = req._json()
+
+    host = str(body.get("host", "")).strip()
+    port = int(body.get("port", 22))
+    username = str(body.get("username", "")).strip()
+    password = body.get("password")  # Optional — None means try key auth (not yet supported)
+    profile_name = str(body.get("profile_name", "")).strip()
+    term = str(body.get("term", "xterm-256color")).strip() or "xterm-256color"
+
+    if not host:
+        raise _ApiError("host is required", 400)
+    if not username:
+        raise _ApiError("username is required", 400)
+    if port < 1 or port > 65535:
+        raise _ApiError("port out of range", 400)
+    if not profile_name:
+        raise _ApiError("profile_name is required", 400)
+
+    # Enforce that a client tunnel is active — SSH must go through the VPN.
+    from wireseal.client.tunnel import tunnel_status as _tunnel_status
+    status = _tunnel_status()
+    if not status.get("connected"):
+        raise _ApiError(
+            "No active WireGuard tunnel. Connect to a server profile first.",
+            409,
+        )
+
+    from wireseal.ssh.session_manager import get_manager
+    from wireseal.ssh.ws_bridge import DEFAULT_PATH, DEFAULT_PORT
+    from wireseal.security.audit import AuditLog
+
+    actor_id = _session.get("admin_id", "owner")
+    manager = get_manager()
+    token = manager.issue_ticket(
+        host=host,
+        port=port,
+        username=username,
+        password=password if isinstance(password, str) else None,
+        profile_name=profile_name,
+        actor_id=actor_id,
+        term=term,
+    )
+
+    AuditLog(_AUDIT_PATH).log(
+        "ssh-token-issued",
+        {
+            "profile": profile_name,
+            "host": host,
+            "port": port,
+            "username": username,
+            # Never log the password or the token itself
+        },
+        actor=actor_id,
+    )
+
+    return {
+        "token": token,
+        "ws_url": f"ws://127.0.0.1:{DEFAULT_PORT}{DEFAULT_PATH}?token={token}",
+        "expires_in": 60,
+    }
+
+
+def _h_ssh_sessions(req: "_Handler", _groups: tuple) -> dict:
+    """GET /api/ssh/sessions — List active SSH sessions."""
+    _require_unlocked()
+    from wireseal.ssh.session_manager import get_manager
+    return {"sessions": get_manager().list_active()}
+
+
+# ---------------------------------------------------------------------------
 # Routing table  — order matters for overlapping patterns
 # ---------------------------------------------------------------------------
 
@@ -3841,6 +3925,9 @@ _ROUTES: list[tuple[str, re.Pattern, Any]] = [
     ("POST",   re.compile(r"^/api/client/tunnel/up/([^/]+)$"),          _h_client_tunnel_up),
     ("POST",   re.compile(r"^/api/client/tunnel/down$"),                _h_client_tunnel_down),
     ("GET",    re.compile(r"^/api/client/tunnel/status$"),              _h_client_tunnel_status),
+    # SSH bridge
+    ("POST",   re.compile(r"^/api/ssh/token$"),                         _h_ssh_token),
+    ("GET",    re.compile(r"^/api/ssh/sessions$"),                      _h_ssh_sessions),
 ]
 
 # ---------------------------------------------------------------------------
@@ -4022,6 +4109,14 @@ def serve(host: str = "127.0.0.1", port: int = 8080, gui: bool = True) -> None:
 
     server = ThreadingHTTPServer((host, port), _Handler)
     url = f"http://{host}:{port}/"
+
+    # Start SSH WebSocket bridge in a daemon thread (best-effort; optional)
+    try:
+        from wireseal.ssh.ws_bridge import start_bridge_thread as _start_ssh_bridge
+        _ssh_log_dir = _VAULT_DIR / "ssh-sessions"
+        _start_ssh_bridge(_ssh_log_dir)
+    except Exception as _exc:  # noqa: BLE001
+        print(f"[wireseal] SSH bridge failed to start: {_exc}")
 
     # Register signal handlers for graceful shutdown (wipe secrets on exit)
     import atexit

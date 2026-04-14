@@ -18,6 +18,8 @@ dependencies = [
     "pywebview>=5.3,<7",
     "pystray>=0.19,<1",
     "Pillow>=12.1.1,<13",
+    "asyncssh>=2.18,<3",
+    "websockets>=13.1,<14",
 ]
 
 [project.optional-dependencies]

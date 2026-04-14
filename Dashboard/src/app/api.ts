@@ -214,6 +214,16 @@ export interface ClientTunnelStatus {
   wg_output?: string;
 }
 
+export interface SshSessionInfo {
+  session_id: string;
+  profile: string;
+  host: string;
+  port: number;
+  username: string;
+  actor_id: string;
+  started_at: number;
+}
+
 export const api = {
   vaultInfo: () =>
     _fetch<VaultInfo>("GET", "/vault-info"),
@@ -403,4 +413,20 @@ export const api = {
 
   clientTunnelStatus: () =>
     _fetch<ClientTunnelStatus>("GET", "/client/tunnel/status"),
+
+  // ── SSH bridge — one-time token issuance for WebSocket connections ───────
+  sshToken: (params: {
+    host: string;
+    port: number;
+    username: string;
+    password?: string;
+    profile_name: string;
+    term?: string;
+  }) =>
+    _fetch<{ token: string; ws_url: string; expires_in: number }>(
+      "POST", "/ssh/token", params
+    ),
+
+  sshSessions: () =>
+    _fetch<{ sessions: SshSessionInfo[] }>("GET", "/ssh/sessions"),
 };

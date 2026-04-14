@@ -7,7 +7,7 @@ import {
 
 /* ───────────────────────── Constants ───────────────────────── */
 
-const CURRENT_VERSION = "0.7.5";
+const CURRENT_VERSION = "0.7.6";
 const GITHUB_URL = "https://github.com/prashanth-7861/WireSeal";
 
 const FEATURES = [
@@ -56,6 +56,17 @@ interface ChangelogEntry {
 }
 
 const CHANGELOG: ChangelogEntry[] = [
+  {
+    version: "0.7.6",
+    date: "2026-04-13",
+    highlights: [
+      "SSH Terminal: full xterm.js browser terminal for remote server shells over the WireGuard tunnel",
+      "WebSocket SSH bridge powered by AsyncSSH with one-time-token auth — passwords never touch URLs or logs",
+      "Session recording to ~/.wireseal/ssh-sessions/ with timestamped input/output for audit trails",
+      "Tunnel-gated: SSH token issuance requires an active WireGuard client profile",
+      "Client Mode → Connect → Terminal: import a profile, bring the tunnel up, and open a shell without leaving the Dashboard",
+    ],
+  },
   {
     version: "0.7.5",
     date: "2026-04-13",
