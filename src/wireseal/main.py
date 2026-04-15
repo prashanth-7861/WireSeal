@@ -49,6 +49,8 @@ if sys.platform == "win32":
 
 import click
 
+from wireseal import __version__ as _WIRESEAL_VERSION
+
 # ---------------------------------------------------------------------------
 # Process hardening — apply before any secrets are loaded.
 # Disables core dumps, ptrace, /proc/pid/mem access (best-effort).
@@ -73,7 +75,7 @@ DEFAULT_AUDIT_LOG_PATH = DEFAULT_VAULT_DIR / "audit.log"
 
 
 @click.group(invoke_without_command=True)
-@click.version_option()
+@click.version_option(_WIRESEAL_VERSION, prog_name="wireseal")
 @click.pass_context
 def cli(ctx: click.Context) -> None:
     """wireseal: zero-secrets WireGuard server automation."""
