@@ -7,7 +7,7 @@ import {
 
 /* ───────────────────────── Constants ───────────────────────── */
 
-const CURRENT_VERSION = "0.7.7";
+const CURRENT_VERSION = "0.7.8";
 const GITHUB_URL = "https://github.com/prashanth-7861/WireSeal";
 
 const FEATURES = [
@@ -56,6 +56,15 @@ interface ChangelogEntry {
 }
 
 const CHANGELOG: ChangelogEntry[] = [
+  {
+    version: "0.7.8",
+    date: "2026-04-15",
+    highlights: [
+      "Fixed WireSeal.exe --version crash: click.version_option now uses an explicit version string so frozen binaries no longer raise 'Could not determine the version for None'",
+      "Fixed audit log tail-skip: AuditLog.get_recent_entries() now walks rotated archives newest-first, so recent entries are no longer dropped once audit.log.1 exists",
+      "Added 44 new security unit tests covering rate limiting, audit rotation, backup/restore CLI, health endpoint, session timeout, and key rotation API wiring (test suite now 217 passing)",
+    ],
+  },
   {
     version: "0.7.7",
     date: "2026-04-13",
