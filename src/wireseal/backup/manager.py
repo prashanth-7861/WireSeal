@@ -11,15 +11,64 @@ never touches the live vault file.
 """
 from __future__ import annotations
 
+import os
 import re
 import shutil
 import subprocess
+import sys
 import urllib.request
 import urllib.parse
 import urllib.error
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+
+
+# SEC-027: Hard blocklist of destinations where a vault backup must never be
+# written. These roots hold OS or system files and writing there (even as an
+# encrypted vault copy) would either fail noisily, succeed by overwriting
+# something critical, or be visible to other users on the machine. The check
+# is symbolic (resolved path prefix) so traversal via symlinks still trips.
+_UNIX_BLOCKED_ROOTS = (
+    "/etc", "/bin", "/sbin", "/boot",
+    "/usr", "/lib", "/lib32", "/lib64",
+    "/sys", "/proc", "/dev",
+    "/root",
+)
+
+# On Windows we block common OS roots. The match is case-insensitive and
+# uses str(Path.resolve) so mixed-slash input normalises first.
+_WINDOWS_BLOCKED_ROOTS = (
+    r"C:\Windows",
+    r"C:\Program Files",
+    r"C:\Program Files (x86)",
+    r"C:\ProgramData",
+)
+
+
+def _reject_system_destination(resolved: Path) -> None:
+    """Raise ValueError if *resolved* lives under a known system directory.
+
+    SEC-027: called after ``Path.resolve()`` so `..` / symlink traversal can't
+    side-step the block. The caller should pre-create the parent on the user's
+    own side; we never silently redirect.
+    """
+    if sys.platform == "win32":
+        rp = str(resolved).lower()
+        for root in _WINDOWS_BLOCKED_ROOTS:
+            if rp == root.lower() or rp.startswith(root.lower() + os.sep):
+                raise ValueError(
+                    f"backup_config.local_path rejected: {resolved} lives under "
+                    f"a system directory ({root}). Choose a user-owned path."
+                )
+    else:
+        rp = str(resolved)
+        for root in _UNIX_BLOCKED_ROOTS:
+            if rp == root or rp.startswith(root + "/"):
+                raise ValueError(
+                    f"backup_config.local_path rejected: {resolved} lives under "
+                    f"a system directory ({root}). Choose a user-owned path."
+                )
 
 # Allowlist patterns for SSH target components — reject anything that could
 # inject extra rsync arguments or confuse host:path parsing.
@@ -92,9 +141,21 @@ class BackupManager:
         if not local_path:
             raise ValueError("backup_config.local_path is required for local destination")
         dest_dir = Path(local_path)
+        # SEC-027: reject destinations under known system directories. We
+        # resolve first so `..` and symlinks can't hide the final target.
+        # Resolving a not-yet-existing directory is safe with strict=False.
+        resolved_dir = dest_dir.resolve(strict=False)
+        _reject_system_destination(resolved_dir)
         dest_dir.mkdir(parents=True, exist_ok=True)
         dest_file = dest_dir / fname
         shutil.copy2(vault_path, dest_file)
+        # Tighten permissions on Unix — the vault is encrypted but we still
+        # don't want the file world-readable by default.
+        if sys.platform != "win32":
+            try:
+                os.chmod(dest_file, 0o600)
+            except OSError:
+                pass
         stat = dest_file.stat()
         return BackupEntry(
             path=str(dest_file),

@@ -161,12 +161,22 @@ async def _handle_session(
         f"profile={ticket.profile_name} host={ticket.host}:{ticket.port} user={ticket.username}",
     )
 
+    # SEC-021: ticket.password is a SecretBytes. Decode it to str only for
+    # the length of the asyncssh.connect call, then wipe the ticket's copy
+    # so nothing lingers for the life of the session. asyncssh internally
+    # uses the password as a bytes-compatible object during auth.
+    _password_str: Optional[str] = None
+    if ticket.password is not None:
+        try:
+            _password_str = bytes(ticket.password.expose_secret()).decode("utf-8")
+        except Exception:
+            _password_str = None
     try:
         async with asyncssh.connect(
             host=ticket.host,
             port=ticket.port,
             username=ticket.username,
-            password=ticket.password,
+            password=_password_str,
             known_hosts=None,  # Trust tunnel; production should use TOFU store
             keepalive_interval=30,
         ) as conn:
@@ -204,6 +214,20 @@ async def _handle_session(
         await _send_json(ws, {"type": "error", "message": f"SSH error: {exc}"})
         recorder.record_meta("session-error", str(exc))
     finally:
+        # SEC-021: wipe the ticket's SecretBytes copy and the temporary str
+        # we handed to asyncssh. The str wipe is best-effort because Python
+        # may have interned it, but the SecretBytes buffer is zeroed for sure.
+        try:
+            ticket.wipe()
+        except Exception:
+            pass
+        if _password_str is not None:
+            try:
+                from wireseal.security.secrets_wipe import wipe_string
+                wipe_string(_password_str)
+            except Exception:
+                pass
+            _password_str = None
         manager.unregister_session(session_id)
         recorder.record_meta("session-end")
         recorder.close()

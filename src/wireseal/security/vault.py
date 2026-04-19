@@ -79,6 +79,44 @@ ARGON2_PARALLELISM = 4
 ARGON2_HASH_LEN = 32   # Argon2id master key length (HKDF input)
 ARGON2_SALT_LEN = 32   # v2: 256-bit salt (was 16 bytes in v1)
 
+# SEC-019: Sanity bounds for Argon2 params read from vault headers. A crafted
+# vault file could otherwise claim e.g. memory_cost=2**31 and DoS the process
+# by allocating absurd amounts of RAM before any authentication happens, or
+# claim memory_cost=8 to weaken a legitimate vault after tampering. We reject
+# both directions defensively — the live build's defaults are always within
+# these bounds, but older vaults (lower time_cost) must still open, so the
+# minimums are intentionally permissive.
+ARGON2_MEMORY_COST_MIN_KIB = 65536       # 64 MiB — below this is insecure
+ARGON2_MEMORY_COST_MAX_KIB = 2 * 1024 * 1024  # 2 GiB — above this is DoS
+ARGON2_TIME_COST_MIN = 2
+ARGON2_TIME_COST_MAX = 64
+ARGON2_PARALLELISM_MIN = 1
+ARGON2_PARALLELISM_MAX = 16
+
+
+def _validate_argon2_params(memory_cost: int, time_cost: int, parallelism: int) -> None:
+    """Reject out-of-range Argon2 params parsed from a vault header.
+
+    SEC-019: raises ``VaultTamperedError`` if any parameter is outside the
+    allowed envelope. This runs *before* the KDF is invoked so an attacker
+    can't force a multi-gigabyte memory allocation by editing the header.
+    """
+    if not (ARGON2_MEMORY_COST_MIN_KIB <= memory_cost <= ARGON2_MEMORY_COST_MAX_KIB):
+        raise VaultTamperedError(
+            f"Vault Argon2 memory_cost={memory_cost} KiB is out of safe range "
+            f"[{ARGON2_MEMORY_COST_MIN_KIB}, {ARGON2_MEMORY_COST_MAX_KIB}]"
+        )
+    if not (ARGON2_TIME_COST_MIN <= time_cost <= ARGON2_TIME_COST_MAX):
+        raise VaultTamperedError(
+            f"Vault Argon2 time_cost={time_cost} is out of safe range "
+            f"[{ARGON2_TIME_COST_MIN}, {ARGON2_TIME_COST_MAX}]"
+        )
+    if not (ARGON2_PARALLELISM_MIN <= parallelism <= ARGON2_PARALLELISM_MAX):
+        raise VaultTamperedError(
+            f"Vault Argon2 parallelism={parallelism} is out of safe range "
+            f"[{ARGON2_PARALLELISM_MIN}, {ARGON2_PARALLELISM_MAX}]"
+        )
+
 NONCE_LEN = 12         # 96-bit nonce for both ChaCha20 and AES-GCM-SIV
 
 # HKDF domain separation labels -- different info strings guarantee the two
@@ -494,6 +532,11 @@ def _decrypt_vault(blob: bytes, passphrase: bytearray) -> tuple[dict[str, Any], 
         nonce2,
     ) = _HEADER_STRUCT.unpack(blob[:_HEADER_SIZE])
 
+    # SEC-019: validate Argon2 params parsed from the header *before* invoking
+    # the KDF — an attacker with write access to the vault file could otherwise
+    # force a multi-gigabyte RAM allocation or weaken the derivation entirely.
+    _validate_argon2_params(memory_cost, time_cost, parallelism)
+
     header = blob[:_HEADER_SIZE]
 
     ct_len = struct.unpack(">I", blob[_HEADER_SIZE:_HEADER_SIZE + 4])[0]
@@ -571,6 +614,12 @@ def _decrypt_vault_v3(blob: bytes, admin_id: str,
         nonce2,
     ) = _HEADER_STRUCT.unpack(blob[payload_hdr_start:payload_hdr_end])
 
+    # SEC-019: validate Argon2 params even on the v3 path. v3 does not re-run
+    # the KDF here (the master key comes from the keyslot), but a header whose
+    # params claim absurd values still signals tampering — fail fast and
+    # explicitly rather than silently trusting whatever's on disk.
+    _validate_argon2_params(_memory_cost, _time_cost, _parallelism)
+
     # AAD = everything before the ciphertext length field
     aad = blob[:payload_hdr_end]
 
@@ -615,6 +664,10 @@ class VaultState:
         # Deep-copy the dict and wrap secret fields in SecretBytes
         self._data: dict[str, Any] = {}
         self._data["schema_version"] = data.get("schema_version", 1)
+        # Preserve the vault mode ("server" or "client") — client vaults have
+        # no server/clients/ip_pool sections and _refresh_cache branches on this.
+        if "mode" in data:
+            self._data["mode"] = data["mode"]
         self._data["server"] = self._wrap_secrets(dict(data.get("server", {})))
         self._data["clients"] = {
             name: self._wrap_secrets(dict(client))
@@ -628,7 +681,10 @@ class VaultState:
         if "dns_mappings" in data:
             self._data["dns_mappings"] = data["dns_mappings"]
         if "backup_config" in data:
-            self._data["backup_config"] = data["backup_config"]
+            # SEC-017: pass backup_config through _wrap_secrets so webdav_pass
+            # (and any future *_pass / *_password fields) live in SecretBytes
+            # rather than plain strings.
+            self._data["backup_config"] = self._wrap_secrets(dict(data["backup_config"]))
         if "client_configs" in data:
             self._data["client_configs"] = data["client_configs"]
         self._wiped = False
@@ -642,10 +698,22 @@ class VaultState:
 
     @staticmethod
     def _wrap_secrets(d: dict[str, Any]) -> dict[str, Any]:
-        """Wrap values whose key ends in '_key' or equals 'psk' in SecretBytes."""
+        """Wrap values whose key names indicate sensitive material.
+
+        SEC-017: in addition to the historical patterns ('*_key', 'psk'),
+        anything ending in '_pass' or '_password' is also wrapped — this
+        catches backup destination credentials (``webdav_pass``) and any
+        future password-bearing fields so they sit in mlocked memory and
+        are wiped on vault close rather than lingering in a plain ``str``.
+        """
         result = {}
         for k, v in d.items():
-            if isinstance(v, str) and (k.endswith("_key") or k == "psk"):
+            if isinstance(v, str) and (
+                k.endswith("_key")
+                or k == "psk"
+                or k.endswith("_pass")
+                or k.endswith("_password")
+            ):
                 result[k] = SecretBytes(bytearray(v.encode("utf-8")))
             else:
                 result[k] = v
@@ -698,13 +766,19 @@ class VaultState:
             "ip_pool": self._data["ip_pool"],
             "integrity": self._data["integrity"],
         }
+        # Round-trip the vault mode so client vaults stay tagged after save.
+        if "mode" in self._data:
+            d["mode"] = self._data["mode"]
         # Include v2 schema fields when present
         if "admins" in self._data:
             d["admins"] = self._data["admins"]
         if "dns_mappings" in self._data:
             d["dns_mappings"] = self._data["dns_mappings"]
         if "backup_config" in self._data:
-            d["backup_config"] = self._data["backup_config"]
+            # SEC-017: unwrap any SecretBytes fields (e.g. webdav_pass) back
+            # to plain strings before re-encryption. Matches _wrap_secrets in
+            # __init__ so round-trips are lossless.
+            d["backup_config"] = self._unwrap_secrets(self._data["backup_config"])
         if "client_configs" in self._data:
             d["client_configs"] = self._data["client_configs"]
         return d
@@ -720,6 +794,11 @@ class VaultState:
             for v in client.values():
                 if isinstance(v, SecretBytes):
                     v.wipe()
+        # SEC-017: webdav_pass / other *_pass fields in backup_config live
+        # in SecretBytes now — wipe them too when the state is torn down.
+        for v in self._data.get("backup_config", {}).values():
+            if isinstance(v, SecretBytes):
+                v.wipe()
         self._wiped = True
 
     # Context manager: wipe in finally so secrets never linger

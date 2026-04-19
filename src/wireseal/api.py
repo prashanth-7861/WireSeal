@@ -131,8 +131,12 @@ _WG_IFACE   = "wg0"
 
 # PIN-based quick unlock — encrypts the passphrase with a PIN-derived key.
 # After 5 wrong attempts the PIN file is wiped (must use full passphrase).
+# SEC-014 / SEC-023: failures are tracked per-IP (not globally) and
+# check-then-increment is atomic under _lock so two concurrent wrong PINs
+# from different IPs can't both slip past the 5-attempt threshold.
 _PIN_MAX_ATTEMPTS = 5
-_pin_fail_count   = 0
+_pin_fail_count   = 0  # legacy counter, retained for backward-compat tests
+_pin_fail_by_ip: dict[str, int] = {}
 
 # ---------------------------------------------------------------------------
 # Rate limiting for /api/unlock — prevents brute-force passphrase guessing.
@@ -154,6 +158,189 @@ _totp_used_codes: dict[str, set[str]] = {}
 # Maps peer public_key → last_handshake_seconds from previous _h_status call.
 # Used to detect new handshake events for the audit log (DASH-06).
 _peer_handshake_cache: dict[str, int] = {}
+
+
+# ---------------------------------------------------------------------------
+# Security hardening constants & helpers (SEC-002, 004, 005, 007, 008, 010, 018)
+# ---------------------------------------------------------------------------
+
+# SEC-004: hard cap on request body size — prevents OOM DoS via large
+# Content-Length. 1 MiB is 16x the largest legitimate body (a WireGuard
+# config import of ~40 KiB) and comfortably fits all vault backup payloads.
+_MAX_BODY_SIZE = 1 * 1024 * 1024  # 1 MiB
+
+# SEC-002: fresh-start challenge lives on the filesystem inside _VAULT_DIR.
+# Possession of the token proves local filesystem read access — a browser
+# CSRF attack cannot read it. Token rotates on every challenge request and
+# is consumed (deleted) on successful fresh-start.
+_FRESH_START_CHALLENGE_NAME = ".reset-challenge"
+_FRESH_START_TTL_SECONDS    = 120
+
+# SEC-008: admin/file/* may only touch files under these roots, resolved
+# once at import. Callers submit a path; we verify it resolves inside one
+# of these trees (after following symlinks) before shelling out to cat/tee.
+def _admin_file_roots() -> tuple[Path, ...]:
+    """Return the allowlisted root directories for admin file read/write."""
+    roots: list[Path] = [_VAULT_DIR]
+    if sys.platform == "linux":
+        roots.extend([
+            Path("/etc/wireguard"),
+            Path("/etc/nftables.d"),
+            Path("/var/lib/wireseal"),
+            Path("/var/log/wireseal"),
+        ])
+    elif sys.platform == "darwin":
+        roots.extend([
+            Path("/usr/local/etc/wireguard"),
+            Path("/opt/homebrew/etc/wireguard"),
+            Path("/Library/Application Support/WireSeal"),
+        ])
+    elif sys.platform == "win32":
+        prog = os.environ.get("ProgramData", r"C:\ProgramData")
+        roots.append(Path(prog) / "WireGuard")
+        roots.append(Path(prog) / "WireSeal")
+    # Resolve only ones that exist — non-existent roots can't be traversed to.
+    resolved: list[Path] = []
+    for r in roots:
+        try:
+            if r.exists():
+                resolved.append(r.resolve())
+        except OSError:
+            pass
+    return tuple(resolved)
+
+
+_ADMIN_FILE_ROOTS: tuple[Path, ...] = _admin_file_roots()
+
+# SEC-008: cap admin read size to prevent exfiltrating huge files in one shot.
+_MAX_ADMIN_READ_SIZE = 1 * 1024 * 1024  # 1 MiB
+
+
+def _validate_admin_path(path_str: str) -> Path:
+    """Resolve ``path_str`` and ensure it lives under an allowlisted root.
+
+    Raises _ApiError(403) if the path escapes the allowlist. Raises
+    _ApiError(400) for syntactic issues (empty, relative, .. components).
+    """
+    if not path_str or not isinstance(path_str, str):
+        raise _ApiError("path is required", 400)
+    path_str = path_str.strip()
+    if not path_str:
+        raise _ApiError("path is required", 400)
+    p = Path(path_str)
+    if not p.is_absolute():
+        raise _ApiError("path must be absolute", 400)
+    # Reject literal traversal components pre-resolve so the error is clear
+    # even when the resolved path happens to land inside an allowed root.
+    if any(part == ".." for part in p.parts):
+        raise _ApiError("path traversal not allowed", 400)
+    try:
+        resolved = p.resolve(strict=False)
+    except (OSError, ValueError):
+        raise _ApiError("invalid path", 400)
+    if not _ADMIN_FILE_ROOTS:
+        # No allowlist configured — refuse rather than fail open.
+        raise _ApiError("admin file access is disabled on this platform", 403)
+    for allowed in _ADMIN_FILE_ROOTS:
+        try:
+            resolved.relative_to(allowed)
+            return resolved
+        except ValueError:
+            continue
+    allowed_display = ", ".join(str(r) for r in _ADMIN_FILE_ROOTS)
+    raise _ApiError(
+        f"path outside allowlist. Permitted roots: {allowed_display}",
+        403,
+    )
+
+
+def _fresh_start_challenge_path() -> Path:
+    """Path to the fresh-start challenge file (inside the vault dir)."""
+    return _VAULT_DIR / _FRESH_START_CHALLENGE_NAME
+
+
+def _create_fresh_start_challenge() -> str:
+    """Generate and persist a fresh-start challenge token.
+
+    The token is written to ``_VAULT_DIR/.reset-challenge`` with mode 0o600
+    and an embedded expiry timestamp. The caller must read this file (proving
+    local filesystem access) to obtain the token value they submit to
+    ``/api/fresh-start``. A browser CSRF cannot read local files, so this
+    gates destructive reset behind a capability the attacker lacks.
+    """
+    import secrets as _secrets
+    import time as _time
+    token   = _secrets.token_hex(32)  # 64 hex chars, 256 bits
+    expires = int(_time.time()) + _FRESH_START_TTL_SECONDS
+    payload = f"{token}\n{expires}\n".encode("ascii")
+    _VAULT_DIR.mkdir(parents=True, exist_ok=True)
+    path = _fresh_start_challenge_path()
+    # Atomic write with strict mode so a racing read from another process
+    # can't observe a partial write.
+    from wireseal.security.vault import atomic_write
+    atomic_write(path, payload, mode=0o600)
+    return token
+
+
+def _consume_fresh_start_challenge(submitted: str) -> None:
+    """Validate submitted token against on-disk challenge. Consumes it on success.
+
+    Raises _ApiError(400/401/410) on invalid/expired/missing tokens. On
+    success, deletes the challenge file so each token is strictly single-use.
+    """
+    import hmac as _hmac
+    import time as _time
+    if not submitted or not isinstance(submitted, str):
+        raise _ApiError("challenge_token is required", 400)
+    path = _fresh_start_challenge_path()
+    if not path.exists():
+        raise _ApiError(
+            "No active fresh-start challenge. "
+            "POST /api/fresh-start/challenge first, then read the token file.",
+            410,
+        )
+    try:
+        raw = path.read_text(encoding="ascii")
+    except OSError:
+        raise _ApiError("Could not read challenge file.", 500)
+    lines = raw.strip().split("\n")
+    if len(lines) != 2:
+        path.unlink(missing_ok=True)
+        raise _ApiError("Corrupt challenge file — regenerate.", 410)
+    expected_token, expires_str = lines
+    try:
+        expires = int(expires_str)
+    except ValueError:
+        path.unlink(missing_ok=True)
+        raise _ApiError("Corrupt challenge file — regenerate.", 410)
+    if _time.time() > expires:
+        path.unlink(missing_ok=True)
+        raise _ApiError("Fresh-start challenge expired. Request a new one.", 410)
+    # Constant-time compare — avoid timing leaks on token prefix matches.
+    if not _hmac.compare_digest(submitted.strip(), expected_token):
+        raise _ApiError("Invalid challenge token.", 401)
+    # Consume: delete so the same token can't be replayed.
+    path.unlink(missing_ok=True)
+
+
+def _require_same_origin(req: "_Handler") -> None:
+    """Reject requests whose Origin header is not a local loopback origin.
+
+    Applied to destructive state-changing endpoints as defense-in-depth
+    against browser-initiated CSRF. Requests without an Origin header
+    (curl, native clients) are allowed — only explicit cross-origin is
+    blocked.
+    """
+    origin = req.headers.get("Origin", "")
+    if not origin:
+        return  # Non-browser clients don't send Origin
+    # Accept only loopback origins the dashboard itself is served from.
+    allowed_prefixes = (
+        "http://127.0.0.1", "http://localhost",
+        "https://127.0.0.1", "https://localhost",
+    )
+    if not any(origin == p or origin.startswith(p + ":") for p in allowed_prefixes):
+        raise _ApiError("Cross-origin request rejected.", 403)
 
 
 def _check_rate_limit(ip: str) -> None:
@@ -202,6 +389,12 @@ _ADMIN_MAX_FAILS = 3     # stricter limit than vault unlock
 _admin_lock      = threading.Lock()
 _admin_attempts: dict[str, list[float]] = {}
 
+# SEC-016: serialise /api/init concurrency so two racing POSTs cannot both
+# observe an absent vault and both call Vault.create — the second would
+# silently discard the first caller's passphrase, leaving that session
+# holding a passphrase that no longer decrypts the vault.
+_init_lock = threading.Lock()
+
 
 def _check_admin_rate_limit(ip: str) -> None:
     """Raise 429 if this IP has exceeded admin authentication attempts."""
@@ -228,15 +421,35 @@ def _clear_admin_failures(ip: str) -> None:
 
 
 def _verify_root_password(password: str) -> bool:
-    """Return True if the given password is the valid sudo/root password."""
-    if sys.platform == "win32":
+    """Return True if the given password proves admin authority.
+
+    SEC-006 fix: when the WireSeal process is already running as root (or
+    elevated on Windows), we no longer accept an empty/arbitrary password.
+    Instead, the caller must re-present the current vault passphrase —
+    proving they still hold the credential that decrypted the vault, not
+    just that the process is elevated. This stops a browser CSRF or a
+    co-resident unprivileged process from activating admin mode when the
+    vault happens to be unlocked.
+
+    Non-root processes continue to validate against the sudo password.
+    """
+    if not password:
+        return False  # SEC-006: reject empty regardless of platform
+    already_root = (sys.platform == "win32") or (os.geteuid() == 0)
+    if already_root:
+        # Require the vault passphrase as the proof-of-authority.
+        with _lock:
+            vault_pass = _session.get("passphrase")
+        if vault_pass is None:
+            return False  # Vault is locked — no reference secret to compare against
         try:
-            import ctypes
-            return bool(ctypes.windll.shell32.IsUserAnAdmin())
+            import hmac as _hmac
+            expected = bytes(vault_pass.expose_secret())
+            submitted = password.encode("utf-8")
+            return _hmac.compare_digest(expected, submitted)
         except Exception:
             return False
-    if os.geteuid() == 0:
-        return True  # Already root — no password needed
+    # Non-root: validate against sudo.
     try:
         result = subprocess.run(
             ["sudo", "-k", "-S", "true"],   # -k forces re-auth, -S reads password from stdin
@@ -350,6 +563,20 @@ def _require_unlocked() -> None:
     _last_activity = _time.monotonic()
 
 
+def _require_server_mode() -> None:
+    """Reject the request if the current vault is in client mode.
+
+    Server-only endpoints (tunnel start/stop, add/remove client, server-key
+    rotation, status) must never execute against a client vault — the client
+    vault has no server keypair, no IP pool, and no adapter state.
+    """
+    cache = _session.get("cache")
+    if cache is not None and cache.get("mode") == "client":
+        raise _ApiError(
+            "This operation is not available in client mode.", 409
+        )
+
+
 # ---------------------------------------------------------------------------
 # PIN helpers — encrypt/decrypt passphrase with a short PIN
 # ---------------------------------------------------------------------------
@@ -409,8 +636,24 @@ def _pin_wipe() -> None:
 
 
 def _refresh_cache(state: Any) -> dict:
-    """Build a non-secret snapshot from an open VaultState."""
+    """Build a non-secret snapshot from an open VaultState.
+
+    Handles both server-mode vaults (have .server/.clients/.ip_pool) and
+    client-mode vaults (only have client_configs).
+    """
+    mode = state.data.get("mode", "server")
+    if mode == "client":
+        return {
+            "mode": "client",
+            "server": {},
+            "clients": {},
+            "ip_pool": {},
+            "admins": dict(state.data.get("admins", {})),
+            "dns_mappings": {},
+            "backup_config": {},
+        }
     return {
+        "mode": "server",
         "server": {
             "ip":       state.server.get("ip", ""),
             "subnet":   state.server.get("subnet",
@@ -645,6 +888,7 @@ def _h_vault_info(req: "_Handler", _groups: tuple) -> dict:
     locked = _session["vault"] is None
     multi_admin: bool = False
     totp_required_for: list = []
+    vault_mode: str | None = None
     if not locked and _session["cache"]:
         admins_data = _session["cache"].get("admins", {})
         multi_admin = len(admins_data) > 1
@@ -652,6 +896,7 @@ def _h_vault_info(req: "_Handler", _groups: tuple) -> dict:
             aid for aid, info in admins_data.items()
             if info.get("totp_secret_b32") is not None
         ]
+        vault_mode = _session["cache"].get("mode")
     return {
         "initialized":      _VAULT_PATH.exists(),
         "locked":           locked,
@@ -659,10 +904,28 @@ def _h_vault_info(req: "_Handler", _groups: tuple) -> dict:
         "pin_set":          _PIN_PATH.exists(),
         "multi_admin":      multi_admin,
         "totp_required_for": totp_required_for,
+        "mode":             vault_mode,
     }
 
 
 def _h_init(req: "_Handler", _groups: tuple) -> dict:
+    # SEC-016: atomic existence check + create. Without the lock, two
+    # concurrent POST /api/init calls can both observe an absent vault
+    # and both call Vault.create — the second wins and silently discards
+    # the first caller's passphrase. Holding _init_lock across the
+    # existence check AND the creation serialises concurrent init
+    # attempts. A dedicated non-reentrant lock is used so the (slow)
+    # Argon2 KDF inside Vault.create does not starve other API endpoints
+    # that share the main _lock.
+    if not _init_lock.acquire(timeout=60):
+        raise _ApiError("Another init operation is in progress.", 409)
+    try:
+        return _h_init_locked(req)
+    finally:
+        _init_lock.release()
+
+
+def _h_init_locked(req: "_Handler", _groups: tuple = ()) -> dict:
     if _VAULT_PATH.exists():
         raise _ApiError("Vault already exists. Use /api/unlock.", 409)
 
@@ -670,6 +933,10 @@ def _h_init(req: "_Handler", _groups: tuple) -> dict:
     passphrase_str = body.get("passphrase", "")
     if len(passphrase_str) < 12:
         raise _ApiError("Passphrase must be at least 12 characters.", 400)
+
+    mode = body.get("mode", "server")
+    if mode not in ("server", "client"):
+        raise _ApiError("mode must be 'server' or 'client'.", 400)
 
     subnet   = body.get("subnet", "10.0.0.0/24")
     port     = int(body.get("port", 51820))
@@ -684,6 +951,62 @@ def _h_init(req: "_Handler", _groups: tuple) -> dict:
     from wireseal.core.config_builder    import ConfigBuilder
 
     passphrase = SecretBytes(bytearray(passphrase_str.encode()))
+
+    # ── Client-only vault init ────────────────────────────────────────────────
+    # Client mode never generates a server keypair, installs WireGuard,
+    # applies firewall rules, or enables a tunnel service. It creates an
+    # encrypted vault for storing imported client configs only.
+    if mode == "client":
+        try:
+            from datetime import datetime as _dt, timezone as _tz
+            now_iso = _dt.now(_tz.utc).isoformat()
+            initial_state = {
+                "schema_version": 2,
+                "mode":           "client",
+                "client_configs": {},
+                "integrity":      {},
+                "admins": {
+                    "owner": {
+                        "role": "owner",
+                        "created_at": now_iso,
+                        "totp_secret_b32": None,
+                        "totp_enrolled_at": None,
+                        "backup_codes": [],
+                        "last_unlock": None,
+                    }
+                },
+                "dns_mappings": {},
+                "backup_config": {
+                    "enabled": False, "destination": "local",
+                    "local_path": None, "keep_n": 10, "last_backup_at": None,
+                },
+            }
+            vault = Vault.create(_VAULT_PATH, passphrase, initial_state)
+            cache = {
+                "mode": "client", "server": {}, "clients": {}, "ip_pool": {},
+                "admins": dict(initial_state["admins"]),
+                "dns_mappings": {}, "backup_config": dict(initial_state["backup_config"]),
+            }
+            with _lock:
+                _session.update(vault=vault, passphrase=passphrase, cache=cache)
+            passphrase = None  # ownership transferred to session
+
+            AuditLog(_AUDIT_PATH).log(
+                "init", {"mode": "client"}, actor="system"
+            )
+            return {
+                "ok":    True,
+                "mode":  "client",
+            }
+        except _ApiError:
+            raise
+        except Exception:
+            if passphrase is not None:
+                passphrase.wipe()
+            raise _ApiError("Client vault initialization failed.", 500)
+        finally:
+            wipe_string(passphrase_str)
+
     try:
         if endpoint is None:
             try:
@@ -701,6 +1024,7 @@ def _h_init(req: "_Handler", _groups: tuple) -> dict:
 
         initial_state = {
             "schema_version": 1,
+            "mode":           "server",
             "server": {
                 "private_key": priv_key_str,
                 "public_key":  pub_key_str,
@@ -821,13 +1145,27 @@ def _h_init(req: "_Handler", _groups: tuple) -> dict:
         wipe_string(passphrase_str)
 
 
+_ADMIN_ID_RE = re.compile(r"^[a-zA-Z0-9_-]{1,64}$")
+
+
+def _validate_admin_id(admin_id: str) -> str:
+    """SEC-013: reject admin_id values containing characters outside
+    ``[A-Za-z0-9_-]`` or longer than 64 chars. Returns the validated id.
+    """
+    if not isinstance(admin_id, str) or not _ADMIN_ID_RE.match(admin_id or ""):
+        raise _ApiError(
+            "admin_id must match [A-Za-z0-9_-]{1,64}.", 400,
+        )
+    return admin_id
+
+
 def _h_unlock(req: "_Handler", _groups: tuple) -> dict:
     client_ip = req.client_address[0]
     _check_rate_limit(client_ip)
 
     body           = req._json()
     passphrase_str = body.get("passphrase", "")
-    admin_id       = body.get("admin_id", "owner")
+    admin_id       = _validate_admin_id(body.get("admin_id", "owner"))
     if not passphrase_str:
         raise _ApiError("passphrase is required", 400)
 
@@ -845,9 +1183,14 @@ def _h_unlock(req: "_Handler", _groups: tuple) -> dict:
             with vault.open(passphrase, admin_id=admin_id) as st:
                 # Update last_unlock for this admin
                 admins_dict = st.data.setdefault("admins", {})
-                if admin_id in admins_dict:
-                    admins_dict[admin_id]["last_unlock"] = _utcnow_iso()
-                admin_role = admins_dict.get(admin_id, {}).get("role", "owner")
+                # SEC-013: reject unknown admin_id with valid passphrase.
+                # Previously the code silently defaulted to "owner" role for
+                # fabricated admin_ids, giving an attacker with a valid
+                # passphrase the strongest role regardless of their slot.
+                if admin_id not in admins_dict:
+                    raise _ApiError("Unknown admin_id.", 401)
+                admins_dict[admin_id]["last_unlock"] = _utcnow_iso()
+                admin_role = admins_dict[admin_id].get("role", "admin")
 
                 # TOTP enforcement: if admin has enrolled TOTP, require a valid code.
                 totp_b32 = admins_dict.get(admin_id, {}).get("totp_secret_b32")
@@ -1128,9 +1471,19 @@ def _parse_wg_show(output: str) -> list[dict]:
 def _h_heartbeat(req: "_Handler", groups: tuple) -> dict:
     """Reset TTL for a client. Rate-limited to 1 reset per 30s per client.
 
-    No vault unlock required — clients call this directly.
+    SEC-015: authenticated by a per-client bearer token presented via the
+    ``X-WireSeal-Heartbeat`` header. The token is a 32-byte random value
+    assigned when the client is added and returned only to callers who
+    already hold the vault passphrase (via /api/client/configs/<name>).
+    This prevents any unauthenticated local process from defeating ZTNA
+    TTL revocation by pinging heartbeat indefinitely.
+
+    Legacy clients (created before SEC-015) have no stored token; they
+    receive one lazily on the next authenticated config fetch, and
+    heartbeat rejects them with 401 until that migration happens.
     """
     import time as _time
+    import hmac as _hmac
     name = groups[0]
 
     # Rate limiting — guard _heartbeat_cooldown with _lock for thread safety.
@@ -1152,6 +1505,18 @@ def _h_heartbeat(req: "_Handler", groups: tuple) -> dict:
     client = cache.get("clients", {}).get(name)
     if not client:
         raise _ApiError("Client not found.", 404)
+
+    # SEC-015: authenticate via X-WireSeal-Heartbeat header
+    presented = req.headers.get("X-WireSeal-Heartbeat", "") if hasattr(req, "headers") else ""
+    stored    = client.get("heartbeat_token") or ""
+    if not stored:
+        raise _ApiError(
+            "Client has no heartbeat token — fetch config while vault is "
+            "unlocked to provision one.", 401,
+        )
+    if not presented or not _hmac.compare_digest(presented, stored):
+        # Never reveal whether the header was missing vs. wrong.
+        raise _ApiError("Unauthorized heartbeat.", 401)
 
     if client.get("permanent", True):
         return {"ok": True, "permanent": True}
@@ -1241,6 +1606,7 @@ def _h_list_clients(req: "_Handler", _groups: tuple) -> list:
 
 def _h_add_client(req: "_Handler", _groups: tuple) -> dict:
     _require_unlocked()
+    _require_server_mode()
     body = req._json()
     name = body.get("name", "").strip()
     if not name:
@@ -1346,6 +1712,10 @@ def _h_add_client(req: "_Handler", _groups: tuple) -> dict:
             _ttl_expires = None
             _permanent = True
 
+        # SEC-015: generate a per-client heartbeat bearer token (32 bytes hex).
+        import secrets as _secrets_hb
+        heartbeat_token = _secrets_hb.token_hex(32)
+
         state.clients[name] = {
             "private_key":    priv_key_str,
             "public_key":     pub_key_str,
@@ -1355,6 +1725,7 @@ def _h_add_client(req: "_Handler", _groups: tuple) -> dict:
             "permanent":      _permanent,
             "ttl_seconds":    _ttl_secs,
             "ttl_expires_at": _ttl_expires,
+            "heartbeat_token": heartbeat_token,
         }
         state.ip_pool["allocated"]        = pool.get_allocated()
         state.integrity[f"client-{name}"] = config_hash
@@ -1373,6 +1744,7 @@ def _h_add_client(req: "_Handler", _groups: tuple) -> dict:
 
 def _h_remove_client(req: "_Handler", groups: tuple) -> dict:
     _require_unlocked()
+    _require_server_mode()
     name = (groups[0] if groups else "").strip()
     if not name:
         raise _ApiError("client name is required", 400)
@@ -1526,6 +1898,13 @@ def _h_client_config(req: "_Handler", groups: tuple) -> dict:
         if name not in state.clients:
             raise _ApiError(f"Client '{name}' not found.", 404)
         cdata = state.clients[name]
+        # SEC-015: lazy-migrate legacy clients without heartbeat tokens.
+        heartbeat_token = cdata.get("heartbeat_token")
+        if not heartbeat_token:
+            import secrets as _secrets_hb
+            heartbeat_token = _secrets_hb.token_hex(32)
+            cdata["heartbeat_token"] = heartbeat_token
+            vault.save(state, passphrase)
         config_str = ConfigBuilder().render_client_config(
             client_private_key=_extract(cdata["private_key"]),
             client_ip=cdata["ip"],
@@ -1537,7 +1916,7 @@ def _h_client_config(req: "_Handler", groups: tuple) -> dict:
         )
 
     AuditLog(_AUDIT_PATH).log("export-config", {"client": name}, actor=_actor_id)
-    return {"name": name, "config": config_str}
+    return {"name": name, "config": config_str, "heartbeat_token": heartbeat_token}
 
 
 def _h_client_config_download(req: "_Handler", groups: tuple) -> None:
@@ -1584,6 +1963,15 @@ def _h_client_config_download(req: "_Handler", groups: tuple) -> None:
 
 
 def _h_audit_log(req: "_Handler", _groups: tuple) -> dict:
+    """Return the last 100 audit log entries.
+
+    SEC-001: requires vault unlock. The audit log leaks admin identities,
+    peer names, IP addresses, and operation timing — exactly the
+    reconnaissance information a local attacker needs. Other processes on
+    the machine (or a CSRF-capable tab) must not be able to read this
+    without proving they hold the vault passphrase.
+    """
+    _require_unlocked()
     if not _AUDIT_PATH.exists():
         return {"entries": []}
     try:
@@ -1867,6 +2255,7 @@ def _h_change_passphrase(req: "_Handler", _groups: tuple) -> dict:
 def _h_start_server(req: "_Handler", _groups: tuple) -> dict:
     """Start the WireGuard tunnel (wg-quick up)."""
     _require_unlocked()
+    _require_server_mode()
     from wireseal.security.audit import AuditLog
 
     # Check if already running
@@ -1914,6 +2303,7 @@ def _h_start_server(req: "_Handler", _groups: tuple) -> dict:
 
 def _h_terminate(req: "_Handler", _groups: tuple) -> dict:
     _require_unlocked()
+    _require_server_mode()
     from wireseal.security.audit import AuditLog
 
     if sys.platform == "win32":
@@ -1953,12 +2343,85 @@ def _h_terminate(req: "_Handler", _groups: tuple) -> dict:
         raise _ApiError("wg-quick not found — is WireGuard installed?", 500)
 
 
+def _h_fresh_start_challenge(req: "_Handler", _groups: tuple) -> dict:
+    """Issue a one-time challenge token for fresh-start.
+
+    POST /api/fresh-start/challenge
+
+    SEC-002: The token is written to ``_VAULT_DIR/.reset-challenge``. The
+    caller must then READ that file from the filesystem and submit its
+    first line as ``challenge_token`` to ``POST /api/fresh-start``.
+    Browser-based CSRF attackers can POST here but cannot read the file —
+    so a compromised tab cannot destroy the vault without physical/admin
+    filesystem access.
+    """
+    _require_same_origin(req)
+    _ = _create_fresh_start_challenge()
+    # NOTE: we deliberately do NOT return the token in the response body.
+    # Returning it would let a browser CSRF attacker read it. The caller
+    # must read it from disk, which requires filesystem privileges the
+    # attacker doesn't have.
+    from wireseal.security.audit import AuditLog
+    try:
+        AuditLog(_AUDIT_PATH).log(
+            "fresh-start-challenge-issued",
+            {"ip": req.client_address[0]},
+            actor="system",
+        )
+    except Exception:
+        pass  # Audit-log failure must never block the challenge issuance
+    # SEC-002 follow-up: do NOT disclose the absolute vault-directory path in
+    # the response body. A cross-origin caller (who would already have been
+    # blocked by _require_same_origin) or any observer of proxy/gateway logs
+    # should not learn where the vault lives. The filename is fixed
+    # (".reset-challenge"); a legitimate local CLI caller knows the vault dir
+    # from its own config.
+    return {
+        "ok": True,
+        "message": (
+            f"Challenge written to <vault-dir>/{_FRESH_START_CHALLENGE_NAME}. "
+            "Read the first line of that file and submit it as "
+            '"challenge_token" in POST /api/fresh-start.'
+        ),
+        "challenge_filename": _FRESH_START_CHALLENGE_NAME,
+        "expires_in": _FRESH_START_TTL_SECONDS,
+    }
+
+
 def _h_fresh_start(req: "_Handler", _groups: tuple) -> dict:
-    # NOTE: deliberately NOT requiring unlock — fresh start must work when
-    # the user has forgotten their passphrase or the vault is corrupt.
+    """Destroy the vault directory after two-factor confirmation.
+
+    SEC-002: Requires both:
+      * the literal confirmation string ``{"confirm": "CONFIRM"}``, AND
+      * a single-use ``challenge_token`` obtained by reading the challenge
+        file written by ``POST /api/fresh-start/challenge``.
+
+    The challenge file lives on the local filesystem with mode 0o600 —
+    a browser CSRF cannot read it, but the legitimate user (who controls
+    the machine) can. This gates irreversible destruction behind a
+    capability the attacker does not possess.
+
+    We still do NOT require vault unlock here — the whole point of the
+    endpoint is to recover from a forgotten passphrase. The filesystem
+    capability replaces the passphrase as the proof of authority.
+    """
+    _require_same_origin(req)
     body = req._json()
     if body.get("confirm") != "CONFIRM":
         raise _ApiError('Send {"confirm":"CONFIRM"} to proceed.', 400)
+
+    token = body.get("challenge_token", "")
+    _consume_fresh_start_challenge(token)
+
+    from wireseal.security.audit import AuditLog
+    try:
+        AuditLog(_AUDIT_PATH).log(
+            "fresh-start-invoked",
+            {"ip": req.client_address[0]},
+            actor="system",
+        )
+    except Exception:
+        pass
 
     # Stop the WireGuard tunnel
     if sys.platform == "win32":
@@ -2053,7 +2516,13 @@ def _h_set_pin(req: "_Handler", _groups: tuple) -> dict:
 
 
 def _h_remove_pin(req: "_Handler", _groups: tuple) -> dict:
-    """Remove the quick-unlock PIN."""
+    """Remove the quick-unlock PIN.
+
+    SEC-024: requires an unlocked vault. Previously any process on the
+    machine could POST here and DoS legitimate PIN-based unlock. Now the
+    caller must already hold the vault passphrase.
+    """
+    _require_unlocked()
     _pin_wipe()
     from wireseal.security.audit import AuditLog
     AuditLog(_AUDIT_PATH).log("remove-pin", {}, actor=_session.get("admin_id", "owner"))
@@ -2061,7 +2530,14 @@ def _h_remove_pin(req: "_Handler", _groups: tuple) -> dict:
 
 
 def _h_unlock_pin(req: "_Handler", _groups: tuple) -> dict:
-    """Unlock the vault using a PIN instead of the full passphrase."""
+    """Unlock the vault using a PIN instead of the full passphrase.
+
+    SEC-014 / SEC-023: PIN attempts are tracked per-IP (not globally) and
+    the check-then-increment sequence is atomic under ``_lock`` so two
+    concurrent wrong PINs from different IPs cannot both slip past the
+    5-attempt threshold, and a global counter cannot be abused to lock
+    legitimate users out via a separate attacker.
+    """
     global _pin_fail_count
     client_ip = req.client_address[0]
     _check_rate_limit(client_ip)
@@ -2069,9 +2545,13 @@ def _h_unlock_pin(req: "_Handler", _groups: tuple) -> dict:
     if not _PIN_PATH.exists():
         raise _ApiError("No PIN set. Use passphrase to unlock.", 400)
 
+    # Pre-check the per-IP counter (fast path — allows us to reject before
+    # parsing the body). If already over threshold, wipe the PIN atomically
+    # and bail out.
     with _lock:
-        if _pin_fail_count >= _PIN_MAX_ATTEMPTS:
+        if _pin_fail_by_ip.get(client_ip, 0) >= _PIN_MAX_ATTEMPTS:
             _pin_wipe()
+            _pin_fail_by_ip.pop(client_ip, None)
             _pin_fail_count = 0
             raise _ApiError("Too many wrong PIN attempts. PIN removed — use your passphrase.", 403)
 
@@ -2082,16 +2562,26 @@ def _h_unlock_pin(req: "_Handler", _groups: tuple) -> dict:
 
     passphrase_bytes = _pin_load(pin)
     if passphrase_bytes is None:
+        # Atomic check-then-act: increment counter, decide whether to wipe,
+        # all while holding _lock. This prevents a race where two wrong PINs
+        # could each see count < MAX, both increment, and both skip the wipe.
+        wipe_pin = False
         with _lock:
-            _pin_fail_count += 1
-            current_fails = _pin_fail_count
-        _record_unlock_failure(client_ip)
-        remaining = _PIN_MAX_ATTEMPTS - current_fails
-        if current_fails >= _PIN_MAX_ATTEMPTS:
-            _pin_wipe()
-            with _lock:
+            current_fails = _pin_fail_by_ip.get(client_ip, 0) + 1
+            _pin_fail_by_ip[client_ip] = current_fails
+            # Keep legacy global counter in sync for any test/consumer that
+            # still reads it, but decisions are driven by the per-IP count.
+            _pin_fail_count = max(_pin_fail_count, current_fails)
+            if current_fails >= _PIN_MAX_ATTEMPTS:
+                wipe_pin = True
+                _pin_fail_by_ip.pop(client_ip, None)
                 _pin_fail_count = 0
+
+        _record_unlock_failure(client_ip)
+        if wipe_pin:
+            _pin_wipe()
             raise _ApiError("Wrong PIN. PIN removed after too many attempts — use your passphrase.", 403)
+        remaining = _PIN_MAX_ATTEMPTS - current_fails
         raise _ApiError(f"Wrong PIN. {remaining} attempt{'s' if remaining != 1 else ''} remaining.", 401)
 
     # PIN correct — decrypt passphrase and unlock the vault
@@ -2116,7 +2606,8 @@ def _h_unlock_pin(req: "_Handler", _groups: tuple) -> dict:
             if _session["passphrase"]:
                 _session["passphrase"].wipe()
             _session.update(vault=vault, passphrase=passphrase, cache=cache)
-            _pin_fail_count = 0  # Reset on success (under lock)
+            _pin_fail_by_ip.pop(client_ip, None)  # Reset per-IP counter on success
+            _pin_fail_count = 0  # Keep legacy counter consistent
         _clear_unlock_failures(client_ip)
         AuditLog(_AUDIT_PATH).log("unlock-pin", {}, actor="system")
 
@@ -2220,50 +2711,32 @@ def _h_admin_status(req: "_Handler", _groups: tuple) -> dict:
     return {"active": True, "expires_in": int(remaining)}
 
 
+# SEC-007: the generic /api/admin/exec endpoint was removed. Arbitrary
+# command execution as root through a single API handler is unacceptable
+# blast radius — any XSS / CSRF / compromised credential that lands inside
+# the admin session gets instant RCE with zero auditability of which
+# subcommand was actually invoked.
+#
+# Callers that genuinely need to manage system state use the dedicated,
+# narrow endpoints: /api/admin/services, /api/admin/services/<name>/<action>,
+# /api/admin/file/read, /api/admin/file/write, and the key-rotation /
+# service-management handlers. Each of those validates its arguments against
+# a closed allow-list.
+#
+# A stub is kept behind the old route solely so existing clients get a clear
+# 410 Gone instead of a 404 that looks like a routing bug.
+
+
 def _h_admin_exec(req: "_Handler", _groups: tuple) -> dict:
-    """Execute any command as root.
-
-    POST /api/admin/exec
-    Body: {"cmd": ["ls", "-la", "/etc"], "stdin": "", "timeout": 30}
-
-    Requires vault unlocked + admin mode active.
-    ``timeout`` is capped at 120 seconds.
-    """
+    """Removed. Use the narrow admin endpoints instead."""
     _require_unlocked()
     _require_admin_active()
-
-    body      = req._json()
-    cmd       = body.get("cmd", [])
-    if not cmd or not isinstance(cmd, list):
-        raise _ApiError("cmd (array of strings) is required", 400)
-    if not all(isinstance(s, str) for s in cmd):
-        raise _ApiError("cmd must be an array of strings", 400)
-
-    stdin_str = body.get("stdin", "")
-    timeout   = min(int(body.get("timeout", 30)), 120)
-
-    try:
-        result = _admin_run(
-            cmd,
-            stdin_extra=stdin_str.encode("utf-8") if stdin_str else b"",
-            timeout=timeout,
-        )
-    except _ApiError:
-        raise
-    except subprocess.TimeoutExpired:
-        raise _ApiError(f"Command timed out after {timeout}s", 504)
-    except Exception as exc:
-        raise _ApiError(f"Execution failed: {exc}", 500)
-
-    from wireseal.security.audit import AuditLog
-    AuditLog(_AUDIT_PATH).log("admin-exec", {"cmd": cmd[:3], "rc": result.returncode},
-                              actor=_session.get("admin_id", "owner"))
-
-    return {
-        "returncode": result.returncode,
-        "stdout":     result.stdout.decode("utf-8", errors="replace"),
-        "stderr":     result.stderr.decode("utf-8", errors="replace"),
-    }
+    raise _ApiError(
+        "/api/admin/exec has been removed. Use /api/admin/services/* or "
+        "/api/admin/file/* — the generic root-exec endpoint is no longer "
+        "available.",
+        410,
+    )
 
 
 def _h_admin_services(req: "_Handler", _groups: tuple) -> dict:
@@ -2356,21 +2829,38 @@ def _h_admin_service_action(req: "_Handler", groups: tuple) -> dict:
 
 
 def _h_admin_read_file(req: "_Handler", _groups: tuple) -> dict:
-    """Read any file as root.
+    """Read a file as root from an allowlisted location.
 
     POST /api/admin/file/read
     Body: {"path": "/etc/wireguard/wg0.conf"}
+
+    SEC-008: ``path`` MUST resolve inside ``_ADMIN_FILE_ROOTS`` (vault dir +
+    known WireGuard / nftables / WireSeal state directories on this OS).
+    Attempts to read files outside that set — ``/etc/shadow``,
+    ``/root/.ssh/id_ed25519``, arbitrary user home paths — are rejected with
+    403 *before* the privileged helper is invoked. Output is also truncated to
+    ``_MAX_ADMIN_READ_SIZE`` so a malicious symlink to a huge file can't be
+    used to exfiltrate megabytes in one call.
     """
     _require_unlocked()
     _require_admin_active()
 
     body = req._json()
-    path = body.get("path", "").strip()
-    if not path:
-        raise _ApiError("path is required", 400)
+    # SEC-008: allowlist-gate the path before any subprocess is spawned.
+    resolved = _validate_admin_path(body.get("path", ""))
+    path_str = str(resolved)
 
+    # SEC-008 follow-up: do NOT rely on "read everything, truncate after".
+    # If an attacker planted a symlink inside an allowed root pointing to
+    # ``/dev/zero`` or ``/dev/urandom``, a plain ``cat`` would stream
+    # unbounded bytes until the 10s timeout fires, allocating gigabytes of
+    # process memory in the meantime. Use ``head -c`` to cap the subprocess
+    # at source (read +1 byte to detect truncation).
     try:
-        result = _admin_run(["cat", "--", path], timeout=10)
+        result = _admin_run(
+            ["head", "-c", str(_MAX_ADMIN_READ_SIZE + 1), "--", path_str],
+            timeout=10,
+        )
     except _ApiError:
         raise
     except Exception as exc:
@@ -2380,31 +2870,49 @@ def _h_admin_read_file(req: "_Handler", _groups: tuple) -> dict:
         err = result.stderr.decode("utf-8", errors="replace").strip()
         raise _ApiError(err or "File not found or permission denied.", 404)
 
-    from wireseal.security.audit import AuditLog
-    AuditLog(_AUDIT_PATH).log("admin-read-file", {"path": path},
-                              actor=_session.get("admin_id", "owner"))
+    # Detect truncation: we asked for MAX+1 bytes, so if the subprocess
+    # returned MAX+1 bytes the file was at least that large.
+    truncated     = len(result.stdout) > _MAX_ADMIN_READ_SIZE
+    content_bytes = result.stdout[:_MAX_ADMIN_READ_SIZE]
 
-    return {"path": path, "content": result.stdout.decode("utf-8", errors="replace")}
+    from wireseal.security.audit import AuditLog
+    AuditLog(_AUDIT_PATH).log(
+        "admin-read-file",
+        {"path": path_str, "truncated": truncated, "bytes": len(content_bytes)},
+        actor=_session.get("admin_id", "owner"),
+    )
+
+    return {
+        "path":       path_str,
+        "content":    content_bytes.decode("utf-8", errors="replace"),
+        "truncated":  truncated,
+    }
 
 
 def _h_admin_write_file(req: "_Handler", _groups: tuple) -> dict:
-    """Write content to any file as root.
+    """Write content to an allowlisted file as root.
 
     POST /api/admin/file/write
     Body: {"path": "/etc/wireguard/wg0.conf", "content": "..."}
+
+    SEC-008: ``path`` must resolve inside ``_ADMIN_FILE_ROOTS``. Writes
+    outside the allowlist return 403 and never reach ``tee``. Written content
+    is also size-capped to the request body limit enforced in ``_json``.
     """
     _require_unlocked()
     _require_admin_active()
 
     body    = req._json()
-    path    = body.get("path", "").strip()
-    content = body.get("content", "")
-    if not path:
-        raise _ApiError("path is required", 400)
+    # SEC-008: resolve + allowlist-check before we spawn a privileged helper.
+    resolved = _validate_admin_path(body.get("path", ""))
+    path_str = str(resolved)
+    content  = body.get("content", "")
+    if not isinstance(content, str):
+        raise _ApiError("content must be a string", 400)
 
     try:
         result = _admin_run(
-            ["tee", "--", path],
+            ["tee", "--", path_str],
             stdin_extra=content.encode("utf-8"),
             timeout=10,
         )
@@ -2418,10 +2926,13 @@ def _h_admin_write_file(req: "_Handler", _groups: tuple) -> dict:
         raise _ApiError(err or "Write failed.", 500)
 
     from wireseal.security.audit import AuditLog
-    AuditLog(_AUDIT_PATH).log("admin-write-file", {"path": path},
-                              actor=_session.get("admin_id", "owner"))
+    AuditLog(_AUDIT_PATH).log(
+        "admin-write-file",
+        {"path": path_str, "bytes": len(content)},
+        actor=_session.get("admin_id", "owner"),
+    )
 
-    return {"ok": True, "path": path}
+    return {"ok": True, "path": path_str}
 
 
 # ---------------------------------------------------------------------------
@@ -2433,12 +2944,14 @@ def _h_rotate_client_keys(req: "_Handler", groups: tuple) -> dict:
     """Rotate the keypair and PSK for a specific client.
 
     POST /api/clients/<name>/rotate
+    Server-mode only — client vaults have no clients to rotate.
 
     Generates new client keypair + PSK, rebuilds both client and server
     configs, validates them, writes atomically, reloads WireGuard, and
     updates the vault.  Returns the new client config + QR PNG.
     """
     _require_unlocked()
+    _require_server_mode()
     name = (groups[0] if groups else "").strip()
     if not name:
         raise _ApiError("client name is required", 400)
@@ -2595,6 +3108,7 @@ def _h_rotate_server_keys(req: "_Handler", _groups: tuple) -> dict:
     reloads WireGuard, and updates the vault.
     """
     _require_unlocked()
+    _require_server_mode()
 
     with _lock:
         vault      = _session["vault"]
@@ -3093,7 +3607,7 @@ def _h_totp_verify_backup(req: "_Handler", _groups: tuple) -> dict:
     Returns: {ok: true, role: "owner"} on success.
     """
     body          = req._json()
-    admin_id      = body.get("admin_id", "owner")
+    admin_id      = _validate_admin_id(body.get("admin_id", "owner"))
     passphrase_str = body.get("passphrase", "")
     backup_code   = body.get("backup_code", "").upper().strip()
     client_ip     = req.client_address[0]
@@ -3116,10 +3630,12 @@ def _h_totp_verify_backup(req: "_Handler", _groups: tuple) -> dict:
         try:
             with vault.open(passphrase, admin_id=admin_id) as st:
                 admins_dict = st.data.setdefault("admins", {})
-                if admin_id in admins_dict:
-                    admins_dict[admin_id]["last_unlock"] = _utcnow_iso()
-                admin_role   = admins_dict.get(admin_id, {}).get("role", "owner")
-                hashed_codes = admins_dict.get(admin_id, {}).get("backup_codes", [])
+                # SEC-013: reject unknown admin_id even with valid passphrase.
+                if admin_id not in admins_dict:
+                    raise _ApiError("Unknown admin_id.", 401)
+                admins_dict[admin_id]["last_unlock"] = _utcnow_iso()
+                admin_role   = admins_dict[admin_id].get("role", "admin")
+                hashed_codes = admins_dict[admin_id].get("backup_codes", [])
 
                 # Verify backup code (constant-time)
                 matched = verify_backup_code(backup_code, hashed_codes)
@@ -3336,10 +3852,67 @@ def _h_backup_restore(req, _groups):
         raise _ApiError("backup_path and passphrase are required.", 400)
     with _lock:
         vault = _session["vault"]
+        cache = _session["cache"] or {}
         session_admin_id = _session.get("admin_id", "owner")
     if admin_id is None:
         admin_id = session_admin_id
     vault_path = vault._path
+
+    # SEC-009: validate backup_path against the configured backup directory.
+    # The original handler passed any filesystem path straight through to
+    # the restore engine — an attacker could point at ``/dev/stdin``,
+    # ``/proc/self/mem``, a pre-crafted ciphertext anywhere on disk, or a
+    # symlink farmed for TOCTOU. Lock the path down to:
+    #   * the backup destination directory configured in the vault, OR
+    #   * the vault directory itself (for hand-placed emergency backups).
+    # The path must resolve to a regular file (no devices, FIFOs, sockets)
+    # after symlinks are followed — so ``/etc/wireguard/backup.enc`` pointing
+    # at ``/dev/stdin`` is rejected even if the symlink lives in an allowed
+    # root.
+    from pathlib import Path as _Path
+    try:
+        resolved_backup = _Path(backup_path).resolve(strict=True)
+    except (FileNotFoundError, OSError, ValueError):
+        raise _ApiError("Backup file not found.", 404)
+    if any(part == ".." for part in _Path(backup_path).parts):
+        raise _ApiError("backup_path must not contain '..' components.", 400)
+    if not resolved_backup.is_file():
+        # rejects directories, devices, FIFOs, sockets
+        raise _ApiError("backup_path must be a regular file.", 400)
+
+    cfg            = cache.get("backup_config", {}) or {}
+    allowed_roots: list[_Path] = []
+    local_backup_dir = cfg.get("local_path")
+    if local_backup_dir:
+        try:
+            allowed_roots.append(_Path(local_backup_dir).resolve(strict=False))
+        except (OSError, ValueError):
+            pass
+    try:
+        allowed_roots.append(_Path(_VAULT_DIR).resolve(strict=False))
+    except (OSError, ValueError):
+        pass
+    if not allowed_roots:
+        raise _ApiError(
+            "No backup directory is configured. Set backup_config.local_path "
+            "before restoring.", 400,
+        )
+    for root in allowed_roots:
+        try:
+            resolved_backup.relative_to(root)
+            break
+        except ValueError:
+            continue
+    else:
+        allowed_display = ", ".join(str(r) for r in allowed_roots)
+        raise _ApiError(
+            f"backup_path must live under an allowlisted backup directory "
+            f"(permitted roots: {allowed_display}).",
+            403,
+        )
+    # Hand the resolved canonical path to the restore engine — prevents TOCTOU
+    # where an attacker swaps ``backup.enc`` for a symlink after validation.
+    backup_path = str(resolved_backup)
     from wireseal.security.secrets_wipe import wipe_bytes, wipe_string
     passphrase_ba = bytearray(passphrase_str.encode("utf-8"))
     try:
@@ -3400,10 +3973,16 @@ def _parse_version(v: str) -> tuple[int, ...]:
 
 
 def _h_update_check(req: "_Handler", _groups: tuple) -> dict:
-    """Check GitHub for the latest release. No auth required."""
+    """Check GitHub for the latest release.
+
+    SEC-026: requires an unlocked vault. Previously any local process
+    could trigger an unauthenticated phone-home to GitHub (leaking the
+    application's identity / user-agent to the network) on demand.
+    """
     import urllib.request
     import urllib.error
 
+    _require_unlocked()
     current = _current_version()
     try:
         gh_req = urllib.request.Request(
@@ -3448,10 +4027,24 @@ def _h_update_check(req: "_Handler", _groups: tuple) -> dict:
 
 
 def _h_update_install(req: "_Handler", _groups: tuple) -> dict:
-    """Download and install the latest release. Runs the platform installer."""
+    """Download and install the latest release. Runs the platform installer.
+
+    SEC-018: destructive binary replacement requires unlock + admin-active +
+    same-origin.
+    SEC-005 / SEC-010: the downloaded asset is integrity-checked against a
+    published SHA-256 digest AND authenticated against a detached Ed25519
+    signature made with a pinned release key before any extraction or
+    replacement. Fails closed — if either sidecar is missing, or the pinned
+    key is absent in this build, we refuse to install.
+    """
     import tempfile
     import urllib.request
     import urllib.error
+    from pathlib import Path as _Path
+
+    _require_unlocked()
+    _require_admin_active()
+    _require_same_origin(req)
 
     # First, check what's available
     check = _h_update_check(req, _groups)
@@ -3466,24 +4059,84 @@ def _h_update_install(req: "_Handler", _groups: tuple) -> dict:
             f"Download manually from: {check['release_url']}", 404,
         )
 
-    # Download the asset to a temp directory
+    # Download the asset to a temp directory along with its signing sidecars.
     tmp_dir = tempfile.mkdtemp(prefix="wireseal-update-")
     tmp_path = os.path.join(tmp_dir, asset_name)
 
+    _MAX_ASSET_SIZE = 200 * 1024 * 1024  # 200 MiB — defeats tarball bombs
+
+    def _download_to(url: str, dest: str, *, max_bytes: int) -> None:
+        try:
+            dl_req = urllib.request.Request(url, headers={"User-Agent": "WireSeal-Updater"})
+            with urllib.request.urlopen(dl_req, timeout=120) as resp:
+                written = 0
+                with open(dest, "wb") as f:
+                    while True:
+                        chunk = resp.read(65536)
+                        if not chunk:
+                            break
+                        written += len(chunk)
+                        if written > max_bytes:
+                            raise _ApiError(
+                                f"Download exceeds {max_bytes} bytes — aborting.", 502
+                            )
+                        f.write(chunk)
+        except _ApiError:
+            raise
+        except (urllib.error.URLError, OSError) as exc:
+            raise _ApiError(f"Download failed: {exc}", 502)
+
+    _download_to(asset_url, tmp_path, max_bytes=_MAX_ASSET_SIZE)
+
+    # Fetch sidecars. We require both; a release without them cannot be
+    # verified and therefore cannot be trusted to overwrite the running binary.
+    sha_url = asset_url + ".sha256"
+    sig_url = asset_url + ".sig"
+    sha_path = os.path.join(tmp_dir, asset_name + ".sha256")
+    sig_path = os.path.join(tmp_dir, asset_name + ".sig")
     try:
-        dl_req = urllib.request.Request(
-            asset_url,
-            headers={"User-Agent": "WireSeal-Updater"},
+        _download_to(sha_url, sha_path, max_bytes=4096)
+        _download_to(sig_url, sig_path, max_bytes=4096)
+    except _ApiError as exc:
+        raise _ApiError(
+            "Update aborted: release is missing required signing sidecars "
+            f"(.sha256 / .sig). Details: {exc}", 502,
         )
-        with urllib.request.urlopen(dl_req, timeout=120) as resp:
-            with open(tmp_path, "wb") as f:
-                while True:
-                    chunk = resp.read(65536)
-                    if not chunk:
-                        break
-                    f.write(chunk)
-    except (urllib.error.URLError, OSError) as exc:
-        raise _ApiError(f"Download failed: {exc}", 502)
+
+    # Parse the .sha256 sidecar (either a bare digest or "<digest>  <file>").
+    try:
+        sha_raw = _Path(sha_path).read_text(encoding="ascii").strip().split()[0].lower()
+    except Exception as exc:
+        raise _ApiError(f"Could not parse SHA-256 sidecar: {exc}", 502)
+
+    try:
+        sig_bytes = _Path(sig_path).read_bytes()
+    except OSError as exc:
+        raise _ApiError(f"Could not read signature sidecar: {exc}", 502)
+
+    # Verify — raises UpdateVerificationError if anything is off.
+    from wireseal.security.update_verifier import (
+        verify_release_asset, UpdateVerificationError,
+    )
+    try:
+        verify_release_asset(
+            _Path(tmp_path),
+            expected_sha256_hex=sha_raw,
+            signature=sig_bytes,
+            require_signature=True,
+        )
+    except UpdateVerificationError as exc:
+        # Audit the tampering attempt before bailing.
+        try:
+            from wireseal.security.audit import AuditLog
+            AuditLog(_AUDIT_PATH).log(
+                "update-verify-failed",
+                {"asset": asset_name, "reason": str(exc)},
+                actor=_session.get("admin_id", "owner"),
+            )
+        except Exception:
+            pass
+        raise _ApiError(f"Update verification failed: {exc}", 400)
 
     # Platform-specific install
     if sys.platform == "win32":
@@ -3503,10 +4156,13 @@ def _h_update_install(req: "_Handler", _groups: tuple) -> dict:
         }
 
     elif sys.platform == "linux":
-        # Extract tarball and replace the current binary
+        # Extract tarball and replace the current binary.
+        # SEC-005: use PEP 706 'data' filter to reject members with absolute
+        # paths, '..' components, device/FIFO entries, dangerous permissions,
+        # or anything that would escape ``tmp_dir`` via symlinks.
         import tarfile
         with tarfile.open(tmp_path, "r:gz") as tar:
-            tar.extractall(tmp_dir)
+            tar.extractall(tmp_dir, filter="data")
         # Find the GUI binary in extracted contents
         gui_bin = os.path.join(tmp_dir, f"WireSeal-linux-x86_64")
         if not os.path.exists(gui_bin):
@@ -3531,10 +4187,11 @@ def _h_update_install(req: "_Handler", _groups: tuple) -> dict:
         raise _ApiError("Could not locate binary in downloaded archive.", 500)
 
     elif sys.platform == "darwin":
-        # macOS: extract tarball and replace binary (same as Linux)
+        # macOS: extract tarball and replace binary (same as Linux).
+        # SEC-005: PEP 706 data filter for path-traversal-safe extraction.
         import tarfile
         with tarfile.open(tmp_path, "r:gz") as tar:
-            tar.extractall(tmp_dir)
+            tar.extractall(tmp_dir, filter="data")
         gui_bin = os.path.join(tmp_dir, "WireSeal-macos-arm64")
         if not os.path.exists(gui_bin):
             for name in os.listdir(tmp_dir):
@@ -3621,21 +4278,49 @@ def _h_client_list_configs(req: "_Handler", _groups: tuple) -> dict:
 
 
 def _h_client_get_config(req: "_Handler", groups: tuple) -> dict:
-    """GET /api/client/configs/<name> — Get a single config by name."""
+    """GET /api/client/configs/<name> — Get a single config by name.
+
+    SEC-020: PrivateKey is redacted by default. Pass ``?reveal=1`` (or
+    ``reveal=true``) to receive the full config text; reveal events are
+    audit-logged.
+    """
     _require_unlocked()
     name = groups[0]
+
+    # Parse ?reveal=... from the request path (query string).
+    reveal = False
+    try:
+        from urllib.parse import urlsplit, parse_qs as _parse_qs
+        q = urlsplit(getattr(req, "path", "") or "").query
+        qs = _parse_qs(q)
+        vals = qs.get("reveal", [])
+        if vals and vals[0].lower() in ("1", "true", "yes"):
+            reveal = True
+    except Exception:
+        reveal = False
 
     with _lock:
         vault = _session["vault"]
         passphrase = _session["passphrase"]
 
     from wireseal.client.config_store import get_config
+    from wireseal.security.audit import AuditLog
 
     with vault.open(passphrase) as state:
         try:
-            config = get_config(state._data, name)
+            config = get_config(state._data, name, reveal_private_key=reveal)
         except KeyError:
             raise _ApiError(f"Profile '{name}' not found", 404)
+
+    if reveal:
+        try:
+            AuditLog(_AUDIT_PATH).log(
+                "client-config-reveal",
+                {"name": name},
+                actor=_session.get("admin_id", "owner"),
+            )
+        except Exception:
+            pass
 
     return config
 
@@ -3845,6 +4530,7 @@ _ROUTES: list[tuple[str, re.Pattern, Any]] = [
     ("POST",   re.compile(r"^/api/change-passphrase$"),      _h_change_passphrase),
     ("POST",   re.compile(r"^/api/start$"),                  _h_start_server),
     ("POST",   re.compile(r"^/api/terminate$"),              _h_terminate),
+    ("POST",   re.compile(r"^/api/fresh-start/challenge$"),  _h_fresh_start_challenge),
     ("POST",   re.compile(r"^/api/fresh-start$"),            _h_fresh_start),
     ("POST",   re.compile(r"^/api/update-endpoint$"),        _h_update_endpoint),
     ("POST",   re.compile(r"^/api/rotate-server-keys$"),                    _h_rotate_server_keys),
@@ -3910,12 +4596,21 @@ class _Handler(BaseHTTPRequestHandler):
         # 127.0.0.1 or localhost interchangeably.
         # When bound to 0.0.0.0 (headless/Pi), also allow the server's
         # actual IP so LAN browsers can reach the dashboard.
+        #
+        # SEC-003 follow-up: keep this allowlist in lockstep with
+        # ``_enforce_same_origin`` so a request accepted by the pre-dispatch
+        # filter also receives a correct CORS response header (and vice versa).
         origin = self.headers.get("Origin", "")
-        _allowed = {"http://127.0.0.1", "http://localhost"}
+        _allowed = {
+            "http://127.0.0.1",  "https://127.0.0.1",
+            "http://localhost",  "https://localhost",
+        }
         # Also allow the IP:port the client connected to (covers LAN access)
         host_header = self.headers.get("Host", "")
         if host_header:
-            _allowed.add(f"http://{host_header.split(':')[0]}")
+            host_only = host_header.split(":")[0]
+            _allowed.add(f"http://{host_only}")
+            _allowed.add(f"https://{host_only}")
         if any(origin == a or origin.startswith(a + ":") for a in _allowed):
             self.send_header("Access-Control-Allow-Origin", origin)
         # No header at all for unknown origins — browser will block.
@@ -3923,7 +4618,19 @@ class _Handler(BaseHTTPRequestHandler):
         self.send_header("Access-Control-Allow-Headers", "Content-Type")
 
     def _json(self) -> dict:
-        length = int(self.headers.get("Content-Length", 0))
+        # SEC-004: enforce Content-Length cap BEFORE reading. A single request
+        # with Content-Length=4 GiB would otherwise OOM the server thread.
+        raw = self.headers.get("Content-Length", "0").strip()
+        try:
+            length = int(raw)
+        except ValueError:
+            raise _ApiError("Invalid Content-Length header.", 400)
+        if length < 0:
+            raise _ApiError("Invalid Content-Length header.", 400)
+        if length > _MAX_BODY_SIZE:
+            raise _ApiError(
+                f"Request body too large (max {_MAX_BODY_SIZE} bytes).", 413
+            )
         if length == 0:
             return {}
         try:
@@ -3940,7 +4647,53 @@ class _Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    # SEC-003: methods that MUST be rejected before the handler runs when the
+    # request carries a cross-origin ``Origin`` header. GET is intentionally
+    # excluded — browser CORS prevents an attacker from reading the response
+    # of a cross-origin GET, and some endpoints (/api/health) must remain
+    # callable from monitoring tooling.
+    _STATE_CHANGING_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
+
+    def _enforce_same_origin(self) -> bool:
+        """Reject cross-origin state-changing requests pre-dispatch.
+
+        Returns True if the request was rejected (and a 403 was already
+        written); callers must short-circuit. Returns False if the request is
+        safe to dispatch.
+
+        The allowlist mirrors ``_cors()`` so origins that would receive an
+        ``Access-Control-Allow-Origin`` header after the fact are also the
+        origins we accept before the handler runs. Requests with no Origin
+        header (native CLI, curl, systemd services) are NOT rejected — only
+        explicit cross-origin browser requests are blocked.
+        """
+        origin = self.headers.get("Origin", "")
+        if not origin:
+            return False  # non-browser client
+        allowed = {"http://127.0.0.1", "http://localhost",
+                   "https://127.0.0.1", "https://localhost"}
+        host_header = self.headers.get("Host", "")
+        if host_header:
+            host_only = host_header.split(":")[0]
+            allowed.add(f"http://{host_only}")
+            allowed.add(f"https://{host_only}")
+        if any(origin == a or origin.startswith(a + ":") for a in allowed):
+            return False
+        # Reject before the handler runs so the side-effect never happens.
+        self._send(
+            {"error": "Cross-origin request rejected by server CSRF filter."},
+            403,
+        )
+        return True
+
     def _dispatch(self, method: str) -> None:
+        # SEC-003: block cross-origin mutations BEFORE the handler executes.
+        # The previous CORS logic only set response headers — which the
+        # browser respects, but by the time it arrived the server had already
+        # mutated state (deleted the vault, rotated a key, etc).
+        if method in self._STATE_CHANGING_METHODS and self._enforce_same_origin():
+            return
+
         path = self.path.split("?")[0]
         for route_method, pattern, handler in _ROUTES:
             if route_method != method:
@@ -3961,7 +4714,13 @@ class _Handler(BaseHTTPRequestHandler):
         self._send({"error": "Not found"}, 404)
 
     def _serve_static(self, path: str) -> None:
-        """Serve a file from the bundled React dist directory."""
+        """Serve a file from the bundled React dist directory.
+
+        SEC-022: resolves the requested path and verifies it stays inside
+        the bundled dist tree (following symlinks). Anything that escapes
+        (via ``..``, symlinks, encoded traversal, etc.) falls back to the
+        SPA index, which is safe to serve.
+        """
         dist = _get_dist_dir()
         if dist is None:
             body = b"Dashboard not bundled. Run 'npm run build' in Dashboard/."
@@ -3972,14 +4731,47 @@ class _Handler(BaseHTTPRequestHandler):
             self.wfile.write(body)
             return
 
+        try:
+            dist_resolved = dist.resolve(strict=False)
+        except (OSError, RuntimeError):
+            self.send_response(500)
+            self.end_headers()
+            return
+
         rel = path.lstrip("/")
-        file_path = (dist / rel) if rel else (dist / "index.html")
+        # Reject any literal traversal component before touching the FS.
+        if rel and any(part == ".." for part in Path(rel).parts):
+            file_path = dist_resolved / "index.html"
+        else:
+            candidate = (dist_resolved / rel) if rel else (dist_resolved / "index.html")
+            try:
+                # strict=False so missing files still resolve (SPA fallback
+                # handles non-existence). symlinks ARE followed.
+                resolved_candidate = candidate.resolve(strict=False)
+            except (OSError, RuntimeError):
+                resolved_candidate = dist_resolved / "index.html"
+
+            try:
+                resolved_candidate.relative_to(dist_resolved)
+                file_path = resolved_candidate
+            except ValueError:
+                # Escape attempt — fall back to SPA index.
+                file_path = dist_resolved / "index.html"
 
         # SPA fallback: unknown paths (e.g. /clients, /about) → index.html
         if not file_path.exists() or file_path.is_dir():
-            file_path = dist / "index.html"
+            file_path = dist_resolved / "index.html"
 
         if not file_path.exists():
+            self.send_response(404)
+            self.end_headers()
+            return
+
+        # Final belt-and-braces: after the SPA fallback, verify once more
+        # that the served path is still inside the dist tree.
+        try:
+            file_path.resolve(strict=False).relative_to(dist_resolved)
+        except ValueError:
             self.send_response(404)
             self.end_headers()
             return

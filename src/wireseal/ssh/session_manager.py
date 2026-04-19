@@ -20,6 +20,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
+from wireseal.security.secret_types import SecretBytes
+
 TOKEN_TTL_SECONDS = 60
 TOKEN_BYTES = 32  # 256-bit tokens
 
@@ -30,12 +32,17 @@ class SshTicket:
 
     Stores resolved connection parameters so the WebSocket bridge can
     connect without re-authenticating against the vault.
+
+    SEC-021: the password (when used) is held as ``SecretBytes`` so it sits
+    in mlocked memory and is wiped as soon as the ticket is consumed or
+    expires. Prior to this fix the password lived in a plain ``str`` that
+    Python could intern or copy indefinitely.
     """
     token: str
     host: str
     port: int
     username: str
-    password: Optional[str]  # Plaintext here is acceptable — ticket is single-use + short-lived
+    password: Optional[SecretBytes]  # wiped on consume/prune; see SEC-021
     profile_name: str
     actor_id: str
     created_at: float
@@ -43,6 +50,14 @@ class SshTicket:
 
     def expired(self) -> bool:
         return time.monotonic() - self.created_at > TOKEN_TTL_SECONDS
+
+    def wipe(self) -> None:
+        """Wipe any secret material held by this ticket. Idempotent."""
+        if self.password is not None and not self.password.is_wiped:
+            try:
+                self.password.wipe()
+            except Exception:
+                pass
 
 
 class SshSessionManager:
@@ -71,14 +86,20 @@ class SshSessionManager:
 
         The caller is responsible for validating that the target host/port
         are reachable through the active WireGuard tunnel.
+
+        SEC-021: password (when provided) is copied into a ``SecretBytes``
+        immediately so it no longer lives as a plain Python string.
         """
         token = secrets.token_urlsafe(TOKEN_BYTES)
+        password_secret: Optional[SecretBytes] = None
+        if password is not None and password != "":
+            password_secret = SecretBytes(bytearray(password.encode("utf-8")))
         ticket = SshTicket(
             token=token,
             host=host,
             port=port,
             username=username,
-            password=password,
+            password=password_secret,
             profile_name=profile_name,
             actor_id=actor_id,
             created_at=time.monotonic(),
@@ -90,20 +111,34 @@ class SshSessionManager:
         return token
 
     def consume_ticket(self, token: str) -> Optional[SshTicket]:
-        """Fetch and remove a ticket by token. Returns None if missing or expired."""
+        """Fetch and remove a ticket by token. Returns None if missing or expired.
+
+        SEC-021: an expired ticket found during consume is wiped before
+        being discarded — the caller never sees it, but we still scrub
+        its secret material.
+        """
         with self._lock:
             self._prune_expired()
             ticket = self._tickets.pop(token, None)
         if ticket is None:
             return None
         if ticket.expired():
+            ticket.wipe()
             return None
         return ticket
 
     def _prune_expired(self) -> None:
-        """Drop expired tickets. Caller must hold _lock."""
+        """Drop expired tickets. Caller must hold _lock.
+
+        SEC-021: expired tickets are wiped before removal so secret material
+        doesn't linger in memory until GC.
+        """
         stale = [t for t, ticket in self._tickets.items() if ticket.expired()]
         for t in stale:
+            try:
+                self._tickets[t].wipe()
+            except Exception:
+                pass
             del self._tickets[t]
 
     def register_session(self, session_id: str, metadata: dict) -> None:

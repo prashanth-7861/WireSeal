@@ -119,12 +119,47 @@ def list_configs(state_data: dict[str, Any]) -> list[dict[str, str]]:
     return result
 
 
-def get_config(state_data: dict[str, Any], name: str) -> dict[str, Any]:
-    """Get a single config by name. Raises KeyError if not found."""
+def _redact_private_key(config_text: str) -> str:
+    """Replace PrivateKey values in a WireGuard .conf with '<redacted>'.
+
+    SEC-020: client config JSON responses must not expose raw private keys
+    by default. The sanitised text is still enough to display peer info,
+    endpoint, addresses, and QR metadata.
+    """
+    out_lines: list[str] = []
+    for line in config_text.splitlines():
+        stripped = line.strip()
+        if stripped.lower().startswith("privatekey"):
+            # Preserve indentation if any
+            prefix_len = len(line) - len(line.lstrip())
+            out_lines.append(line[:prefix_len] + "PrivateKey = <redacted>")
+        else:
+            out_lines.append(line)
+    return "\n".join(out_lines) + ("\n" if config_text.endswith("\n") else "")
+
+
+def get_config(
+    state_data: dict[str, Any],
+    name: str,
+    *,
+    reveal_private_key: bool = False,
+) -> dict[str, Any]:
+    """Get a single config by name. Raises KeyError if not found.
+
+    SEC-020: by default, ``config_text`` has its PrivateKey redacted so
+    that routine config fetches do not persist key material in browser
+    memory, HTTP history, or log files. Callers that legitimately need
+    the full config (e.g., QR/QR download) must pass
+    ``reveal_private_key=True`` and audit-log the reveal event.
+    """
     configs = state_data.get("client_configs", {})
     if name not in configs:
         raise KeyError(f"Profile '{name}' not found")
-    return dict(configs[name])
+    entry = dict(configs[name])
+    if not reveal_private_key and "config_text" in entry:
+        entry["config_text"] = _redact_private_key(entry["config_text"])
+        entry["private_key_redacted"] = True
+    return entry
 
 
 def delete_config(state_data: dict[str, Any], name: str) -> None:

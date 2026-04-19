@@ -141,8 +141,20 @@ class SecretBytes:
         return len(self._data)
 
     def __bytes__(self) -> bytes:
-        """Return content as immutable bytes. Caller is responsible for any necessary wiping."""
-        return bytes(self._data)
+        """Disallow implicit coercion to immutable ``bytes``.
+
+        SEC-012: ``bytes(secret)`` used to copy the plaintext into an
+        immutable ``bytes`` object that Python could then intern, cache, or
+        leave on the heap indefinitely — defeating the whole point of the
+        SecretBytes container. Callers that truly need the raw buffer (e.g.
+        for a ``ctypes`` call) must request it explicitly via
+        ``expose_secret()`` and take responsibility for the lifetime of the
+        returned view.
+        """
+        raise TypeError(
+            "SecretBytes cannot be coerced to bytes — use expose_secret() for "
+            "a zero-copy view, or to_bytearray() for a wipe-capable copy."
+        )
 
     # ------------------------------------------------------------------
     # Context manager (SEC-05)
