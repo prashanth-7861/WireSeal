@@ -34,9 +34,6 @@ _UNIX_BLOCKED_ROOTS = (
     "/usr", "/lib", "/lib32", "/lib64",
     "/sys", "/proc", "/dev",
     "/root",
-    # macOS resolves /etc, /var, /tmp to /private/* via firmlinks/symlinks,
-    # so Path.resolve() can hand us those canonical paths. Block both forms.
-    "/private/etc", "/private/var", "/private/tmp",
 )
 
 # On Windows we block common OS roots. The match is case-insensitive and
@@ -66,8 +63,18 @@ def _reject_system_destination(resolved: Path) -> None:
                 )
     else:
         rp = str(resolved)
+        # macOS firmlinks: /etc, /var, /tmp resolve to /private/etc, /private/var,
+        # /private/tmp via Path.resolve(). Collapse the /private prefix so the
+        # check runs against the canonical short form. Note: only "/private/etc"
+        # maps to a blocked root (/etc); /private/var and /private/tmp are
+        # user-writable (macOS $TMPDIR lives under /private/var/folders) and
+        # must NOT be blocked wholesale.
+        if rp.startswith("/private/"):
+            rp_check = rp[len("/private"):]  # "/private/etc/x" -> "/etc/x"
+        else:
+            rp_check = rp
         for root in _UNIX_BLOCKED_ROOTS:
-            if rp == root or rp.startswith(root + "/"):
+            if rp_check == root or rp_check.startswith(root + "/"):
                 raise ValueError(
                     f"backup_config.local_path rejected: {resolved} lives under "
                     f"a system directory ({root}). Choose a user-owned path."
