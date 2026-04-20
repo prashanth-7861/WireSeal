@@ -20,7 +20,12 @@ jobs:
       - name: Install dependencies
         run: pip install -e ".[dev]"
       - name: Audit production dependencies for CVEs
-        run: pip-audit --ignore-vuln CVE-2026-4539  # pygments 2.19.2 — no fix released yet
+        run: |
+          # pygments 2.19.2 — no fix released yet (dev-only, pinned by pip-audit itself)
+          # pytest 8.4.2 CVE-2025-71176 — dev-only; fix in 9.x which has breaking changes for our plugin matrix
+          pip-audit \
+            --ignore-vuln CVE-2026-4539 \
+            --ignore-vuln CVE-2025-71176
       - name: Run unit tests
         run: pytest --tb=short -q -m "not integration"
         env:
