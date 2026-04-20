@@ -34,6 +34,9 @@ _UNIX_BLOCKED_ROOTS = (
     "/usr", "/lib", "/lib32", "/lib64",
     "/sys", "/proc", "/dev",
     "/root",
+    # macOS resolves /etc, /var, /tmp to /private/* via firmlinks/symlinks,
+    # so Path.resolve() can hand us those canonical paths. Block both forms.
+    "/private/etc", "/private/var", "/private/tmp",
 )
 
 # On Windows we block common OS roots. The match is case-insensitive and
