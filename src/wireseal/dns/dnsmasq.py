@@ -6,6 +6,10 @@ import subprocess
 import sys
 from pathlib import Path
 
+# Prevent brief console window flash on Windows when spawning child processes
+# from a GUI context (e.g., status checks from the Dashboard).
+_NO_WINDOW = 0x08000000 if sys.platform == "win32" else 0
+
 _HOSTNAME_RE = re.compile(r'^[a-z0-9][a-z0-9\-\.]{0,251}[a-z0-9]$', re.IGNORECASE)
 _IPV4_RE = re.compile(r'^(\d{1,3}\.){3}\d{1,3}$')
 
@@ -47,10 +51,15 @@ class DnsmasqManager:
 
     def is_available(self) -> bool:
         """Return True if dnsmasq is installed (found in PATH)."""
+        # dnsmasq is not a Windows component — short-circuit to avoid a
+        # visible console flash from spawning `where.exe`.
+        if sys.platform == "win32":
+            return False
         try:
             result = subprocess.run(
-                ["which", "dnsmasq"] if sys.platform != "win32" else ["where", "dnsmasq"],
+                ["which", "dnsmasq"],
                 capture_output=True, timeout=3,
+                creationflags=_NO_WINDOW,
             )
             return result.returncode == 0
         except (FileNotFoundError, subprocess.TimeoutExpired):
@@ -58,10 +67,13 @@ class DnsmasqManager:
 
     def is_running(self) -> bool:
         """Return True if dnsmasq process is currently running."""
+        if sys.platform == "win32":
+            return False
         try:
             result = subprocess.run(
                 ["pgrep", "-x", "dnsmasq"],
                 capture_output=True, timeout=3,
+                creationflags=_NO_WINDOW,
             )
             return result.returncode == 0
         except (FileNotFoundError, subprocess.TimeoutExpired):

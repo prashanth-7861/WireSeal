@@ -7,6 +7,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.7.11] — 2026-04-20
+
+### Fixed — Windows user-reported bugs
+
+- **Autostart-on-boot removed (all platforms)**: installing the tunnel service
+  previously registered it with `start=auto` on Windows, `systemctl enable` on
+  Linux, and `RunAtLoad=true` on macOS — meaning the VPN came up automatically
+  after every reboot. Now registration is manual-only (`start=demand` / no
+  enable / `RunAtLoad=false`); the user controls lifecycle via the Dashboard
+  Start/Stop buttons.
+- **Windows Start button no longer re-installs the service on every click**:
+  previously every click of Start invoked `wireguard.exe /installtunnelservice`,
+  which re-ran the DPAPI encryption cycle. Start now detects an already-
+  registered service and issues `sc.exe start` directly. ERROR 1056 (already
+  running) is treated as success.
+- **Windows Stop button keeps the service registered**: previously Stop ran
+  `wireguard.exe /uninstalltunnelservice` after `sc.exe stop`, destroying the
+  service so the next Start had to re-install it. Now Stop only issues
+  `sc.exe stop` — service stays in `start=demand` mode for the next Start.
+
+### Fixed — DNS tab
+
+- **Console window flash on Windows**: `DnsmasqManager.is_available()` spawned
+  `where.exe dnsmasq` on Windows, which briefly flashed a cmd console. The
+  check now short-circuits to `False` on Windows and uses `CREATE_NO_WINDOW`
+  for all other subprocess calls.
+- **OS-aware "dnsmasq not found" banner**: Windows doesn't have dnsmasq (not a
+  bug, design). The warning is replaced on Windows with an informational blue
+  banner explaining that DNS is pushed via WireGuard's `DNS` directive and
+  pointing to Linux/macOS for a dedicated split-DNS resolver.
+- **API response includes `platform`** for the Dashboard to render OS-aware UI.
+
+### Fixed — Security tab
+
+- **Windows `harden_server` now wires in IP forwarding**: sets
+  `HKLM\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters\IPEnableRouter=1`
+  (reboot required to take effect) and best-effort starts the `RemoteAccess`
+  service to honor it without a reboot.
+- **Windows `harden_server` now installs OpenSSH Server if missing**:
+  `Add-WindowsCapability -Online -Name 'OpenSSH.Server~~~~0.0.1.0'`, configures
+  startup type Automatic, and starts the `sshd` service before attempting to
+  harden `sshd_config`.
+
+---
+
 ## [0.7.10] — 2026-04-20
 
 ### Fixed

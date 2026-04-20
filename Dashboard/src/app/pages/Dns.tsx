@@ -3,22 +3,34 @@ import { Globe, Plus, Trash2, AlertTriangle } from "lucide-react";
 import { api } from "../api";
 
 // Module-level cache — survives navigation, avoids blank loading flash
-let _dnsCache: { mappings: Record<string, string>; dnsmasqAvailable: boolean } | null = null;
+let _dnsCache: {
+  mappings: Record<string, string>;
+  dnsmasqAvailable: boolean;
+  platform: string;
+} | null = null;
 
 export function Dns() {
   const [mappings, setMappings] = useState<Record<string, string>>(_dnsCache?.mappings ?? {});
   const [dnsmasqAvailable, setDnsmasqAvailable] = useState(_dnsCache?.dnsmasqAvailable ?? false);
+  const [platform, setPlatform] = useState(_dnsCache?.platform ?? "");
   const [newHostname, setNewHostname] = useState("");
   const [newIp, setNewIp] = useState("");
   const [error, setError] = useState("");
   const [success, setSuccess] = useState("");
 
+  const isWindows = platform === "win32";
+
   const fetchDns = async () => {
     try {
       const res = await api.getDns();
-      _dnsCache = { mappings: res.mappings, dnsmasqAvailable: res.dnsmasq_available };
+      _dnsCache = {
+        mappings: res.mappings,
+        dnsmasqAvailable: res.dnsmasq_available,
+        platform: res.platform ?? "",
+      };
       setMappings(res.mappings);
       setDnsmasqAvailable(res.dnsmasq_available);
+      setPlatform(res.platform ?? "");
     } catch {
       // Vault may be locked — silently skip
     }
@@ -74,7 +86,17 @@ export function Dns() {
         Internal hostnames resolved for VPN clients only. Changes take effect immediately when dnsmasq is running.
       </p>
 
-      {!dnsmasqAvailable && (
+      {isWindows ? (
+        <div className="mb-6 bg-blue-50 border border-blue-200 rounded-lg p-4 flex items-center gap-3">
+          <AlertTriangle className="w-5 h-5 text-blue-600 flex-shrink-0" />
+          <p className="text-blue-800 text-sm">
+            <strong>Windows server mode</strong> — dnsmasq is not available on Windows.
+            Mappings are saved to the vault and pushed to clients through WireGuard's
+            <code className="mx-1 px-1 bg-blue-100 rounded">DNS</code> directive. For a
+            dedicated split-DNS resolver, run the server on Linux or macOS.
+          </p>
+        </div>
+      ) : !dnsmasqAvailable && (
         <div className="mb-6 bg-amber-50 border border-amber-200 rounded-lg p-4 flex items-center gap-3">
           <AlertTriangle className="w-5 h-5 text-amber-600 flex-shrink-0" />
           <p className="text-amber-800 text-sm">

@@ -416,14 +416,17 @@ class WindowsAdapter(AbstractPlatformAdapter):
     # ------------------------------------------------------------------
 
     def enable_tunnel_service(self, interface: str = "wg0") -> None:
-        """Install and start the WireGuard tunnel service via wireguard.exe.
+        """Install the WireGuard tunnel service in MANUAL start mode.
 
         Uses wireguard.exe /installtunnelservice which:
           1. Creates service WireGuardTunnel$wg0
           2. Auto-encrypts .conf to .conf.dpapi (DPAPI-bound to LocalSystem)
           3. Deletes the original .conf after encryption
 
-        Configures the service for auto-start and starts it immediately.
+        The service is configured for ``start=demand`` (manual) so it does
+        NOT run on boot. The user controls start/stop from the Dashboard or
+        the Start/Stop button — this method registers the service, it does
+        not start it.
 
         Args:
             interface: WireGuard interface name (default ``wg0``).
@@ -437,33 +440,33 @@ class WindowsAdapter(AbstractPlatformAdapter):
                 f"Config not found: {config_path}. Deploy config first."
             )
 
-        # Install the tunnel service (creates WireGuardTunnel$wg0 and triggers DPAPI encryption)
-        subprocess.run(
-            [str(WG_EXE), "/installtunnelservice", str(config_path)],
-            shell=False,
-            check=True,
-            capture_output=True,
-            timeout=30,
-            creationflags=_NO_WIN,
-        )
+        service_name = f"{WG_SERVICE_PREFIX}{interface}"
 
-        # Configure for auto-start
+        # If the service already exists, just re-configure start-mode and return.
+        existing = subprocess.run(
+            ["sc.exe", "query", service_name],
+            shell=False, capture_output=True, creationflags=_NO_WIN,
+        )
+        if existing.returncode != 0:
+            # Install the tunnel service (creates WireGuardTunnel$wg0 and triggers DPAPI encryption)
+            subprocess.run(
+                [str(WG_EXE), "/installtunnelservice", str(config_path)],
+                shell=False,
+                check=True,
+                capture_output=True,
+                timeout=30,
+                creationflags=_NO_WIN,
+            )
+
+        # Configure for MANUAL start — do not auto-start on boot.
         subprocess.run(
             [
                 "sc.exe", "config",
-                f"{WG_SERVICE_PREFIX}{interface}",
-                "start=auto",
+                service_name,
+                "start=demand",
             ],
             shell=False,
-            check=True,
-            capture_output=True,
-            creationflags=_NO_WIN,
-        )
-
-        # Start the service (don't check return code -- may already be running)
-        subprocess.run(
-            ["sc.exe", "start", f"{WG_SERVICE_PREFIX}{interface}"],
-            shell=False,
+            check=False,  # if service doesn't exist yet (install failed), don't mask the real error
             capture_output=True,
             creationflags=_NO_WIN,
         )
@@ -656,8 +659,71 @@ class WindowsAdapter(AbstractPlatformAdapter):
     def harden_server(self) -> list[str]:
         """Apply Windows-specific server hardening. Returns list of actions taken."""
         actions: list[str] = []
+        # 1. Install OpenSSH Server if missing (required before hardening sshd_config)
+        actions += self._ensure_openssh_windows()
+        # 2. Enable IP forwarding (required for VPN packet routing)
+        actions += self._enable_ip_forwarding_windows()
+        # 3. Harden sshd_config (no-op if OpenSSH not installed)
         actions += self._harden_ssh_windows()
+        # 4. Firewall profiles on
         actions += self._harden_windows_firewall()
+        return actions
+
+    def _ensure_openssh_windows(self) -> list[str]:
+        """Install OpenSSH.Server via Add-WindowsCapability if not present."""
+        actions: list[str] = []
+        sshd_config = Path(os.environ.get("ProgramData", r"C:\ProgramData")) / "ssh" / "sshd_config"
+        if sshd_config.exists():
+            return actions  # Already installed
+        try:
+            result = subprocess.run(
+                [
+                    "powershell.exe", "-NoProfile", "-NonInteractive", "-Command",
+                    "Add-WindowsCapability -Online -Name 'OpenSSH.Server~~~~0.0.1.0' | Out-Null; "
+                    "Set-Service -Name sshd -StartupType Automatic; "
+                    "Start-Service sshd",
+                ],
+                shell=False, capture_output=True, timeout=180,
+                creationflags=_NO_WIN,
+            )
+            if result.returncode == 0:
+                actions.append("OpenSSH Server installed and started")
+            else:
+                err = (result.stderr or b"").decode("utf-8", errors="replace").strip()
+                actions.append(f"OpenSSH install failed: {err[:120]}")
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            actions.append(f"OpenSSH install error: {exc}")
+        return actions
+
+    def _enable_ip_forwarding_windows(self) -> list[str]:
+        """Set IPEnableRouter registry key (requires reboot to take effect)."""
+        actions: list[str] = []
+        try:
+            result = subprocess.run(
+                [
+                    "reg.exe", "add",
+                    r"HKLM\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters",
+                    "/v", "IPEnableRouter", "/t", "REG_DWORD", "/d", "1", "/f",
+                ],
+                shell=False, capture_output=True, timeout=10,
+                creationflags=_NO_WIN,
+            )
+            if result.returncode == 0:
+                actions.append("IP forwarding enabled (reboot required)")
+            # Also enable RemoteAccess service which Windows uses to honor the flag
+            # without a reboot (best-effort).
+            subprocess.run(
+                ["sc.exe", "config", "RemoteAccess", "start=auto"],
+                shell=False, capture_output=True, timeout=10,
+                creationflags=_NO_WIN,
+            )
+            subprocess.run(
+                ["sc.exe", "start", "RemoteAccess"],
+                shell=False, capture_output=True, timeout=15,
+                creationflags=_NO_WIN,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            actions.append(f"IP forwarding error: {exc}")
         return actions
 
     def _harden_ssh_windows(self) -> list[str]:

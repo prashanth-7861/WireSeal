@@ -365,7 +365,14 @@ class MacOSAdapter(AbstractPlatformAdapter):
     # ------------------------------------------------------------------
 
     def enable_tunnel_service(self, interface: str = "wg0") -> None:
-        """Create and load a launchd daemon plist for the WireGuard tunnel.
+        """Install (but do NOT auto-load) a launchd plist for manual start.
+
+        The plist is written with ``RunAtLoad=False`` and ``KeepAlive=False``
+        so the tunnel stays off after reboot. The user controls lifecycle via
+        the API Start/Stop buttons, which invoke ``wg-quick up/down`` directly.
+
+        This matches the Windows ``start=demand`` / Linux non-enabled-unit
+        model: registration exists, autostart does not.
 
         Args:
             interface: WireGuard interface name (default ``wg0``).
@@ -381,8 +388,9 @@ class MacOSAdapter(AbstractPlatformAdapter):
         plist_data = {
             "Label": f"com.wireseal.{interface}",
             "ProgramArguments": [wg_quick, "up", str(config_path)],
-            "KeepAlive": True,
-            "RunAtLoad": True,
+            # Manual start only — no boot autostart, no respawn.
+            "KeepAlive": False,
+            "RunAtLoad": False,
             "LaunchOnlyOnce": True,
             "StandardErrorPath": "/var/log/wireseal.err",
             "EnvironmentVariables": {"PATH": path_env},
@@ -395,10 +403,7 @@ class MacOSAdapter(AbstractPlatformAdapter):
         atomic_write(plist_path, plist_bytes, mode=0o644)
         self._chown_root_wheel(plist_path)
         self._chmod(plist_path, "644")
-
-        label = f"system/com.wireseal.{interface}"
-        self._run(["launchctl", "enable", label])
-        self._run(["launchctl", "bootstrap", "system", str(plist_path)])
+        # Do NOT bootstrap/enable — user starts manually via API.
 
     def disable_tunnel_service(self, interface: str = "wg0") -> None:
         """Bootout and disable the WireGuard tunnel launchd service.

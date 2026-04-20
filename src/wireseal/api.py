@@ -2268,19 +2268,41 @@ def _h_start_server(req: "_Handler", _groups: tuple) -> dict:
     if sys.platform == "win32":
         if b"RUNNING" in (check.stdout or b""):
             return {"ok": True, "note": "already running"}
+        svc = f"WireGuardTunnel${_WG_IFACE}"
         wg_exe = Path(r"C:\Program Files\WireGuard\wireguard.exe")
         from wireseal.platform.detect import get_adapter
-        config_path = get_adapter().get_config_path(_WG_IFACE)
-        if wg_exe.exists() and config_path.exists():
-            subprocess.run(
-                [str(wg_exe), "/installtunnelservice", str(config_path)],
-                check=False, capture_output=True, timeout=15,
-                creationflags=_SP_FLAGS,
-            )
-            AuditLog(_AUDIT_PATH).log("start", {"interface": _WG_IFACE},
-                                      actor=_session.get("admin_id", "owner"))
-            return {"ok": True}
-        raise _ApiError("WireGuard not found or no config.", 500)
+        adapter = get_adapter()
+        config_path = adapter.get_config_path(_WG_IFACE)
+
+        # If the service exists (returncode==0 from `sc.exe query` earlier),
+        # just start it — DO NOT reinstall, which would re-encrypt the config
+        # and briefly tear down DPAPI bindings.
+        service_exists = check.returncode == 0
+
+        if not service_exists:
+            if not (wg_exe.exists() and config_path.exists()):
+                raise _ApiError("WireGuard not found or no config.", 500)
+            # Install (manual start mode) via adapter — guarantees start=demand
+            try:
+                adapter.enable_tunnel_service(_WG_IFACE)
+            except Exception as exc:
+                raise _ApiError(f"Failed to install tunnel service: {exc}", 500)
+
+        # Start the (now registered) service
+        start_result = subprocess.run(
+            ["sc.exe", "start", svc],
+            check=False, capture_output=True, timeout=15,
+            creationflags=_SP_FLAGS,
+        )
+        if start_result.returncode != 0:
+            err = (start_result.stderr or start_result.stdout or b"").decode("utf-8", errors="replace")
+            # ERROR 1056 = service already running → treat as success
+            if "1056" not in err:
+                raise _ApiError(f"Failed to start service: {err.strip()}", 500)
+
+        AuditLog(_AUDIT_PATH).log("start", {"interface": _WG_IFACE},
+                                  actor=_session.get("admin_id", "owner"))
+        return {"ok": True}
 
     # Linux/macOS
     if check.returncode == 0:
@@ -2307,20 +2329,16 @@ def _h_terminate(req: "_Handler", _groups: tuple) -> dict:
     from wireseal.security.audit import AuditLog
 
     if sys.platform == "win32":
-        # Windows: stop via sc.exe and uninstall the tunnel service
+        # Windows: just stop the service; keep it registered (start=demand)
+        # so the next Start click doesn't need to re-install + re-encrypt DPAPI.
         svc = f"WireGuardTunnel${_WG_IFACE}"
-        subprocess.run(
+        stop_result = subprocess.run(
             ["sc.exe", "stop", svc],
             check=False, capture_output=True, timeout=15,
             creationflags=_SP_FLAGS,
         )
-        wg_exe = Path(r"C:\Program Files\WireGuard\wireguard.exe")
-        if wg_exe.exists():
-            subprocess.run(
-                [str(wg_exe), "/uninstalltunnelservice", _WG_IFACE],
-                check=False, capture_output=True, timeout=15,
-                creationflags=_SP_FLAGS,
-            )
+        # ERROR 1062 = service not started; ERROR 1060 = service not installed.
+        # Both are fine — stop is idempotent.
         AuditLog(_AUDIT_PATH).log("terminate", {"interface": _WG_IFACE},
                                   actor=_session.get("admin_id", "owner"))
         return {"ok": True}
@@ -3685,6 +3703,7 @@ def _h_get_dns(req, _groups):
         "mappings": cache.get("dns_mappings", {}),
         "dnsmasq_available": mgr.is_available(),
         "dnsmasq_running": mgr.is_running(),
+        "platform": sys.platform,  # "win32" | "linux" | "darwin"
     }
 
 

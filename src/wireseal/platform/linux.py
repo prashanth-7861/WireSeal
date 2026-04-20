@@ -992,33 +992,20 @@ class LinuxAdapter(AbstractPlatformAdapter):
     # ------------------------------------------------------------------
 
     def enable_tunnel_service(self, interface: str = "wg0") -> None:
-        """Enable and start the wg-quick systemd service for the given interface.
+        """Register the tunnel for manual start.
+
+        On Linux, ``wg-quick@<iface>`` is a systemd template unit that works
+        without any ``systemctl enable`` call — ``systemctl start wg-quick@wg0``
+        is enough. To match the Windows ``start=demand`` model (no autostart
+        at boot, no immediate start), this is a deliberate no-op. The API
+        Start button invokes ``wg-quick up`` directly when the user wants it.
 
         Args:
             interface: WireGuard interface name (default wg0).
-
-        Raises:
-            SetupError: If systemctl enable or start fails.
         """
-        service = f"wg-quick@{interface}"
-        try:
-            subprocess.run(
-                ["systemctl", "enable", service],
-                shell=False,
-                check=True,
-                capture_output=True,
-            )
-            subprocess.run(
-                ["systemctl", "start", service],
-                shell=False,
-                check=True,
-                capture_output=True,
-            )
-        except subprocess.CalledProcessError as exc:
-            stderr = exc.stderr.decode("utf-8", errors="replace") if exc.stderr else ""
-            raise SetupError(
-                f"Failed to enable/start {service}: {stderr}"
-            ) from exc
+        # Deliberate no-op: no boot autostart, no immediate start.
+        # User controls lifecycle via API Start/Stop buttons.
+        return None
 
     def disable_tunnel_service(self, interface: str = "wg0") -> None:
         """Stop and disable the wg-quick systemd service.

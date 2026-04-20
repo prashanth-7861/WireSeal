@@ -157,6 +157,7 @@ export interface DnsStatus {
   mappings: Record<string, string>;
   dnsmasq_available: boolean;
   dnsmasq_running: boolean;
+  platform?: string; // "win32" | "linux" | "darwin"
 }
 
 export interface BackupConfig {
