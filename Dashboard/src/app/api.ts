@@ -54,6 +54,8 @@ export interface VaultInfo {
   pin_set: boolean;
   multi_admin: boolean;
   totp_required_for: string[];
+  /** "server" or "client" — null when vault is locked (not yet decrypted). */
+  mode: "server" | "client" | null;
 }
 
 export interface AdminInfo {
@@ -228,10 +230,20 @@ export const api = {
   vaultInfo: () =>
     _fetch<VaultInfo>("GET", "/vault-info"),
 
-  init: (passphrase: string, opts?: { subnet?: string; port?: number; endpoint?: string }) =>
-    _fetch<{ ok: boolean; server_ip: string; subnet: string; public_key: string; endpoint: string; warnings?: string[] | null }>(
-      "POST", "/init", { passphrase, ...opts }
-    ),
+  init: (
+    passphrase: string,
+    opts?: { mode?: "server" | "client"; subnet?: string; port?: number; endpoint?: string },
+  ) =>
+    _fetch<{
+      ok: boolean;
+      mode?: "server" | "client";
+      // Server-mode-only fields
+      server_ip?: string;
+      subnet?: string;
+      public_key?: string;
+      endpoint?: string;
+      warnings?: string[] | null;
+    }>("POST", "/init", { passphrase, ...opts }),
 
   unlock: (passphrase: string, admin_id?: string) =>
     _fetch<{ ok: boolean; role?: string }>("POST", "/unlock", {

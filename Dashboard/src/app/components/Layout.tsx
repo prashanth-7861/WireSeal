@@ -75,6 +75,12 @@ function LayoutInner() {
         setVaultState("locked");
       } else {
         setVaultState("unlocked");
+        // Sync mode with the vault's actual mode — the vault is the source of truth
+        // after unlock. This prevents a stale localStorage "server" from showing
+        // server UI when the underlying vault is a client vault (and vice-versa).
+        if (info.mode === "server" || info.mode === "client") {
+          if (mode !== info.mode) setMode(info.mode);
+        }
       }
       setPinSet(info.pin_set ?? false);
       setUnlockMode(info.pin_set ? "pin" : "passphrase");
@@ -82,13 +88,19 @@ function LayoutInner() {
     } catch {
       setVaultState("locked");
     }
-  }, []);
+  }, [mode, setMode]);
 
   useEffect(() => { probeVault(); }, [probeVault]);
 
   // ── Server status polling (for sidebar indicator) ──────────────────────────
+  // Server-mode only. Client mode doesn't manage a local WireGuard server, so
+  // polling /api/status (which invokes `wg show`) is semantically wrong and wastes work.
   useEffect(() => {
-    if (vaultState !== "unlocked") { setApiOnline(false); setServerStatus(null); return; }
+    if (vaultState !== "unlocked" || mode !== "server") {
+      setApiOnline(vaultState === "unlocked");
+      setServerStatus(null);
+      return;
+    }
     setApiOnline(true);
     const poll = async () => {
       try {
@@ -102,11 +114,16 @@ function LayoutInner() {
     poll();
     const id = window.setInterval(poll, 5000);
     return () => clearInterval(id);
-  }, [vaultState]);
+  }, [vaultState, mode]);
 
   // ── Admin status polling ──────────────────────────────────────────────────
+  // Admin mode (sudo elevation for server hardening) is server-mode only.
   useEffect(() => {
-    if (vaultState !== "unlocked") { setAdminActive(false); setAdminExpiresIn(0); return; }
+    if (vaultState !== "unlocked" || mode !== "server") {
+      setAdminActive(false);
+      setAdminExpiresIn(0);
+      return;
+    }
     const poll = async () => {
       try {
         const s = await api.adminStatus();
@@ -118,7 +135,22 @@ function LayoutInner() {
     poll();
     const id = window.setInterval(poll, 30_000);
     return () => clearInterval(id);
-  }, [vaultState, navigate, location.pathname]);
+  }, [vaultState, mode, navigate, location.pathname]);
+
+  // ── Route guards: prevent cross-mode page access via direct URL ─────────
+  // Server pages must never render inside ClientLayout, and client pages must
+  // never render inside the server layout. Guard here rather than in the router
+  // so the redirect fires before any page-level API calls run.
+  useEffect(() => {
+    if (vaultState !== "unlocked") return;
+    const path = location.pathname;
+    const isClientPath = path === "/client" || path.startsWith("/client/");
+    if (mode === "client" && !isClientPath && path !== "/about") {
+      navigate("/client", { replace: true });
+    } else if (mode === "server" && isClientPath) {
+      navigate("/", { replace: true });
+    }
+  }, [vaultState, mode, location.pathname, navigate]);
 
   // ── Listen for 401 events from any page's API calls ───────────────────────
   useEffect(() => {
@@ -227,14 +259,20 @@ function LayoutInner() {
     setAuthLoading(true);
     try {
       if (passphraseMode === "setup") {
-        const result = await api.init(passphrase);
-        setInitResult({
-          server_ip: result.server_ip,
-          subnet: result.subnet,
-          public_key: result.public_key,
-          endpoint: result.endpoint,
-          warnings: result.warnings,
-        });
+        // Pass the chosen mode to the backend. Client-mode init creates an
+        // encrypted vault only — no server keypair, no WireGuard install,
+        // no firewall rules, no tunnel service.
+        const initMode: "server" | "client" = mode === "client" ? "client" : "server";
+        const result = await api.init(passphrase, { mode: initMode });
+        if (initMode === "server") {
+          setInitResult({
+            server_ip: result.server_ip ?? "",
+            subnet: result.subnet ?? "",
+            public_key: result.public_key ?? "",
+            endpoint: result.endpoint ?? null,
+            warnings: result.warnings,
+          });
+        }
       } else {
         await api.unlock(passphrase, multiAdmin ? adminId : undefined);
       }
@@ -374,6 +412,15 @@ function LayoutInner() {
         </div>
       </div>
     );
+  }
+
+  // ── Uninitialized + mode not chosen — pick mode BEFORE creating a vault ─
+  // This is the critical fix: previously "Get Started" → passphrase setup →
+  // api.init() which created a WireGuard SERVER regardless of whether the
+  // user intended to run as a client. Now the mode is chosen first, and
+  // the backend uses the chosen mode to decide whether to install a server.
+  if (vaultState === "uninitialized" && mode === null) {
+    return <ModeSelector />;
   }
 
   // ── Locked / Uninitialized — full-screen welcome screen ──────────────────
@@ -661,8 +708,10 @@ function LayoutInner() {
                       >
                         <Play className="w-4 h-4" />
                         {authLoading
-                          ? (passphraseMode === "setup" ? "Initializing..." : "Starting...")
-                          : (passphraseMode === "setup" ? "Initialize & Start" : "Start Server")}
+                          ? (passphraseMode === "setup" ? "Initializing..." : "Unlocking...")
+                          : (passphraseMode === "setup"
+                              ? (mode === "client" ? "Create Client Vault" : "Initialize Server")
+                              : "Unlock Vault")}
                       </button>
                     </div>
 
