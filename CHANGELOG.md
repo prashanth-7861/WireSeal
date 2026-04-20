@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.7.10] — 2026-04-20
+
+### Fixed
+
+- **Backup destination blocklist on macOS**: `/etc`, `/var`, `/tmp` are firmlinks
+  to `/private/etc`, `/private/var`, `/private/tmp` on macOS, and
+  `Path.resolve()` returns the canonical `/private/*` form. The SEC-027
+  system-directory guard only listed the short form, so resolved paths slipped
+  past the check and reached `mkdir()` — which then raised `PermissionError`
+  instead of the expected `ValueError("system directory")`. Added the three
+  `/private/*` canonical forms to `_UNIX_BLOCKED_ROOTS`. Fixes macOS CI job in
+  `release.yml`.
+---
+
 ## [0.7.9] — 2026-04-20
 
 ### Security — Production-readiness hardening
