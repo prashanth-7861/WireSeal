@@ -34,6 +34,7 @@ export function Backup() {
   const [sshPath, setSshPath] = useState("");
   const [webdavUrl, setWebdavUrl] = useState("");
   const [webdavUser, setWebdavUser] = useState("");
+  const [webdavPass, setWebdavPass] = useState("");
   const [keepN, setKeepN] = useState(10);
   const [enabled, setEnabled] = useState(false);
   const [savingConfig, setSavingConfig] = useState(false);
@@ -65,6 +66,7 @@ export function Backup() {
         setSshPath(c.ssh_path ?? "");
         setWebdavUrl(c.webdav_url ?? "");
         setWebdavUser(c.webdav_user ?? "");
+        setWebdavPass("");
         setKeepN(c.keep_n ?? 10);
         setEnabled(c.enabled ?? false);
         setBackups(listRes.backups);
@@ -89,6 +91,7 @@ export function Backup() {
         ssh_path: sshPath || null,
         webdav_url: webdavUrl || null,
         webdav_user: webdavUser || null,
+        webdav_pass: webdavPass || null,
         keep_n: keepN,
       });
       setSaveSuccess(true);
@@ -181,7 +184,11 @@ export function Backup() {
                   value={localPath}
                   onChange={e => setLocalPath(e.target.value)}
                   className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-                  placeholder="/var/backups/wireseal"
+                  placeholder={
+                    typeof navigator !== "undefined" && /Win/i.test(navigator.platform)
+                      ? "C:\\ProgramData\\WireSeal\\backups"
+                      : "/var/backups/wireseal"
+                  }
                 />
               </div>
             )}
@@ -215,6 +222,9 @@ export function Backup() {
                     placeholder="/home/backup/wireseal"
                   />
                 </div>
+                <p className="text-xs text-gray-500">
+                  SSH backup uses key-based authentication. Ensure the server's SSH key is authorized on the remote host.
+                </p>
               </>
             )}
 
@@ -235,6 +245,17 @@ export function Backup() {
                     value={webdavUser}
                     onChange={e => setWebdavUser(e.target.value)}
                     className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Password</label>
+                  <input
+                    type="password"
+                    value={webdavPass}
+                    onChange={e => setWebdavPass(e.target.value)}
+                    autoComplete="new-password"
+                    className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                    placeholder="WebDAV password"
                   />
                 </div>
               </>
@@ -281,11 +302,15 @@ export function Backup() {
           )}
           <button
             onClick={handleTrigger}
-            disabled={triggering}
-            className="bg-green-600 text-white px-4 py-2 rounded-lg text-sm font-medium hover:bg-green-700 disabled:opacity-50 transition-colors"
+            disabled={triggering || !config?.enabled}
+            title={!config?.enabled ? "Enable backup in configuration first" : undefined}
+            className="bg-green-600 text-white px-4 py-2 rounded-lg text-sm font-medium hover:bg-green-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
           >
             {triggering ? "Running…" : "Trigger Backup Now"}
           </button>
+          {!config?.enabled && (
+            <p className="text-xs text-gray-500">Backup is disabled. Enable it in the configuration above to run manual backups.</p>
+          )}
           {triggerResult && (
             <p className="text-sm text-green-700 bg-green-50 border border-green-200 rounded-lg px-3 py-2">
               {triggerResult}

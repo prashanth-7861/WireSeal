@@ -53,8 +53,8 @@ export function Admins() {
     }
   };
 
-  // Determine current admin id — api exposes it via session or falls back to "owner"
-  const currentAdminId = (api as unknown as { _currentAdminId?: () => string })._currentAdminId?.() ?? "owner";
+  // Current admin id — tracked by api module since successful unlock
+  const currentAdminId = api.getCurrentAdminId();
   const ownerCount = admins.filter(a => a.role === "owner").length;
 
   return (

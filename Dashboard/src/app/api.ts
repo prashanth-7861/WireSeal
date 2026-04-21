@@ -9,6 +9,10 @@ const BASE = "/api";
  */
 export const VAULT_LOCKED_EVENT = "wireseal:vault-locked";
 
+// Tracks the admin_id used on the current unlock. null until successful unlock.
+// Cleared on lock. Used by UI guards (e.g. Admins.tsx self-removal).
+let _currentAdminId: string | null = null;
+
 async function _fetch<T>(
   method: string,
   path: string,
@@ -38,6 +42,7 @@ async function _fetch<T>(
     // the Dashboard can detect it and return to the Start Server screen.
     // Exempt /unlock and /init themselves to avoid a redirect loop on wrong passphrase.
     if (res.status === 401 && path !== "/unlock" && path !== "/init" && path !== "/fresh-start") {
+      _currentAdminId = null;
       window.dispatchEvent(new CustomEvent(VAULT_LOCKED_EVENT));
     }
     throw new Error(err);
@@ -169,6 +174,7 @@ export interface BackupConfig {
   ssh_path: string | null;
   webdav_url: string | null;
   webdav_user: string | null;
+  webdav_pass?: string | null;
   keep_n: number;
   last_backup_at: number | null;
 }
@@ -246,14 +252,25 @@ export const api = {
       warnings?: string[] | null;
     }>("POST", "/init", { passphrase, ...opts }),
 
-  unlock: (passphrase: string, admin_id?: string) =>
-    _fetch<{ ok: boolean; role?: string }>("POST", "/unlock", {
+  unlock: async (passphrase: string, admin_id?: string) => {
+    const res = await _fetch<{ ok: boolean; role?: string }>("POST", "/unlock", {
       passphrase,
       ...(admin_id !== undefined ? { admin_id } : {}),
-    }),
+    });
+    if (res.ok) {
+      _currentAdminId = admin_id ?? "owner";
+    }
+    return res;
+  },
 
-  lock: () =>
-    _fetch<{ ok: boolean }>("POST", "/lock"),
+  lock: async () => {
+    const res = await _fetch<{ ok: boolean }>("POST", "/lock");
+    _currentAdminId = null;
+    return res;
+  },
+
+  /** Returns the admin_id from the last successful unlock (null if locked). */
+  getCurrentAdminId: (): string | null => _currentAdminId,
 
   status: () =>
     _fetch<Status>("GET", "/status"),

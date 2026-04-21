@@ -141,11 +141,13 @@ export function Dashboard() {
     setError("");
     try {
       await api.startServer();
-      // Poll quickly to get updated status
+      // Poll quickly to get updated status. Read from the module-level
+      // _statusCache, not the closed-over `status` state — the latter is
+      // frozen at render time and would never observe the fresh value.
       for (let i = 0; i < 5; i++) {
         await new Promise((r) => setTimeout(r, 1000));
         await fetchStatus();
-        if (status?.running) break;
+        if (_statusCache?.running) break;
       }
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : "Failed to start server");

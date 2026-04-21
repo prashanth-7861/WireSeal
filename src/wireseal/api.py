@@ -4885,6 +4885,22 @@ def serve(host: str = "127.0.0.1", port: int = 8080, gui: bool = True) -> None:
     server = ThreadingHTTPServer((host, port), _Handler)
     url = f"http://{host}:{port}/"
 
+    # Upgrade migration: reconfigure any v0.7.10-era tunnel service from
+    # start=auto to start=demand, and stop it if it's running (user never
+    # clicked Start — it autostarted at boot). Best-effort, never fatal.
+    try:
+        from wireseal.platform.detect import get_adapter as _get_adapter
+        _adapter = _get_adapter()
+        if hasattr(_adapter, "migrate_tunnel_startup"):
+            _mig = _adapter.migrate_tunnel_startup(_WG_IFACE)
+            if _mig.get("migrated"):
+                print(
+                    f"[wireseal] Migrated {_mig['service']} from auto-start "
+                    f"to manual-start (was_running={_mig['was_running']})."
+                )
+    except Exception as _exc:  # noqa: BLE001
+        print(f"[wireseal] Tunnel-startup migration skipped: {_exc}")
+
     # Start SSH WebSocket bridge in a daemon thread (best-effort; optional)
     try:
         from wireseal.ssh.ws_bridge import start_bridge_thread as _start_ssh_bridge

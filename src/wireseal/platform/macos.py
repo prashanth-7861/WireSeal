@@ -264,7 +264,10 @@ class MacOSAdapter(AbstractPlatformAdapter):
         # FW-03: validate generated rules against template before applying
         self.validate_firewall_rules(rules, template)
 
-        # Idempotency: check if anchor already has identical rules
+        # Idempotency: re-apply only when config changed. pfctl normalizes its
+        # output, so compare on the values that can actually drift (subnet,
+        # port, outbound interface). If any expected token is missing, the
+        # anchor is stale (e.g. user changed WG_PORT or WG_SUBNET) -- rebuild.
         existing = subprocess.run(
             ["pfctl", "-a", self._PF_ANCHOR, "-sr"],
             capture_output=True,
@@ -272,8 +275,21 @@ class MacOSAdapter(AbstractPlatformAdapter):
             shell=False,
         )
         if existing.returncode == 0 and existing.stdout.strip():
-            # Rules already loaded -- skip re-apply
-            return
+            out = existing.stdout
+            expected_tokens = (
+                f"from {subnet}",
+                f"port = {wg_port}",
+                outbound,
+            )
+            if all(tok in out for tok in expected_tokens):
+                # Rules already loaded with matching config -- skip re-apply
+                return
+            # Stale anchor content -- flush before reloading
+            subprocess.run(
+                ["pfctl", "-a", self._PF_ANCHOR, "-F", "all"],
+                capture_output=True,
+                shell=False,
+            )
 
         # Apply rules to anchor via stdin
         self._run(
@@ -467,10 +483,27 @@ class MacOSAdapter(AbstractPlatformAdapter):
         plist_bytes = plistlib.dumps(plist_data)
         plist_path = Path("/Library/LaunchDaemons/com.wireseal.dns.plist")
 
+        # Detect whether plist content changed since last install — launchctl
+        # bootstrap on an already-loaded service silently ignores new settings,
+        # so we must bootout first when content differs.
+        content_changed = True
+        if plist_path.exists():
+            try:
+                content_changed = plist_path.read_bytes() != plist_bytes
+            except OSError:
+                content_changed = True
+
         atomic_write(plist_path, plist_bytes, mode=0o644)
         self._chown_root_wheel(plist_path)
         self._chmod(plist_path, "644")
 
+        label = "system/com.wireseal.dns"
+        if content_changed:
+            # bootout returns nonzero if service not loaded — that's fine
+            self._run(
+                ["launchctl", "bootout", label],
+                check=False,
+            )
         self._run(["launchctl", "bootstrap", "system", str(plist_path)])
 
     # ------------------------------------------------------------------

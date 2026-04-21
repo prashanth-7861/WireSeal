@@ -244,7 +244,32 @@ class WindowsAdapter(AbstractPlatformAdapter):
             creationflags=_NO_WIN,
         )
         if result.returncode == 0 and f"wireseal-{wg_interface}-in" in result.stdout:
-            return  # rules already exist
+            # Rule exists — check if the port matches the requested one. The
+            # `LocalPort` line in netsh output looks like "LocalPort: 51820".
+            # If the port differs (user reconfigured), delete and recreate so
+            # upgrades pick up port changes instead of silently keeping the
+            # stale port.
+            port_matches = False
+            for line in result.stdout.splitlines():
+                stripped = line.strip()
+                if stripped.lower().startswith("localport:"):
+                    current_port = stripped.split(":", 1)[1].strip()
+                    if current_port == str(wg_port):
+                        port_matches = True
+                    break
+            if port_matches:
+                return  # already correct
+            # Port changed — delete stale rules so the add calls below recreate
+            # them with the new port.
+            for rule_name in (f"wireseal-{wg_interface}-in", f"wireseal-{wg_interface}-block"):
+                subprocess.run(
+                    [
+                        "netsh", "advfirewall", "firewall", "delete", "rule",
+                        f"name={rule_name}",
+                    ],
+                    shell=False, capture_output=True,
+                    creationflags=_NO_WIN,
+                )
 
         # Detect outbound interface for NAT binding
         outbound = self.detect_outbound_interface()
@@ -414,6 +439,57 @@ class WindowsAdapter(AbstractPlatformAdapter):
     # ------------------------------------------------------------------
     # 8 & 9. Tunnel service lifecycle
     # ------------------------------------------------------------------
+
+    def migrate_tunnel_startup(self, interface: str = "wg0") -> dict:
+        """Reconcile an existing tunnel service to manual-start.
+
+        Called on every ``serve()`` startup to fix services installed by
+        earlier versions (v0.7.10 and below) which used ``start=auto``.
+        If the service exists and is configured for auto start, reconfigure
+        it to demand (manual) start and stop the running instance, since the
+        user did not click Start.
+
+        Returns a dict with keys ``{"migrated": bool, "was_running": bool,
+        "service": str}``. Never raises — upgrade migration is best-effort.
+        """
+        service_name = f"{WG_SERVICE_PREFIX}{interface}"
+        result = {"migrated": False, "was_running": False, "service": service_name}
+
+        q = subprocess.run(
+            ["sc.exe", "qc", service_name],
+            shell=False, capture_output=True, creationflags=_NO_WIN,
+        )
+        if q.returncode != 0:
+            return result  # Service not installed, nothing to migrate
+
+        qc_out = (q.stdout or b"").decode("utf-8", errors="replace")
+        # sc.exe qc reports "START_TYPE         : 2   AUTO_START"
+        # or              "START_TYPE         : 3   DEMAND_START"
+        is_auto = "AUTO_START" in qc_out or "2   AUTO_START" in qc_out
+
+        if is_auto:
+            subprocess.run(
+                ["sc.exe", "config", service_name, "start=demand"],
+                shell=False, capture_output=True,
+                creationflags=_NO_WIN,
+            )
+            result["migrated"] = True
+
+            # If currently running and we just migrated from auto-start,
+            # stop it — the user did not explicitly start it this session.
+            s = subprocess.run(
+                ["sc.exe", "query", service_name],
+                shell=False, capture_output=True, creationflags=_NO_WIN,
+            )
+            if s.returncode == 0 and b"RUNNING" in (s.stdout or b""):
+                result["was_running"] = True
+                subprocess.run(
+                    ["sc.exe", "stop", service_name],
+                    shell=False, capture_output=True,
+                    creationflags=_NO_WIN,
+                )
+
+        return result
 
     def enable_tunnel_service(self, interface: str = "wg0") -> None:
         """Install the WireGuard tunnel service in MANUAL start mode.

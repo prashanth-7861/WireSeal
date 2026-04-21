@@ -96,14 +96,16 @@ export function Security() {
             <RefreshCw className={`w-4 h-4 ${loading ? "animate-spin" : ""}`} />
             Refresh
           </button>
-          <button
-            onClick={handleHarden}
-            disabled={hardening}
-            className="flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors disabled:opacity-60"
-          >
-            <Hammer className={`w-4 h-4 ${hardening ? "animate-bounce" : ""}`} />
-            {hardening ? "Hardening..." : "Harden Server"}
-          </button>
+          {!noChecksAvailable && (
+            <button
+              onClick={handleHarden}
+              disabled={hardening}
+              className="flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors disabled:opacity-60"
+            >
+              <Hammer className={`w-4 h-4 ${hardening ? "animate-bounce" : ""}`} />
+              {hardening ? "Hardening..." : "Harden Server"}
+            </button>
+          )}
         </div>
       </div>
 
@@ -174,7 +176,7 @@ export function Security() {
                     <p className="text-xs text-red-500">by fail2ban</p>
                   </div>
                 )}
-                {!status.ip_forwarding && (
+                {status.checks.length > 0 && !status.ip_forwarding && (
                   <div className="bg-yellow-50 border border-yellow-200 rounded-lg px-4 py-2">
                     <p className="text-xs text-yellow-700 font-medium">IP forwarding is off</p>
                     <p className="text-xs text-yellow-600">VPN clients cannot reach the internet</p>

@@ -7,6 +7,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.7.12] — 2026-04-20
+
+### Fixed — Upgrade migration from v0.7.10 and below
+
+- **Windows `sc.exe` tunnel services migrated to manual-start on upgrade**:
+  v0.7.10 and earlier registered `WireGuardTunnel$wg0` with `start=auto`.
+  v0.7.11 only changed the *new-install* path, so existing installs kept
+  autostarting. `serve()` now reconciles the service to `start=demand` on
+  every startup, stopping the tunnel if it was running under the old
+  registration.
+- **Windows firewall rules reconcile when `WG_PORT` changes**: the old
+  idempotency short-circuit skipped re-apply if *any* `wireseal-wg0-in`
+  rule existed. `netsh` output is now parsed for `LocalPort:` and the rule
+  is rebuilt when the port differs.
+- **macOS launchd DNS plist reloads when content changes**: `launchctl
+  bootstrap` silently ignores new settings on an already-loaded service.
+  `setup_dns_updater` now diffs the plist bytes and runs `launchctl bootout
+  system/com.wireseal.dns` before bootstrap when content differs.
+- **macOS pf anchor rebuilds on subnet/port change**: the old idempotency
+  check returned early as long as *any* rules existed in the anchor. Now
+  the check verifies the anchor contains the current subnet, port, and
+  outbound interface — otherwise flushes and reapplies.
+
+### Fixed — Dashboard UI
+
+- **Security page "Harden Server" button hidden on Windows**: the button
+  and the "IP forwarding is off" warning were visible on Windows where
+  neither applies (Linux-only features). Both are now gated on
+  `status.checks.length > 0`.
+- **Backup page password field + config gating**: added a write-only WebDAV
+  password input (the backend already accepted it). Also disables the
+  "Trigger Backup Now" button when backup is not enabled in the config —
+  previously clicking it returned a generic 400, confusing users.
+- **Backup local-path placeholder is OS-aware**: shows
+  `C:\ProgramData\WireSeal\backups` on Windows instead of the Linux-style
+  `/var/backups/wireseal`.
+- **Admins self-removal guard fixed**: `currentAdminId` was read from a
+  nonexistent method on the `api` module and always returned `"owner"`,
+  defeating the "Cannot remove yourself" guard for any non-owner admin.
+  The `api` module now tracks `admin_id` from the last successful `unlock`
+  and exposes `api.getCurrentAdminId()`; cleared on `lock` and on any 401.
+- **Start Server poll loop reads fresh status**: the poll loop in
+  `handleStart` closed over the React `status` state and never saw
+  post-refetch updates. It now reads from the module-level `_statusCache`.
+
+---
+
 ## [0.7.11] — 2026-04-20
 
 ### Fixed — Windows user-reported bugs
