@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.7.13] — 2026-04-21
+
+### Added — Windows installer auto-upgrade
+
+- **Auto-detect previous install and upgrade in place.** The NSIS installer
+  now reads `DisplayVersion` from the Add/Remove Programs registry key:
+  - Same version already installed → prompts "repair / reinstall or cancel".
+  - Different version installed → prompts "upgrade from X.X.X to Y.Y.Y?"
+    and, on confirm, silently runs the previous uninstaller via
+    `/S _?=<InstallLocation>` before proceeding.
+  - No previous install → fresh install as before.
+- **User data preserved on upgrade.** The uninstaller never touches
+  `%APPDATA%\WireSeal`, so your vault, client configs, and settings survive
+  the upgrade.
+- **Residual-file cleanup.** After the silent uninstaller finishes it leaves
+  `uninstall.exe` behind (expected with `_?=`); the new installer deletes
+  it plus any stale `_internal\` / `bin\` trees before writing the fresh
+  install.
+- **Finish page "View Guide" link.** Checkbox on the final installer page
+  opens the GitHub README in the default browser, alongside the existing
+  "Launch WireSeal" option. A direct link to the current release notes is
+  also shown on the finish page.
+
+---
+
 ## [0.7.12] — 2026-04-20
 
 ### Fixed — Upgrade migration from v0.7.10 and below
