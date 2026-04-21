@@ -61,6 +61,16 @@ BrandingText "${APPNAME} ${VERSION}"
 ; that WebView2 can render; it refuses to work inside an elevated process).
 !define MUI_FINISHPAGE_RUN_FUNCTION LaunchApp
 !define MUI_FINISHPAGE_RUN_TEXT "Launch ${APPNAME}"
+
+; Show "View Guide" link on the finish page — opens the GitHub README in the
+; default browser. Uses MUI_FINISHPAGE_SHOWREADME as a generic link handler.
+!define MUI_FINISHPAGE_SHOWREADME "${URL}#readme"
+!define MUI_FINISHPAGE_SHOWREADME_TEXT "View Guide (online README)"
+!define MUI_FINISHPAGE_SHOWREADME_NOTCHECKED
+
+!define MUI_FINISHPAGE_LINK "Open the WireSeal release notes on GitHub"
+!define MUI_FINISHPAGE_LINK_LOCATION "${URL}/releases/tag/v${VERSION}"
+
 !insertmacro MUI_PAGE_FINISH
 
 Function LaunchApp
@@ -74,6 +84,76 @@ FunctionEnd
 !insertmacro MUI_UNPAGE_INSTFILES
 
 !insertmacro MUI_LANGUAGE "English"
+
+;---------------------------------------------------------------------------
+; .onInit — auto-detect previous install and upgrade in place
+;
+; Reads DisplayVersion from the Add/Remove Programs registry key. If a
+; previous version is found, prompts the user to upgrade, then runs the
+; existing uninstaller silently (keeping user data — vault and config live
+; in %APPDATA%\WireSeal, which the uninstaller does not touch).
+;---------------------------------------------------------------------------
+Function .onInit
+  ; Read the previously installed version (if any) from HKLM.
+  ReadRegStr $R0 HKLM "${REGKEY}" "DisplayVersion"
+  StrCmp $R0 "" done
+
+  ; Same version already installed? Confirm reinstall.
+  StrCmp $R0 "${VERSION}" 0 differentVersion
+    MessageBox MB_OKCANCEL|MB_ICONQUESTION \
+      "${APPNAME} ${VERSION} is already installed.$\n$\n\
+Click OK to repair / reinstall, or Cancel to exit." \
+      /SD IDOK IDOK runUninstaller
+    Abort
+
+  differentVersion:
+    MessageBox MB_YESNO|MB_ICONQUESTION \
+      "${APPNAME} $R0 is already installed.$\n$\n\
+Upgrade to ${VERSION}?$\n$\n\
+Your vault, clients, and settings in %APPDATA%\WireSeal will be preserved." \
+      /SD IDYES IDYES runUninstaller
+    Abort
+
+  runUninstaller:
+    ; Find the old uninstaller path — may differ from current $INSTDIR if the
+    ; user picked a custom directory last time.
+    ReadRegStr $R1 HKLM "${REGKEY}" "UninstallString"
+    ReadRegStr $R2 HKLM "${REGKEY}" "InstallLocation"
+    StrCmp $R1 "" done
+    StrCmp $R2 "" useInstdir
+      ; Use the recorded install location so we clean the right directory.
+      StrCpy $INSTDIR $R2
+      Goto doUninstall
+    useInstdir:
+      StrCpy $R2 "$INSTDIR"
+    doUninstall:
+      ; Run the old uninstaller silently, in-place (_?=...) so this installer
+      ; blocks until it completes. After it exits, the uninstaller binary is
+      ; still on disk — remove it manually, then proceed with install.
+      DetailPrint "Removing previous version $R0 from $R2..."
+      ClearErrors
+      ExecWait '$R1 /S _?=$R2' $R3
+      IfErrors uninstallFailed 0
+      StrCmp $R3 0 uninstallOk uninstallFailed
+
+      uninstallFailed:
+        MessageBox MB_OKCANCEL|MB_ICONEXCLAMATION \
+          "Failed to remove the previous version automatically.$\n$\n\
+Click OK to continue anyway (files may be overwritten) or Cancel to abort." \
+          /SD IDOK IDOK uninstallOk
+        Abort
+
+      uninstallOk:
+        ; Uninstaller leaves uninstall.exe behind when invoked with _?= —
+        ; delete it so our fresh copy can be written later.
+        Delete "$R2\uninstall.exe"
+        ; Drop common residual top-level files from older installs.
+        Delete "$R2\${EXENAME}"
+        RMDir /r "$R2\_internal"
+        RMDir /r "$R2\${CLISUBDIR}"
+
+  done:
+FunctionEnd
 
 ;---------------------------------------------------------------------------
 ; Install section
