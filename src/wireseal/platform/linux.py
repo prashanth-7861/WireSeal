@@ -1134,3 +1134,94 @@ class LinuxAdapter(AbstractPlatformAdapter):
             )
 
         return match.group(1)
+
+    # ------------------------------------------------------------------
+    # API server background-service lifecycle (systemd unit).
+    #
+    # Distinct from `enable_tunnel_service()` which manages WireGuard's
+    # `wg-quick@wg0` template — this manages the WireSeal API server itself
+    # (`wireseal serve`) so the dashboard survives terminal closure and
+    # auto-starts at boot when enabled.
+    # ------------------------------------------------------------------
+
+    _API_SERVICE_NAME = "wireseal-api.service"
+    _API_SERVICE_PATH = Path("/etc/systemd/system/wireseal-api.service")
+
+    def install_api_service(
+        self, bind: str = "127.0.0.1", port: int = 8080,
+        autostart: bool = True,
+    ) -> None:
+        """Write `/etc/systemd/system/wireseal-api.service` and (optionally)
+        enable it at boot.
+
+        Args:
+            bind:      Address the dashboard binds to.
+            port:      Dashboard port.
+            autostart: ``systemctl enable`` the unit so it starts at boot.
+        """
+        wireseal_bin = shutil.which("wireseal") or "/usr/local/bin/wireseal"
+        unit = (
+            "[Unit]\n"
+            "Description=WireSeal dashboard / API server\n"
+            "After=network-online.target\n"
+            "Wants=network-online.target\n"
+            "\n"
+            "[Service]\n"
+            "Type=simple\n"
+            f"ExecStart={wireseal_bin} serve --bind {bind} --port {port}\n"
+            "Restart=on-failure\n"
+            "RestartSec=5\n"
+            # Run as root — vault decryption + wg-quick + nft all need it.
+            "User=root\n"
+            "# Sandboxing: full chroot-style isolation breaks wg-quick, but\n"
+            "# we apply what's safe.\n"
+            "NoNewPrivileges=yes\n"
+            "ProtectSystem=full\n"
+            "ProtectHome=yes\n"
+            "PrivateTmp=yes\n"
+            "\n"
+            "[Install]\n"
+            "WantedBy=multi-user.target\n"
+        )
+        self._API_SERVICE_PATH.write_text(unit)
+        os.chmod(self._API_SERVICE_PATH, 0o644)
+        subprocess.run(["systemctl", "daemon-reload"], check=False)
+        if autostart:
+            subprocess.run(
+                ["systemctl", "enable", self._API_SERVICE_NAME], check=False
+            )
+
+    def uninstall_api_service(self) -> None:
+        """Stop, disable, and remove the systemd unit file."""
+        subprocess.run(
+            ["systemctl", "stop", self._API_SERVICE_NAME],
+            check=False, capture_output=True,
+        )
+        subprocess.run(
+            ["systemctl", "disable", self._API_SERVICE_NAME],
+            check=False, capture_output=True,
+        )
+        if self._API_SERVICE_PATH.exists():
+            self._API_SERVICE_PATH.unlink()
+        subprocess.run(["systemctl", "daemon-reload"], check=False)
+
+    def start_api_service(self) -> None:
+        subprocess.run(
+            ["systemctl", "start", self._API_SERVICE_NAME], check=True
+        )
+
+    def stop_api_service(self) -> None:
+        subprocess.run(
+            ["systemctl", "stop", self._API_SERVICE_NAME], check=True
+        )
+
+    def api_service_status(self) -> dict:
+        """Return ``{installed, running, enabled}`` booleans."""
+        installed = self._API_SERVICE_PATH.exists()
+        running = subprocess.run(
+            ["systemctl", "is-active", "--quiet", self._API_SERVICE_NAME],
+        ).returncode == 0
+        enabled = subprocess.run(
+            ["systemctl", "is-enabled", "--quiet", self._API_SERVICE_NAME],
+        ).returncode == 0
+        return {"installed": installed, "running": running, "enabled": enabled}

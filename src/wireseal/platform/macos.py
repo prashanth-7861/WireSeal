@@ -863,3 +863,96 @@ class MacOSAdapter(AbstractPlatformAdapter):
         raise SetupError(
             f"No available UID in range {low}-{high} for WireSeal system user"
         )
+
+    # ------------------------------------------------------------------
+    # API server background-service lifecycle (launchd plist).
+    # ------------------------------------------------------------------
+
+    _API_SERVICE_LABEL = "com.wireseal.api"
+    _API_SERVICE_PATH = Path("/Library/LaunchDaemons/com.wireseal.api.plist")
+
+    def install_api_service(
+        self, bind: str = "127.0.0.1", port: int = 8080,
+        autostart: bool = True,
+    ) -> None:
+        """Write a LaunchDaemon plist for the WireSeal dashboard.
+
+        Args:
+            bind:      Address the dashboard binds to.
+            port:      Dashboard port.
+            autostart: Set ``RunAtLoad=true`` so it starts at boot.
+        """
+        wireseal_bin = shutil.which("wireseal") or "/usr/local/bin/wireseal"
+        plist_dict = {
+            "Label": self._API_SERVICE_LABEL,
+            "ProgramArguments": [
+                wireseal_bin, "serve",
+                "--bind", bind,
+                "--port", str(port),
+            ],
+            "RunAtLoad": bool(autostart),
+            "KeepAlive": True,
+            "StandardErrorPath": "/var/log/wireseal-api.err",
+            "StandardOutPath":   "/var/log/wireseal-api.log",
+        }
+        plist_bytes = plistlib.dumps(plist_dict)
+        # Reload only when content actually changed (avoids spurious bootouts).
+        content_changed = True
+        if self._API_SERVICE_PATH.exists():
+            try:
+                content_changed = (
+                    self._API_SERVICE_PATH.read_bytes() != plist_bytes
+                )
+            except OSError:
+                content_changed = True
+        atomic_write(self._API_SERVICE_PATH, plist_bytes, mode=0o644)
+        os.chown(self._API_SERVICE_PATH, 0, 0)  # root:wheel
+        if content_changed:
+            subprocess.run(
+                ["launchctl", "bootout", f"system/{self._API_SERVICE_LABEL}"],
+                check=False, capture_output=True,
+            )
+        subprocess.run(
+            ["launchctl", "bootstrap", "system", str(self._API_SERVICE_PATH)],
+            check=False, capture_output=True,
+        )
+
+    def uninstall_api_service(self) -> None:
+        """Stop the LaunchDaemon and remove its plist."""
+        subprocess.run(
+            ["launchctl", "bootout", f"system/{self._API_SERVICE_LABEL}"],
+            check=False, capture_output=True,
+        )
+        if self._API_SERVICE_PATH.exists():
+            self._API_SERVICE_PATH.unlink()
+
+    def start_api_service(self) -> None:
+        subprocess.run(
+            ["launchctl", "kickstart", "-k", f"system/{self._API_SERVICE_LABEL}"],
+            check=True, capture_output=True,
+        )
+
+    def stop_api_service(self) -> None:
+        subprocess.run(
+            ["launchctl", "kill", "TERM", f"system/{self._API_SERVICE_LABEL}"],
+            check=False, capture_output=True,
+        )
+
+    def api_service_status(self) -> dict:
+        """Return ``{installed, running, enabled}``.
+
+        On launchd, ``enabled`` ≡ ``RunAtLoad=true`` in the plist (we always
+        set it to the same value the user picked at install time, so we
+        report ``installed`` as a proxy here).
+        """
+        installed = self._API_SERVICE_PATH.exists()
+        running = False
+        try:
+            out = subprocess.run(
+                ["launchctl", "print", f"system/{self._API_SERVICE_LABEL}"],
+                capture_output=True, text=True, check=False,
+            )
+            running = "state = running" in (out.stdout or "")
+        except Exception:
+            pass
+        return {"installed": installed, "running": running, "enabled": installed}

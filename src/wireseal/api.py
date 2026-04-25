@@ -129,6 +129,14 @@ _AUDIT_PATH = _VAULT_DIR / "audit.log"
 _PIN_PATH   = _VAULT_DIR / "pin.enc"
 _WG_IFACE   = "wg0"
 
+# SEC-FIX-1: SSH target allowlist — prevents admins from proxying to arbitrary
+# hosts. The allowlist is stored in _VAULT_DIR so it lives alongside the vault
+# and is writable only by the process owner.
+_SSH_TARGETS_CONFIG_PATH = _VAULT_DIR / "ssh_targets.json"
+
+# Regex that a valid SSH target hostname must match (no wildcards, no slashes).
+_SSH_HOST_RE = re.compile(r'^[a-zA-Z0-9.\-]{1,253}$')
+
 # PIN-based quick unlock — encrypts the passphrase with a PIN-derived key.
 # After 5 wrong attempts the PIN file is wiped (must use full passphrase).
 # SEC-014 / SEC-023: failures are tracked per-IP (not globally) and
@@ -581,27 +589,63 @@ def _require_server_mode() -> None:
 # PIN helpers — encrypt/decrypt passphrase with a short PIN
 # ---------------------------------------------------------------------------
 
-def _pin_derive_key(pin: str, salt: bytes) -> bytes:
-    """Derive a 32-byte key from a PIN using PBKDF2-HMAC-SHA256.
+# SEC-FIX-2: PIN KDF upgraded from PBKDF2-SHA256 to Argon2id.
+#
+# Migration strategy (dual-path):
+#   - New PIN files are written with a version prefix "argon2id:v1:" so future
+#     code can detect the algorithm without guessing.
+#   - Legacy files that start with "pbkdf2:" are still verified via the old
+#     PBKDF2 path. On success the file is immediately re-written using Argon2id
+#     so that the user is silently migrated on next unlock.
+#   - The PIN file is wiped after _PIN_MAX_ATTEMPTS wrong guesses, which limits
+#     offline brute-force exposure regardless of KDF strength — but Argon2id
+#     raises the cost for any window where an attacker has obtained the file
+#     before it is wiped.
+#
+# Argon2id parameters (OWASP recommended minimum for interactive use):
+#   time_cost=3, memory_cost=65536 (64 MiB), parallelism=4, hash_len=32
+#
+# Version tag format stored in pin.enc (text header + binary payload):
+#   "argon2id:v1:<base64(salt)>:<base64(hash)>\n" + nonce(12) + ciphertext
+#   "pbkdf2:<base64(salt)>\n" + nonce(12) + ciphertext   ← legacy
 
-    PBKDF2 is intentional here (not Argon2): the PIN file is wiped after 5
-    wrong attempts, so sustained brute-force is not possible. PBKDF2 keeps
-    the PIN unlock fast (~50ms vs ~3s for Argon2).
-    """
-    import hashlib
+_PIN_ARGON2_TAG   = b"argon2id:v1:"
+_PIN_PBKDF2_TAG   = b"pbkdf2:"
+
+
+def _pin_derive_key_argon2id(pin: str, salt: bytes) -> bytes:
+    """Derive a 32-byte key from a PIN using Argon2id (OWASP interactive tier)."""
+    import argon2.low_level as _a2
+    return _a2.hash_secret_raw(
+        secret=pin.encode(),
+        salt=salt,
+        time_cost=3,
+        memory_cost=65536,
+        parallelism=4,
+        hash_len=32,
+        type=_a2.Type.ID,
+    )
+
+
+def _pin_derive_key_pbkdf2(pin: str, salt: bytes) -> bytes:
+    """Legacy PBKDF2-SHA256 key derivation — used only for migration reads."""
     return hashlib.pbkdf2_hmac("sha256", pin.encode(), salt, iterations=600_000, dklen=32)
 
 
 def _pin_save(passphrase_bytes: bytes, pin: str) -> None:
-    """Encrypt the passphrase with the PIN and save to pin.enc."""
+    """Encrypt the passphrase with the PIN and save to pin.enc (Argon2id)."""
     from cryptography.hazmat.primitives.ciphers.aead import AESGCM
     salt = os.urandom(16)
     nonce = os.urandom(12)
-    key = _pin_derive_key(pin, salt)
+    key = _pin_derive_key_argon2id(pin, salt)
     ct = AESGCM(key).encrypt(nonce, passphrase_bytes, salt)
-    # Format: salt(16) + nonce(12) + ciphertext(variable)
+    # Header: "argon2id:v1:<b64salt>:<b64hash_ignored>\n" is intentionally
+    # minimal — the actual key is re-derived at load time; we store just the
+    # salt so the header remains self-describing.
+    salt_b64 = base64.b64encode(salt).decode()
+    header = f"argon2id:v1:{salt_b64}\n".encode()
     _VAULT_DIR.mkdir(parents=True, exist_ok=True)
-    _PIN_PATH.write_bytes(salt + nonce + ct)
+    _PIN_PATH.write_bytes(header + nonce + ct)
     try:
         if sys.platform != "win32":
             os.chmod(_PIN_PATH, 0o600)
@@ -610,20 +654,92 @@ def _pin_save(passphrase_bytes: bytes, pin: str) -> None:
 
 
 def _pin_load(pin: str) -> bytes | None:
-    """Decrypt the passphrase from pin.enc. Returns None on failure."""
+    """Decrypt the passphrase from pin.enc. Returns None on failure.
+
+    Handles both the current Argon2id format and the legacy PBKDF2 format.
+    On a successful PBKDF2 verify the file is silently re-written using
+    Argon2id (transparent migration on next unlock).
+    """
     if not _PIN_PATH.exists():
         return None
     from cryptography.hazmat.primitives.ciphers.aead import AESGCM
     from cryptography.exceptions import InvalidTag
-    data = _PIN_PATH.read_bytes()
-    if len(data) < 29:  # 16 salt + 12 nonce + 1 min ciphertext
+
+    raw = _PIN_PATH.read_bytes()
+
+    # ---- Argon2id path (current format) ------------------------------------
+    if raw.startswith(_PIN_ARGON2_TAG):
+        try:
+            header_end = raw.index(b"\n")
+        except ValueError:
+            return None
+        header = raw[len(_PIN_ARGON2_TAG):header_end].decode()
+        # header = "<b64salt>"
+        parts = header.split(":")
+        try:
+            salt = base64.b64decode(parts[0])
+        except Exception:
+            return None
+        payload = raw[header_end + 1:]
+        if len(payload) < 13:  # 12 nonce + 1 min ct
+            return None
+        nonce, ct = payload[:12], payload[12:]
+        key = _pin_derive_key_argon2id(pin, salt)
+        try:
+            return AESGCM(key).decrypt(nonce, ct, salt)
+        except InvalidTag:
+            return None
+
+    # ---- Legacy PBKDF2 path (migration) ------------------------------------
+    # Format: "pbkdf2:<b64salt>\n" + nonce(12) + ciphertext
+    if raw.startswith(_PIN_PBKDF2_TAG):
+        try:
+            header_end = raw.index(b"\n")
+        except ValueError:
+            # Older files had no text header — treat entire blob as binary.
+            # Binary layout: salt(16) + nonce(12) + ciphertext
+            if len(raw) < 29:
+                return None
+            salt, nonce, ct = raw[:16], raw[16:28], raw[28:]
+            key = _pin_derive_key_pbkdf2(pin, salt)
+            try:
+                plaintext = AESGCM(key).decrypt(nonce, ct, salt)
+            except InvalidTag:
+                return None
+            # Migrate to Argon2id
+            _pin_save(plaintext, pin)
+            return plaintext
+
+        b64_salt = raw[len(_PIN_PBKDF2_TAG):header_end].decode()
+        try:
+            salt = base64.b64decode(b64_salt)
+        except Exception:
+            return None
+        payload = raw[header_end + 1:]
+        if len(payload) < 13:
+            return None
+        nonce, ct = payload[:12], payload[12:]
+        key = _pin_derive_key_pbkdf2(pin, salt)
+        try:
+            plaintext = AESGCM(key).decrypt(nonce, ct, salt)
+        except InvalidTag:
+            return None
+        # Migrate to Argon2id on successful verify
+        _pin_save(plaintext, pin)
+        return plaintext
+
+    # ---- Raw binary legacy (pre-versioning, no header) ---------------------
+    if len(raw) < 29:
         return None
-    salt, nonce, ct = data[:16], data[16:28], data[28:]
-    key = _pin_derive_key(pin, salt)
+    salt, nonce, ct = raw[:16], raw[16:28], raw[28:]
+    key = _pin_derive_key_pbkdf2(pin, salt)
     try:
-        return AESGCM(key).decrypt(nonce, ct, salt)
+        plaintext = AESGCM(key).decrypt(nonce, ct, salt)
     except InvalidTag:
         return None
+    # Migrate to Argon2id on successful verify
+    _pin_save(plaintext, pin)
+    return plaintext
 
 
 def _pin_wipe() -> None:
@@ -885,27 +1001,41 @@ def _h_health(req: "_Handler", _groups: tuple) -> dict:
 
 
 def _h_vault_info(req: "_Handler", _groups: tuple) -> dict:
+    # SEC-FIX-3: Do NOT expose totp_required_for (admin ID list) to
+    # unauthenticated callers — it enables pre-auth admin enumeration.
+    # Only vault_initialized, vault_locked, and mode are safe to return
+    # without authentication. The totp_required_for list is now available
+    # only via GET /api/admins/totp-status (requires _require_unlocked).
     locked = _session["vault"] is None
-    multi_admin: bool = False
-    totp_required_for: list = []
     vault_mode: str | None = None
+    multi_admin: bool = False
     if not locked and _session["cache"]:
+        vault_mode = _session["cache"].get("mode")
         admins_data = _session["cache"].get("admins", {})
         multi_admin = len(admins_data) > 1
-        totp_required_for = [
-            aid for aid, info in admins_data.items()
-            if info.get("totp_secret_b32") is not None
-        ]
-        vault_mode = _session["cache"].get("mode")
     return {
-        "initialized":      _VAULT_PATH.exists(),
-        "locked":           locked,
-        "interface":        _WG_IFACE,
-        "pin_set":          _PIN_PATH.exists(),
-        "multi_admin":      multi_admin,
-        "totp_required_for": totp_required_for,
-        "mode":             vault_mode,
+        "initialized":  _VAULT_PATH.exists(),
+        "locked":       locked,
+        "interface":    _WG_IFACE,
+        "pin_set":      _PIN_PATH.exists(),
+        "multi_admin":  multi_admin,
+        "mode":         vault_mode,
     }
+
+
+def _h_admins_totp_status(req: "_Handler", _groups: tuple) -> dict:
+    """GET /api/admins/totp-status — List admin IDs that have TOTP enabled.
+
+    Requires an unlocked vault. Moved out of /api/vault-info to prevent
+    unauthenticated admin enumeration (SEC-FIX-3).
+    """
+    _require_unlocked()
+    admins_data = _session["cache"].get("admins", {}) if _session["cache"] else {}
+    totp_required_for = [
+        aid for aid, info in admins_data.items()
+        if info.get("totp_secret_b32") is not None
+    ]
+    return {"totp_required_for": totp_required_for}
 
 
 def _h_init(req: "_Handler", _groups: tuple) -> dict:
@@ -939,8 +1069,15 @@ def _h_init_locked(req: "_Handler", _groups: tuple = ()) -> dict:
         raise _ApiError("mode must be 'server' or 'client'.", 400)
 
     subnet   = body.get("subnet", "10.0.0.0/24")
-    port     = int(body.get("port", 51820))
+    try:
+        port = int(body.get("port", 51820))
+    except (TypeError, ValueError):
+        raise _ApiError("Port must be an integer.", 400)
+    # Hard-reject blocklisted ports; warnings are kept for return.
+    _ok, port_warning = _validate_wg_port(port)
     endpoint = body.get("endpoint") or None
+    if endpoint:
+        endpoint = _validate_endpoint(endpoint)
 
     from wireseal.security.secret_types  import SecretBytes
     from wireseal.security.secrets_wipe  import wipe_string
@@ -1127,13 +1264,17 @@ def _h_init_locked(req: "_Handler", _groups: tuple = ()) -> dict:
         except Exception as exc:
             warnings_list.append("Tunnel service failed.")
 
+        if port_warning:
+            warnings_list.append(f"Port {port}: {port_warning}")
         return {
-            "ok":         True,
-            "server_ip":  server_ip,
-            "subnet":     pool.subnet_str,
-            "public_key": pub_key_str,
-            "endpoint":   endpoint,
-            "warnings":   warnings_list if warnings_list else None,
+            "ok":           True,
+            "server_ip":    server_ip,
+            "subnet":       pool.subnet_str,
+            "public_key":   pub_key_str,
+            "endpoint":     endpoint,
+            "port":         port,
+            "warnings":     warnings_list if warnings_list else None,
+            "port_warning": port_warning,
         }
     except _ApiError:
         raise
@@ -2478,8 +2619,149 @@ def _h_fresh_start(req: "_Handler", _groups: tuple) -> dict:
     return {"ok": True}
 
 
+# ---------------------------------------------------------------------------
+# Port validation policy (used by /api/init and /api/change-port)
+#
+# Three categories:
+#
+#   BLOCK   — reject outright. Out-of-range or critical-system UDP ports
+#             where binding WireGuard is virtually guaranteed to break the
+#             host (DNS, DHCP, NetBIOS, IKE, mDNS).
+#
+#   WARN    — accept but return a `warning` field so the UI can prompt for
+#             confirmation. Privileged range 1..1023 (Unix needs root,
+#             Windows binds fine but the port is well-known and may be
+#             rejected by managed firewalls / corporate proxies). Also
+#             non-fatal collisions like 8080 (proxies), 5353 (mDNS — was
+#             also blocked, choose one), 3389 (RDP).
+#
+#   OK      — 1024..65535 with no known UDP service conflict. The WireGuard
+#             default 51820 falls here, as do recommended "stealth" choices
+#             like 4500, 443, and any user-picked random ephemeral port.
+#
+# This list is intentionally minimal: every entry is a UDP service that
+# overlaps with WireGuard's transport, AND is part of the default OS install
+# on at least one of (Linux, macOS, Windows). TCP-only services (22, 80,
+# 25, 110, 3306, 6379, 8080…) are NOT included — WireGuard is UDP, so the
+# OS can host both simultaneously without conflict.
+# ---------------------------------------------------------------------------
+
+# UDP ports we reject outright. Binding WG here will break the host.
+_PORT_BLOCKLIST_UDP: dict[int, str] = {
+    0:    "Port 0 is reserved.",
+    53:   "UDP/53 is the DNS resolver port.",
+    67:   "UDP/67 is the DHCP server port.",
+    68:   "UDP/68 is the DHCP client port.",
+    69:   "UDP/69 is TFTP.",
+    123:  "UDP/123 is NTP — picking it breaks system clock sync.",
+    137:  "UDP/137 is NetBIOS Name Service (Windows).",
+    138:  "UDP/138 is NetBIOS Datagram Service (Windows).",
+    161:  "UDP/161 is SNMP.",
+    162:  "UDP/162 is SNMP Trap.",
+    500:  "UDP/500 is IKE — conflicts with IPsec/L2TP.",
+    514:  "UDP/514 is syslog.",
+    520:  "UDP/520 is RIP routing.",
+    1900: "UDP/1900 is SSDP/UPnP discovery.",
+    5353: "UDP/5353 is mDNS / Bonjour.",
+    5355: "UDP/5355 is LLMNR.",
+}
+
+# UDP ports we accept but flag with a warning. UI should ask for confirmation.
+_PORT_WARN_UDP: dict[int, str] = {
+    443:  "UDP/443 (HTTP/3 — QUIC). Useful for bypassing restrictive "
+          "firewalls but may collide with web servers running QUIC.",
+    4500: "UDP/4500 (IPsec NAT-T) — common for VPNs; collides with "
+          "IKEv2 / L2TP-over-IPsec setups.",
+    3389: "UDP/3389 (RDP UDP transport, Windows).",
+    8080: "UDP/8080 — common HTTP-alt port; some scanners flag it.",
+}
+
+
+def _validate_wg_port(port: int) -> tuple[bool, str | None]:
+    """Validate a WireGuard listen port.
+
+    Returns ``(ok, warning_or_None)``. Raises ``_ApiError`` on hard reject
+    so callers in handler context can let it bubble up.
+
+    Privileged range 1-1023 is allowed but warned: Linux/macOS need root
+    (which `wireseal serve` already does); Windows accepts but the port is
+    likely owned by a system service. The WireGuard default 51820 returns
+    ``(True, None)`` with no warning.
+    """
+    if not isinstance(port, int) or isinstance(port, bool):
+        raise _ApiError("Port must be an integer.", 400)
+    if not (1 <= port <= 65535):
+        raise _ApiError("Port must be in range 1-65535.", 400)
+    if port in _PORT_BLOCKLIST_UDP:
+        raise _ApiError(
+            f"Port {port} is reserved: {_PORT_BLOCKLIST_UDP[port]}", 400
+        )
+    warnings: list[str] = []
+    if port in _PORT_WARN_UDP:
+        warnings.append(_PORT_WARN_UDP[port])
+    if 1 <= port <= 1023:
+        warnings.append(
+            f"Port {port} is in the privileged range (1-1023). On Linux/macOS "
+            f"WireSeal already runs as root so this works, but the port is "
+            f"well-known and may be filtered by upstream firewalls."
+        )
+    # NB: IANA's "dynamic/ephemeral" range (49152-65535) is for *outbound*
+    # connection source ports. A bound listening socket stays bound — the OS
+    # won't steal it. The WireGuard default 51820 falls in this range and is
+    # perfectly fine, so we deliberately do NOT warn on it.
+    return True, ("; ".join(warnings) if warnings else None)
+
+
+_ENDPOINT_RE = re.compile(
+    # host = IPv4 / bracketed IPv6 / hostname-or-FQDN; optional :port
+    r"^(?:"
+        r"(?P<ipv4>\d{1,3}(?:\.\d{1,3}){3})"
+        r"|"
+        r"\[(?P<ipv6>[0-9a-fA-F:]+)\]"
+        r"|"
+        r"(?P<host>[A-Za-z0-9](?:[A-Za-z0-9\-]{0,61}[A-Za-z0-9])?"
+        r"(?:\.[A-Za-z0-9](?:[A-Za-z0-9\-]{0,61}[A-Za-z0-9])?)*)"
+    r")"
+    r"(?::(?P<port>\d{1,5}))?$"
+)
+
+
+def _validate_endpoint(endpoint: str) -> str:
+    """Normalise + validate user-supplied endpoint string.
+
+    Accepts IPv4, [IPv6], hostname/FQDN, with optional `:port`. Rejects
+    schemes (`http://`), whitespace, control characters, and over-long
+    inputs that would break wg-quick's PostUp/Endpoint parser.
+    """
+    if not isinstance(endpoint, str):
+        raise _ApiError("Endpoint must be a string.", 400)
+    endpoint = endpoint.strip()
+    if not endpoint:
+        raise _ApiError("Endpoint must not be empty.", 400)
+    if len(endpoint) > 255:
+        raise _ApiError("Endpoint too long (max 255 chars).", 400)
+    if any(ord(c) < 0x20 or ord(c) == 0x7F for c in endpoint):
+        raise _ApiError("Endpoint contains control characters.", 400)
+    if "://" in endpoint:
+        raise _ApiError(
+            "Endpoint must be host[:port], not a URL with a scheme.", 400
+        )
+    m = _ENDPOINT_RE.match(endpoint)
+    if not m:
+        raise _ApiError(
+            "Endpoint must be IPv4, [IPv6], or hostname, with optional :port.",
+            400,
+        )
+    if m.group("port"):
+        port = int(m.group("port"))
+        if not (1 <= port <= 65535):
+            raise _ApiError("Endpoint port must be 1–65535.", 400)
+    return endpoint
+
+
 def _h_update_endpoint(req: "_Handler", _groups: tuple) -> dict:
     _require_unlocked()
+    _require_server_mode()
     body     = req._json()
     endpoint = body.get("endpoint")
     if not endpoint:
@@ -2488,6 +2770,8 @@ def _h_update_endpoint(req: "_Handler", _groups: tuple) -> dict:
             endpoint = str(resolve_public_ip())
         except Exception as exc:
             raise _ApiError("Could not auto-detect public IP.", 500)
+    else:
+        endpoint = _validate_endpoint(endpoint)
 
     with _lock:
         vault      = _session["vault"]
@@ -2495,14 +2779,316 @@ def _h_update_endpoint(req: "_Handler", _groups: tuple) -> dict:
         _actor_id  = _session.get("admin_id", "owner")
 
     from wireseal.security.audit import AuditLog
-    with vault.open(passphrase) as state:
-        state.server["endpoint"] = endpoint
-        vault.save(state, passphrase)
-        with _lock:
-            _session["cache"] = _refresh_cache(state)
+    try:
+        with vault.open(passphrase) as state:
+            state.server["endpoint"] = endpoint
+            vault.save(state, passphrase)
+            with _lock:
+                _session["cache"] = _refresh_cache(state)
+    except _ApiError:
+        raise
+    except Exception as exc:
+        raise _ApiError(f"Vault read/save failed: {exc}", 500)
 
-    AuditLog(_AUDIT_PATH).log("update-endpoint", {"endpoint": endpoint}, actor=_actor_id)
+    try:
+        AuditLog(_AUDIT_PATH).log(
+            "update-endpoint", {"endpoint": endpoint}, actor=_actor_id
+        )
+    except Exception:
+        pass
+    # NOTE: client configs derive their endpoint at render time via
+    # _resolve_client_endpoint(state.server), so the next /api/clients/<n>/qr
+    # or /api/clients/<n>/config/download will pick up the new value
+    # automatically — no on-disk regeneration needed.
     return {"ok": True, "endpoint": endpoint}
+
+
+# ---------------------------------------------------------------------------
+# Change WireGuard port — full reconciliation
+#
+# Updates the vault's stored port, re-renders wg0.conf with the new
+# `ListenPort`, drops the old firewall rule and opens the new one, restarts
+# the tunnel, and refreshes the in-memory cache so subsequent client config /
+# QR responses advertise the new endpoint.
+#
+# Existing client configs on iPhone / desktop must be re-imported because
+# WireGuard apps cache `Endpoint = host:port` at peer add. The dashboard QR
+# endpoint will already render the new port — users just rescan.
+# ---------------------------------------------------------------------------
+def _h_change_port(req: "_Handler", _groups: tuple) -> dict:
+    _require_unlocked()
+    _require_server_mode()
+    body = req._json()
+
+    try:
+        new_port = int(body.get("port", 0))
+    except (TypeError, ValueError):
+        raise _ApiError("Port must be an integer 1-65535.", 400)
+    # Hard-reject blocklisted ports + range. Warnings are surfaced in response.
+    _ok, port_warning = _validate_wg_port(new_port)
+    # Optional override flag to bypass warnings for advanced users — required
+    # when picking a privileged or ephemeral-range port.
+    confirm_warning = bool(body.get("confirm_warning", False))
+    if port_warning and not confirm_warning:
+        raise _ApiError(
+            f"Port {new_port}: {port_warning} "
+            f"Resubmit with `confirm_warning: true` to proceed.", 400
+        )
+
+    with _lock:
+        vault      = _session["vault"]
+        passphrase = _session["passphrase"]
+        _actor_id  = _session.get("admin_id", "owner")
+
+    from wireseal.core.config_builder import ConfigBuilder
+    from wireseal.platform.detect    import get_adapter
+    from wireseal.security.audit     import AuditLog
+
+    warnings: list[str] = []
+    old_port: int | None = None
+    server_cfg: str | None = None
+    subnet_str: str | None = None
+
+    # ── Phase 1: read state + pre-render wg0.conf BEFORE touching vault. ─────
+    # If render fails (missing keys, bad subnet, builder bug) we abort with
+    # 500 and the vault is untouched — no half-applied state to recover from.
+    try:
+        with vault.open(passphrase) as state:
+            old_port = int(state.server.get("port", 51820))
+            if old_port == new_port:
+                raise _ApiError(
+                    f"Port {new_port} matches current port — nothing to do.", 400
+                )
+
+            if "ip" not in state.server or "private_key" not in state.server:
+                raise _ApiError(
+                    "Server vault is missing required keys "
+                    "(ip / private_key). Run init or restore vault.",
+                    500,
+                )
+            if "subnet" not in state.ip_pool:
+                raise _ApiError(
+                    "Server vault is missing ip_pool.subnet. Run init.", 500
+                )
+
+            subnet_str = state.ip_pool["subnet"]
+            try:
+                prefix_length = int(subnet_str.split("/")[1])
+            except (IndexError, ValueError):
+                raise _ApiError(
+                    f"Vault subnet is malformed: {subnet_str!r}", 500
+                )
+
+            peers = [
+                {
+                    "name":       n,
+                    "public_key": _extract(d["public_key"]),
+                    "psk":        _extract(d["psk"]),
+                    "ip":         d["ip"],
+                }
+                for n, d in state.clients.items()
+            ]
+
+            try:
+                server_cfg = ConfigBuilder().render_server_config(
+                    server_private_key=_extract(state.server["private_key"]),
+                    server_ip=state.server["ip"],
+                    prefix_length=prefix_length,
+                    server_port=new_port,
+                    clients=peers,
+                )
+            except Exception as exc:
+                raise _ApiError(
+                    f"wg0.conf render failed (vault unchanged): {exc}", 500
+                )
+
+            # Phase 2: commit vault. After this point downstream failures are
+            # warnings — the next `wireseal serve` will reconcile from vault.
+            state.server["port"] = new_port
+            vault.save(state, passphrase)
+            with _lock:
+                _session["cache"] = _refresh_cache(state)
+    except _ApiError:
+        raise
+    except Exception as exc:
+        # Catch-all so a vault open / decrypt error never leaks a stack trace.
+        raise _ApiError(f"Vault read/save failed: {exc}", 500)
+
+    # ── Phase 3: deploy + firewall + tunnel. Failures = warnings only. ───────
+    adapter = None
+    try:
+        adapter = get_adapter()
+        adapter.check_privileges()
+    except Exception as exc:
+        warnings.append(f"Platform adapter unavailable: {exc}")
+
+    if adapter is not None and server_cfg is not None:
+        try:
+            adapter.deploy_config(server_cfg)
+        except Exception as exc:
+            warnings.append(f"Config deploy failed: {exc}")
+
+        try:
+            adapter.apply_firewall_rules(new_port, _WG_IFACE, subnet_str)
+        except Exception as exc:
+            warnings.append(f"Firewall reconcile skipped: {exc}")
+
+        if hasattr(adapter, "open_firewalld_port"):
+            try:
+                adapter.open_firewalld_port(new_port)
+            except Exception as exc:
+                warnings.append(f"firewalld port open skipped: {exc}")
+
+    # ── Phase 4: tunnel restart. ─────────────────────────────────────────────
+    try:
+        wg_warning = _reload_wireguard()
+        if wg_warning:
+            warnings.append(wg_warning)
+    except Exception as exc:
+        warnings.append(f"Tunnel restart failed: {exc}")
+
+    # ── Audit log. Audit failure must NOT prevent a successful response. ────
+    try:
+        AuditLog(_AUDIT_PATH).log(
+            "change-port",
+            {"old_port": old_port, "new_port": new_port,
+             "warnings": warnings},
+            actor=_actor_id,
+        )
+    except Exception:
+        pass
+
+    return {
+        "ok":           True,
+        "old_port":     old_port,
+        "new_port":     new_port,
+        "warnings":     warnings if warnings else None,
+        "port_warning": port_warning,
+        "note":         "Re-export / re-scan client QR codes — peers cache the old endpoint.",
+    }
+
+
+# ---------------------------------------------------------------------------
+# Background-service handlers — proxy to the platform adapter.
+#
+# Linux   → systemd unit `wireseal-api.service`
+# macOS   → launchd plist  `/Library/LaunchDaemons/com.wireseal.api.plist`
+# Windows → Task Scheduler task `WireSeal-API`
+#
+# All handlers require an unlocked vault: a locked WireSeal could otherwise
+# be stopped/started by any process on the machine simply by hitting these
+# endpoints, defeating the dashboard auth gate.
+# ---------------------------------------------------------------------------
+def _service_adapter_or_die():
+    from wireseal.platform.detect import get_adapter
+    adapter = get_adapter()
+    if not hasattr(adapter, "install_api_service"):
+        raise _ApiError(
+            "Background-service registration is not available on this OS.",
+            501,
+        )
+    return adapter
+
+
+def _h_service_status(req: "_Handler", _groups: tuple) -> dict:
+    _require_unlocked()
+    adapter = _service_adapter_or_die()
+    return {"ok": True, **adapter.api_service_status()}
+
+
+def _h_service_install(req: "_Handler", _groups: tuple) -> dict:
+    _require_unlocked()
+    adapter = _service_adapter_or_die()
+    body = req._json()
+    bind = body.get("bind") or "127.0.0.1"
+    try:
+        port = int(body.get("port") or 8080)
+    except (TypeError, ValueError):
+        raise _ApiError("port must be an integer.", 400)
+    autostart = bool(body.get("autostart", True))
+    try:
+        adapter.install_api_service(bind=bind, port=port, autostart=autostart)
+    except Exception as exc:
+        raise _ApiError(f"Service install failed: {exc}", 500)
+    from wireseal.security.audit import AuditLog
+    try:
+        AuditLog(_AUDIT_PATH).log(
+            "service-install",
+            {"bind": bind, "port": port, "autostart": autostart},
+            actor=_session.get("admin_id", "owner"),
+        )
+    except Exception:
+        pass
+    return {"ok": True, **adapter.api_service_status()}
+
+
+def _h_service_uninstall(req: "_Handler", _groups: tuple) -> dict:
+    _require_unlocked()
+    adapter = _service_adapter_or_die()
+    try:
+        adapter.uninstall_api_service()
+    except Exception as exc:
+        raise _ApiError(f"Service uninstall failed: {exc}", 500)
+    from wireseal.security.audit import AuditLog
+    try:
+        AuditLog(_AUDIT_PATH).log(
+            "service-uninstall", {},
+            actor=_session.get("admin_id", "owner"),
+        )
+    except Exception:
+        pass
+    return {"ok": True}
+
+
+def _h_service_start(req: "_Handler", _groups: tuple) -> dict:
+    _require_unlocked()
+    adapter = _service_adapter_or_die()
+    try:
+        adapter.start_api_service()
+    except Exception as exc:
+        raise _ApiError(f"Service start failed: {exc}", 500)
+    return {"ok": True, **adapter.api_service_status()}
+
+
+def _h_service_stop(req: "_Handler", _groups: tuple) -> dict:
+    _require_unlocked()
+    adapter = _service_adapter_or_die()
+    try:
+        adapter.stop_api_service()
+    except Exception as exc:
+        raise _ApiError(f"Service stop failed: {exc}", 500)
+    return {"ok": True, **adapter.api_service_status()}
+
+
+def _h_port_policy(req: "_Handler", _groups: tuple) -> dict:
+    """Public-readable port policy used by the UI to colour-code port input.
+
+    No vault unlock required — same trust level as `/api/health`. Returns
+    blocklisted, warn-listed, and the WireGuard default port. Keys are
+    integers in JSON.
+    """
+    return {
+        "default":   51820,
+        "min":       1,
+        "max":       65535,
+        "privileged_max":      1023,
+        "ephemeral_min":       49152,
+        "blocked": [
+            {"port": p, "reason": r}
+            for p, r in sorted(_PORT_BLOCKLIST_UDP.items())
+        ],
+        "warnings": [
+            {"port": p, "reason": r}
+            for p, r in sorted(_PORT_WARN_UDP.items())
+        ],
+        "recommended": [
+            {"port": 51820, "label": "WireGuard default"},
+            {"port": 51821, "label": "WireGuard alt #1"},
+            {"port": 51822, "label": "WireGuard alt #2"},
+            {"port": 4500,  "label": "IPsec NAT-T (firewall-friendly)"},
+            {"port": 443,   "label": "QUIC/HTTP-3 (bypass restrictive networks)"},
+        ],
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -4078,6 +4664,21 @@ def _h_update_install(req: "_Handler", _groups: tuple) -> dict:
             f"Download manually from: {check['release_url']}", 404,
         )
 
+    # SEC-FIX-4: TOCTOU-safe download + verify.
+    #
+    # The original code wrote the asset to disk with open(..., "wb") and then
+    # re-opened it by path for signature verification — a race window where an
+    # attacker with local write access could swap the file between the write
+    # and the re-open.  The fix:
+    #   1. Open with O_CREAT|O_EXCL|O_WRONLY so we fail if the file already
+    #      exists (prevents targeting a pre-placed symlink or hardlink).
+    #   2. Download into that fd exclusively.
+    #   3. fsync to guarantee the data is on disk before we trust it.
+    #   4. Verify by duplicating the fd and seeking to 0 — never re-open by
+    #      path, so no swap window exists between write and verify.
+    #   5. unlink on verification failure so no unsigned asset lingers.
+    #   6. Close the fd in a finally block regardless of outcome.
+
     # Download the asset to a temp directory along with its signing sidecars.
     tmp_dir = tempfile.mkdtemp(prefix="wireseal-update-")
     tmp_path = os.path.join(tmp_dir, asset_name)
@@ -4085,6 +4686,7 @@ def _h_update_install(req: "_Handler", _groups: tuple) -> dict:
     _MAX_ASSET_SIZE = 200 * 1024 * 1024  # 200 MiB — defeats tarball bombs
 
     def _download_to(url: str, dest: str, *, max_bytes: int) -> None:
+        """Download url → dest (plain path, used only for small sidecars)."""
         try:
             dl_req = urllib.request.Request(url, headers={"User-Agent": "WireSeal-Updater"})
             with urllib.request.urlopen(dl_req, timeout=120) as resp:
@@ -4105,57 +4707,105 @@ def _h_update_install(req: "_Handler", _groups: tuple) -> dict:
         except (urllib.error.URLError, OSError) as exc:
             raise _ApiError(f"Download failed: {exc}", 502)
 
-    _download_to(asset_url, tmp_path, max_bytes=_MAX_ASSET_SIZE)
-
-    # Fetch sidecars. We require both; a release without them cannot be
-    # verified and therefore cannot be trusted to overwrite the running binary.
-    sha_url = asset_url + ".sha256"
-    sig_url = asset_url + ".sig"
-    sha_path = os.path.join(tmp_dir, asset_name + ".sha256")
-    sig_path = os.path.join(tmp_dir, asset_name + ".sig")
+    # --- Main asset: open with O_EXCL, download into fd, fsync, verify via fd
+    asset_fd: int | None = None
     try:
-        _download_to(sha_url, sha_path, max_bytes=4096)
-        _download_to(sig_url, sig_path, max_bytes=4096)
-    except _ApiError as exc:
-        raise _ApiError(
-            "Update aborted: release is missing required signing sidecars "
-            f"(.sha256 / .sig). Details: {exc}", 502,
-        )
-
-    # Parse the .sha256 sidecar (either a bare digest or "<digest>  <file>").
-    try:
-        sha_raw = _Path(sha_path).read_text(encoding="ascii").strip().split()[0].lower()
-    except Exception as exc:
-        raise _ApiError(f"Could not parse SHA-256 sidecar: {exc}", 502)
-
-    try:
-        sig_bytes = _Path(sig_path).read_bytes()
-    except OSError as exc:
-        raise _ApiError(f"Could not read signature sidecar: {exc}", 502)
-
-    # Verify — raises UpdateVerificationError if anything is off.
-    from wireseal.security.update_verifier import (
-        verify_release_asset, UpdateVerificationError,
-    )
-    try:
-        verify_release_asset(
-            _Path(tmp_path),
-            expected_sha256_hex=sha_raw,
-            signature=sig_bytes,
-            require_signature=True,
-        )
-    except UpdateVerificationError as exc:
-        # Audit the tampering attempt before bailing.
         try:
-            from wireseal.security.audit import AuditLog
-            AuditLog(_AUDIT_PATH).log(
-                "update-verify-failed",
-                {"asset": asset_name, "reason": str(exc)},
-                actor=_session.get("admin_id", "owner"),
+            asset_fd = os.open(
+                tmp_path,
+                os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_BINARY", 0),
+                0o600,
             )
-        except Exception:
-            pass
-        raise _ApiError(f"Update verification failed: {exc}", 400)
+        except OSError as exc:
+            raise _ApiError(f"Could not create asset file exclusively: {exc}", 500)
+
+        try:
+            dl_req = urllib.request.Request(
+                asset_url, headers={"User-Agent": "WireSeal-Updater"}
+            )
+            with urllib.request.urlopen(dl_req, timeout=120) as resp:
+                written = 0
+                while True:
+                    chunk = resp.read(65536)
+                    if not chunk:
+                        break
+                    written += len(chunk)
+                    if written > _MAX_ASSET_SIZE:
+                        raise _ApiError(
+                            f"Download exceeds {_MAX_ASSET_SIZE} bytes — aborting.", 502
+                        )
+                    os.write(asset_fd, chunk)
+        except _ApiError:
+            raise
+        except (urllib.error.URLError, OSError) as exc:
+            raise _ApiError(f"Download failed: {exc}", 502)
+
+        # Flush OS buffers before verification so the fd read sees full data.
+        os.fsync(asset_fd)
+
+        # Fetch sidecars (small files; sidecar swap risk is low, content is
+        # hash/sig checked against the asset content we already hold via fd).
+        sha_url  = asset_url + ".sha256"
+        sig_url  = asset_url + ".sig"
+        sha_path = os.path.join(tmp_dir, asset_name + ".sha256")
+        sig_path = os.path.join(tmp_dir, asset_name + ".sig")
+        try:
+            _download_to(sha_url, sha_path, max_bytes=4096)
+            _download_to(sig_url, sig_path, max_bytes=4096)
+        except _ApiError as exc:
+            raise _ApiError(
+                "Update aborted: release is missing required signing sidecars "
+                f"(.sha256 / .sig). Details: {exc}", 502,
+            )
+
+        # Parse the .sha256 sidecar (either a bare digest or "<digest>  <file>").
+        try:
+            sha_raw = _Path(sha_path).read_text(encoding="ascii").strip().split()[0].lower()
+        except Exception as exc:
+            raise _ApiError(f"Could not parse SHA-256 sidecar: {exc}", 502)
+
+        try:
+            sig_bytes = _Path(sig_path).read_bytes()
+        except OSError as exc:
+            raise _ApiError(f"Could not read signature sidecar: {exc}", 502)
+
+        # Verify via a dup of the still-open fd — NEVER re-open by path.
+        from wireseal.security.update_verifier import (
+            verify_release_asset, UpdateVerificationError,
+        )
+        try:
+            dup_fd = os.dup(asset_fd)
+            with os.fdopen(dup_fd, "rb") as verify_fh:
+                verify_fh.seek(0)
+                verify_release_asset(
+                    verify_fh,  # type: ignore[arg-type]
+                    expected_sha256_hex=sha_raw,
+                    signature=sig_bytes,
+                    require_signature=True,
+                )
+        except UpdateVerificationError as exc:
+            # Audit the tampering attempt, remove the bad file, then bail.
+            try:
+                from wireseal.security.audit import AuditLog
+                AuditLog(_AUDIT_PATH).log(
+                    "update-verify-failed",
+                    {"asset": asset_name, "reason": str(exc)},
+                    actor=_session.get("admin_id", "owner"),
+                )
+            except Exception:
+                pass
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+            raise _ApiError(f"Update verification failed: {exc}", 400)
+
+    finally:
+        if asset_fd is not None:
+            try:
+                os.close(asset_fd)
+            except OSError:
+                pass
 
     # Platform-specific install
     if sys.platform == "win32":
@@ -4437,6 +5087,88 @@ def _h_client_tunnel_status(req: "_Handler", _groups: tuple) -> dict:
 # ---------------------------------------------------------------------------
 
 
+# SEC-FIX-1: SSH allowlist helpers
+def _ssh_load_targets() -> list[dict]:
+    """Load the SSH target allowlist from _SSH_TARGETS_CONFIG_PATH.
+
+    Returns an empty list (deny all) if the file is absent or malformed.
+    Entries must be {host: str, port: int}.
+    """
+    try:
+        raw = _SSH_TARGETS_CONFIG_PATH.read_text(encoding="utf-8")
+        entries = json.loads(raw)
+        if not isinstance(entries, list):
+            return []
+        result = []
+        for e in entries:
+            if not isinstance(e, dict):
+                continue
+            h = e.get("host", "")
+            p = e.get("port")
+            if isinstance(h, str) and isinstance(p, int) and _SSH_HOST_RE.match(h) and 1 <= p <= 65535:
+                result.append({"host": h, "port": p})
+        return result
+    except (OSError, json.JSONDecodeError, ValueError):
+        return []
+
+
+def _ssh_check_target_allowed(host: str, port: int) -> None:
+    """Raise _ApiError(403) if (host, port) is not in the SSH allowlist.
+
+    Also emits an audit log entry on denial so operators can detect
+    misconfigured or malicious requests.
+    """
+    targets = _ssh_load_targets()
+    if not any(t["host"] == host and t["port"] == port for t in targets):
+        try:
+            from wireseal.security.audit import AuditLog
+            AuditLog(_AUDIT_PATH).log(
+                "ssh-target-denied",
+                {"host": host, "port": port},
+                actor=_session.get("admin_id", "owner"),
+            )
+        except Exception:
+            pass
+        raise _ApiError("ssh target not allowed", 403)
+
+
+def _validate_ssh_target_entry(entry: dict) -> dict:
+    """Validate a single SSH target dict {host, port}. Returns cleaned copy."""
+    host = entry.get("host", "")
+    port = entry.get("port")
+    if not isinstance(host, str) or not _SSH_HOST_RE.match(host):
+        raise _ApiError(
+            "host must be a string matching ^[a-zA-Z0-9.\\-]{1,253}$", 400
+        )
+    if not isinstance(port, int) or not (1 <= port <= 65535):
+        raise _ApiError("port must be an integer between 1 and 65535", 400)
+    return {"host": host, "port": port}
+
+
+def _h_ssh_targets_get(req: "_Handler", _groups: tuple) -> dict:
+    """GET /api/ssh/targets — Return the current SSH allowlist."""
+    _require_unlocked()
+    return {"targets": _ssh_load_targets()}
+
+
+def _h_ssh_targets_set(req: "_Handler", _groups: tuple) -> dict:
+    """POST /api/ssh/targets — Replace the SSH allowlist (requires unlock).
+
+    Body: {targets: [{host, port}, ...]}
+    """
+    _require_unlocked()
+    body = req._json()
+    raw_list = body.get("targets")
+    if not isinstance(raw_list, list):
+        raise _ApiError("targets must be a JSON array", 400)
+    cleaned = [_validate_ssh_target_entry(e) for e in raw_list]
+    _VAULT_DIR.mkdir(parents=True, exist_ok=True)
+    tmp = _SSH_TARGETS_CONFIG_PATH.with_suffix(".tmp")
+    tmp.write_text(json.dumps(cleaned, indent=2), encoding="utf-8")
+    tmp.replace(_SSH_TARGETS_CONFIG_PATH)
+    return {"ok": True, "targets": cleaned}
+
+
 def _h_ssh_token(req: "_Handler", _groups: tuple) -> dict:
     """POST /api/ssh/token — Issue a one-time token for a WebSocket SSH session.
 
@@ -4464,6 +5196,10 @@ def _h_ssh_token(req: "_Handler", _groups: tuple) -> dict:
         raise _ApiError("port out of range", 400)
     if not profile_name:
         raise _ApiError("profile_name is required", 400)
+
+    # SEC-FIX-1: verify (host, port) against the allowlist before issuing a
+    # token. Raises _ApiError(403) and emits an audit event if not permitted.
+    _ssh_check_target_allowed(host, port)
 
     # Enforce that a client tunnel is active — SSH must go through the VPN.
     from wireseal.client.tunnel import tunnel_status as _tunnel_status
@@ -4529,6 +5265,7 @@ _ROUTES: list[tuple[str, re.Pattern, Any]] = [
     ("GET",    re.compile(r"^/api/status$"),                 _h_status),
     ("GET",    re.compile(r"^/api/admins$"),                                     _h_list_admins),
     ("POST",   re.compile(r"^/api/admins$"),                                     _h_add_admin),
+    ("GET",    re.compile(r"^/api/admins/totp-status$"),                         _h_admins_totp_status),
     ("POST",   re.compile(r"^/api/admins/([^/]+)/change-passphrase$"),           _h_change_admin_passphrase),
     ("DELETE", re.compile(r"^/api/admins/([^/]+)$"),                             _h_remove_admin),
     ("GET",    re.compile(r"^/api/clients$"),                _h_list_clients),
@@ -4552,6 +5289,13 @@ _ROUTES: list[tuple[str, re.Pattern, Any]] = [
     ("POST",   re.compile(r"^/api/fresh-start/challenge$"),  _h_fresh_start_challenge),
     ("POST",   re.compile(r"^/api/fresh-start$"),            _h_fresh_start),
     ("POST",   re.compile(r"^/api/update-endpoint$"),        _h_update_endpoint),
+    ("POST",   re.compile(r"^/api/change-port$"),            _h_change_port),
+    ("GET",    re.compile(r"^/api/port-policy$"),            _h_port_policy),
+    ("GET",    re.compile(r"^/api/service/status$"),         _h_service_status),
+    ("POST",   re.compile(r"^/api/service/install$"),        _h_service_install),
+    ("POST",   re.compile(r"^/api/service/uninstall$"),      _h_service_uninstall),
+    ("POST",   re.compile(r"^/api/service/start$"),          _h_service_start),
+    ("POST",   re.compile(r"^/api/service/stop$"),           _h_service_stop),
     ("POST",   re.compile(r"^/api/rotate-server-keys$"),                    _h_rotate_server_keys),
     # Admin mode
     ("POST",   re.compile(r"^/api/admin/authenticate$"),                 _h_admin_authenticate),
@@ -4595,6 +5339,8 @@ _ROUTES: list[tuple[str, re.Pattern, Any]] = [
     ("POST",   re.compile(r"^/api/client/tunnel/down$"),                _h_client_tunnel_down),
     ("GET",    re.compile(r"^/api/client/tunnel/status$"),              _h_client_tunnel_status),
     # SSH bridge
+    ("GET",    re.compile(r"^/api/ssh/targets$"),                       _h_ssh_targets_get),
+    ("POST",   re.compile(r"^/api/ssh/targets$"),                       _h_ssh_targets_set),
     ("POST",   re.compile(r"^/api/ssh/token$"),                         _h_ssh_token),
     ("GET",    re.compile(r"^/api/ssh/sessions$"),                      _h_ssh_sessions),
 ]

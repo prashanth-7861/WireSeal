@@ -142,10 +142,39 @@ export function Clients() {
   };
 
   // ── Download config ──────────────────────────────────────────────────────
-  const handleDownloadConfig = (name: string) => {
-    // Direct download via backend — serves the .conf file with
-    // Content-Disposition: attachment so pywebview and browsers handle it natively.
-    window.open(`/api/clients/${encodeURIComponent(name)}/config/download`, "_blank");
+  const handleDownloadConfig = async (name: string) => {
+    // BUGFIX: window.open(...) fails inside pywebview/WebView2 — the popup
+    // navigates but the attachment response is dropped. Fetch as a blob in the
+    // current document and trigger a synthetic anchor click so the runtime
+    // handles the download natively.
+    try {
+      const res = await fetch(`/api/clients/${encodeURIComponent(name)}/config/download`, {
+        credentials: "same-origin",
+      });
+      if (!res.ok) {
+        let msg = `Download failed (HTTP ${res.status})`;
+        try {
+          const err = await res.json();
+          if (err?.error) msg = err.error;
+        } catch {
+          /* non-JSON body — keep default message */
+        }
+        throw new Error(msg);
+      }
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `${name}.conf`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+      setSuccess(`Config saved: ${name}.conf`);
+      setTimeout(() => setSuccess(""), 4000);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to download config");
+    }
   };
 
   // ── Progress ring for countdown ───────────────────────────────────────────

@@ -12,6 +12,102 @@ VENV_DIR="$REPO_DIR/.venv"
 MIN_PYTHON_MINOR=12
 MAX_PYTHON_MINOR=14
 
+# ---------------------------------------------------------------------------
+# Uninstall passthrough
+#
+# Allow `bash install-linux.sh --uninstall [--purge] [--yes]` so users have a
+# single discoverable entry point. Forward all remaining args to the dedicated
+# uninstaller and exit.
+# ---------------------------------------------------------------------------
+for arg in "$@"; do
+    if [[ "$arg" == "--uninstall" || "$arg" == "-u" ]]; then
+        shift_args=()
+        for a in "$@"; do
+            [[ "$a" == "--uninstall" || "$a" == "-u" ]] && continue
+            shift_args+=("$a")
+        done
+        exec bash "$SCRIPT_DIR/uninstall-linux.sh" "${shift_args[@]}"
+    fi
+done
+
+# ---------------------------------------------------------------------------
+# Detect existing install — offer reinstall / upgrade / cancel.
+# ---------------------------------------------------------------------------
+if [[ -x /usr/local/bin/wireseal && -d "$VENV_DIR" ]]; then
+    INSTALLED_VER="$("$VENV_DIR/bin/wireseal" --version 2>/dev/null | awk '{print $NF}' || echo unknown)"
+    echo ""
+    echo "[wireseal] Existing install detected (version: $INSTALLED_VER)."
+    echo "  [r] Reinstall (overwrite venv + wrapper, keep vault)"
+    echo "  [u] Uninstall (run uninstall-linux.sh)"
+    echo "  [c] Cancel"
+    read -rp "Choose [r/u/c]: " choice
+    case "$choice" in
+        r|R) echo "[wireseal] Proceeding with reinstall..." ;;
+        u|U) exec bash "$SCRIPT_DIR/uninstall-linux.sh" ;;
+        *)   echo "[wireseal] Cancelled."; exit 0 ;;
+    esac
+fi
+
+# ---------------------------------------------------------------------------
+# Release-asset integrity verification (SHA-256 + Ed25519 signature).
+#
+# This infrastructure is invoked by verify_release_asset() whenever the script
+# downloads a pre-built asset (e.g. via curl from a GitHub release). Both a
+# SHA-256 manifest and an Ed25519 signature are required — the SHA-256 catches
+# transport corruption, the signature guarantees authorship.
+#
+# Integration points (when release-asset flows are added): call
+# `verify_release_asset "<file>" "<sha256_url>" "<sig_url>"` immediately after
+# the download completes. On any failure the asset is deleted and the script
+# exits with an actionable pointer to the releases page.
+# ---------------------------------------------------------------------------
+RELEASES_URL="https://github.com/prashanth-7861/WireSeal/releases"
+
+# TODO: replace with real Ed25519 pubkey before v0.7.14 release
+WIRESEAL_RELEASE_PUBKEY_B64='AAAAC3NzaC1lZDI1NTE5AAAAIPLACEHOLDER_REPLACE_BEFORE_RELEASE_v0_7_14====='
+
+verify_release_asset() {
+    local asset="$1"
+    local sha256_url="$2"
+    local sig_url="$3"
+    local sha256_file="${asset}.sha256"
+    local sig_file="${asset}.sig"
+    local pubkey_file
+    pubkey_file="$(mktemp)"
+
+    if ! curl -fsSL -o "$sha256_file" "$sha256_url"; then
+        rm -f "$asset" "$sha256_file" "$pubkey_file"
+        error "Failed to download SHA-256 manifest for $asset — refusing to proceed."
+        error "Verify manually: $RELEASES_URL"
+        exit 1
+    fi
+    if ! curl -fsSL -o "$sig_file" "$sig_url"; then
+        rm -f "$asset" "$sha256_file" "$sig_file" "$pubkey_file"
+        error "Failed to download signature for $asset — refusing to proceed."
+        error "Verify manually: $RELEASES_URL"
+        exit 1
+    fi
+
+    if ! (cd "$(dirname "$asset")" && sha256sum -c "$(basename "$sha256_file")"); then
+        rm -f "$asset" "$sha256_file" "$sig_file" "$pubkey_file"
+        error "SHA-256 mismatch for $asset — deleted."
+        error "Manual verification: $RELEASES_URL"
+        exit 1
+    fi
+
+    printf '%s' "$WIRESEAL_RELEASE_PUBKEY_B64" | base64 -d > "$pubkey_file" 2>/dev/null || true
+    if ! openssl pkeyutl -verify -pubin -inkey "$pubkey_file" \
+            -rawin -in "$asset" -sigfile "$sig_file" &>/dev/null; then
+        rm -f "$asset" "$sha256_file" "$sig_file" "$pubkey_file"
+        error "Ed25519 signature verification failed for $asset — deleted."
+        error "Manual verification: $RELEASES_URL"
+        exit 1
+    fi
+
+    rm -f "$pubkey_file"
+    info "Verified $asset (SHA-256 + Ed25519 signature)"
+}
+
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; NC='\033[0m'
 info()  { echo -e "${GREEN}[wireseal]${NC} $*"; }
 warn()  { echo -e "${YELLOW}[wireseal]${NC} $*"; }

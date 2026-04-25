@@ -328,26 +328,45 @@ ok "Installed: /usr/local/bin/wireseal (CLI)"
 ok "Installed: /usr/local/bin/wireseal-gui (Dashboard)"
 
 # ── Sudoers rule for non-root GUI mode ──────────────────────────────────
-# Allows `wireseal-gui` to run as the regular user while elevating only
-# wg/wg-quick/ip commands via passwordless sudo.
+# Allows the dedicated `wireseal` service user to elevate only wg/wg-quick/ip
+# commands via passwordless sudo. Previously this rule was scoped to ALL users,
+# which allowed ANY local user to manipulate WireGuard tunnels without auth.
 info "Setting up sudoers rule for WireGuard commands..."
 WG_BIN=$(command -v wg 2>/dev/null || echo "/usr/bin/wg")
 WG_QUICK_BIN=$(command -v wg-quick 2>/dev/null || echo "/usr/bin/wg-quick")
 IP_BIN=$(command -v ip 2>/dev/null || echo "/usr/sbin/ip")
-SUDOERS_FILE="/etc/sudoers.d/wireseal"
-cat > "$SUDOERS_FILE" << SUDOERS
-# WireSeal: allow all users to run WireGuard commands without password.
-# This lets the dashboard GUI run as a regular user while managing tunnels.
-ALL ALL=(root) NOPASSWD: $WG_BIN, $WG_QUICK_BIN, $IP_BIN
-SUDOERS
-chmod 0440 "$SUDOERS_FILE"
-# Validate syntax — remove if invalid to prevent locking out sudo
-if ! visudo -c -f "$SUDOERS_FILE" &>/dev/null; then
-    rm -f "$SUDOERS_FILE"
-    warn "Sudoers rule invalid — removed. Run wireseal-gui with sudo instead."
-else
-    ok "Sudoers: passwordless wg/wg-quick/ip for all users"
+
+# Ensure the `wireseal` service user exists (system user, no shell, no home).
+if ! id -u wireseal &>/dev/null; then
+    info "Creating service user 'wireseal'..."
+    useradd --system --no-create-home --shell /usr/sbin/nologin wireseal \
+        || err "Failed to create 'wireseal' service user — sudoers rule will not be installed."
 fi
+
+SUDOERS_FILE="/etc/sudoers.d/wireseal"
+if id -u wireseal &>/dev/null; then
+    # Install via `install -m 0440` so the file is written atomically with the
+    # correct restrictive mode, and validate with visudo BEFORE committing —
+    # a broken sudoers drop-in can lock the admin out of sudo entirely.
+    install -m 0440 /dev/stdin "$SUDOERS_FILE" <<SUDOERS
+# WireSeal: allow the wireseal service user to run WireGuard commands without
+# a password. Scoped to a single system user — do not widen to ALL.
+wireseal ALL=(root) NOPASSWD: $WG_BIN, $WG_QUICK_BIN, $IP_BIN
+SUDOERS
+    if ! visudo -c -f "$SUDOERS_FILE" &>/dev/null; then
+        rm -f "$SUDOERS_FILE"
+        err "Sudoers rule failed visudo validation — removed to avoid breaking sudo."
+        exit 1
+    else
+        ok "Sudoers: passwordless wg/wg-quick/ip for user 'wireseal' only"
+    fi
+else
+    warn "Skipping sudoers rule — 'wireseal' service user missing."
+fi
+
+# TODO(uninstall): when an uninstall path is added to this script, ensure it
+# removes the sudoers drop-in: `rm -f /etc/sudoers.d/wireseal` and optionally
+# `userdel wireseal` after stopping any running services.
 
 # ═══════════════════════════════════════════════════════════════════════════
 # 7. NETWORK DOCTOR — diagnose and fix every networking issue

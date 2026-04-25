@@ -334,6 +334,68 @@ export const api = {
   updateEndpoint: (endpoint?: string) =>
     _fetch<{ ok: boolean; endpoint: string }>("POST", "/update-endpoint", { endpoint }),
 
+  changePort: (port: number, confirm_warning: boolean = false) =>
+    _fetch<{
+      ok: boolean;
+      old_port: number;
+      new_port: number;
+      warnings?: string[] | null;
+      port_warning?: string | null;
+      note?: string;
+    }>("POST", "/change-port", { port, confirm_warning }),
+
+  portPolicy: () =>
+    _fetch<{
+      default: number;
+      min: number;
+      max: number;
+      privileged_max: number;
+      ephemeral_min: number;
+      blocked: { port: number; reason: string }[];
+      warnings: { port: number; reason: string }[];
+      recommended: { port: number; label: string }[];
+    }>("GET", "/port-policy"),
+
+  // ── Background-service management (systemd / launchd / Task Scheduler) ──
+  serviceStatus: () =>
+    _fetch<{
+      ok: boolean;
+      installed: boolean;
+      running: boolean;
+      enabled: boolean;
+    }>("GET", "/service/status"),
+
+  serviceInstall: (opts?: { bind?: string; port?: number; autostart?: boolean }) =>
+    _fetch<{
+      ok: boolean;
+      installed: boolean;
+      running: boolean;
+      enabled: boolean;
+    }>("POST", "/service/install", {
+      bind: opts?.bind ?? "127.0.0.1",
+      port: opts?.port ?? 8080,
+      autostart: opts?.autostart ?? true,
+    }),
+
+  serviceUninstall: () =>
+    _fetch<{ ok: boolean }>("POST", "/service/uninstall"),
+
+  serviceStart: () =>
+    _fetch<{
+      ok: boolean;
+      installed: boolean;
+      running: boolean;
+      enabled: boolean;
+    }>("POST", "/service/start"),
+
+  serviceStop: () =>
+    _fetch<{
+      ok: boolean;
+      installed: boolean;
+      running: boolean;
+      enabled: boolean;
+    }>("POST", "/service/stop"),
+
   setPin: (pin: string) =>
     _fetch<{ ok: boolean }>("POST", "/set-pin", { pin }),
 

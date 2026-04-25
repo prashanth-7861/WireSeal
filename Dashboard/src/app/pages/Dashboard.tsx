@@ -1,8 +1,9 @@
 import { useState, useEffect, useCallback, useRef } from "react";
+import { Link } from "react-router";
 import {
   Server, Activity, Monitor, Clock, Wifi, WifiOff,
   ShieldCheck, Users, PowerOff, Play, RefreshCw,
-  ArrowDownCircle, ArrowUpCircle, Globe, Zap,
+  ArrowDownCircle, ArrowUpCircle, Globe, Zap, Pencil,
 } from "lucide-react";
 import { api, type Status } from "../api";
 
@@ -227,9 +228,13 @@ export function Dashboard() {
                 {(status.endpoint || status.server_ip) && (
                   <div>
                     Public IP:{" "}
-                    <span className="font-mono text-gray-700">
+                    <Link
+                      to="/settings"
+                      className="font-mono text-gray-700 hover:text-blue-700 hover:underline transition-colors"
+                      title="Change endpoint or port in Settings → Server Settings"
+                    >
                       {status.endpoint || status.server_ip}:{status.port}
-                    </span>
+                    </Link>
                   </div>
                 )}
                 {status.endpoint && status.server_ip && (
@@ -300,13 +305,22 @@ export function Dashboard() {
                 <p className="text-base font-semibold text-gray-900">{connectedPeers} / {status!.total_clients}</p>
               </div>
             </div>
-            <div className="flex items-center gap-3">
+            <Link
+              to="/settings"
+              className="flex items-center gap-3 group hover:bg-gray-50 -mx-2 px-2 py-1 rounded-md transition-colors"
+              title="Click to change the WireGuard port (Settings → Server Settings → Change Port)"
+            >
               <Globe className="w-5 h-5 text-cyan-400" />
               <div>
-                <p className="text-xs text-gray-500">Port</p>
-                <p className="text-base font-semibold text-gray-900">{status!.port}/UDP</p>
+                <p className="text-xs text-gray-500 flex items-center gap-1">
+                  Port
+                  <Pencil className="w-3 h-3 text-gray-400 opacity-0 group-hover:opacity-100 transition-opacity" />
+                </p>
+                <p className="text-base font-semibold text-gray-900 group-hover:text-blue-700 transition-colors">
+                  {status!.port}/UDP
+                </p>
               </div>
-            </div>
+            </Link>
             <div className="flex items-center gap-3">
               <Zap className="w-5 h-5 text-amber-400" />
               <div>

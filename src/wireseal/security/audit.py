@@ -221,7 +221,7 @@ class AuditLog:
                     stacklevel=3,
                 )
         else:
-            set_file_permissions(self._log_path, mode=0o640)
+            set_file_permissions(self._log_path, mode=0o600)
 
     # ------------------------------------------------------------------
     # Log rotation
@@ -232,7 +232,7 @@ class AuditLog:
 
         Renames audit.log → audit.log.1, shifts .1→.2, etc.
         Deletes the oldest file if count exceeds MAX_ROTATED.
-        Applies 0o640 permissions to rotated files on Unix.
+        Applies 0o600 permissions to rotated files on Unix.
         Must be called while holding _class_lock.
         """
         import sys
@@ -260,7 +260,7 @@ class AuditLog:
             self._log_path.rename(dst1)
             if sys.platform != "win32":
                 import os
-                os.chmod(dst1, 0o640)
+                os.chmod(dst1, 0o600)
         except OSError:
             pass
 
@@ -298,8 +298,16 @@ class AuditLog:
             meta_with_actor["actor"] = actor
         scrubbed = _scrub_secrets(meta_with_actor)
         scrubbed_error = str(_scrub_secrets(error)) if error else error
-        safe_action = action.replace("\n", " ").replace("\r", " ") if action else action
-        safe_error = scrubbed_error.replace("\n", " ").replace("\r", " ") if scrubbed_error else scrubbed_error
+        # SEC-025: Strip all non-printable control characters from action and
+        # error strings before embedding them in the JSON audit record.
+        # Allowlist: printable ASCII/Unicode (ord >= 0x20, != 0x7F).
+        # Newlines (\n) are excluded here because audit entries are JSON-lines
+        # (one record per line) — an embedded newline would corrupt the format.
+        def _sanitize_ctrl(s: str) -> str:
+            return "".join(c for c in s if ord(c) >= 0x20 and c != "\x7f")
+
+        safe_action = _sanitize_ctrl(action) if action else action
+        safe_error = _sanitize_ctrl(scrubbed_error) if scrubbed_error else scrubbed_error
         entry = AuditEntry(
             timestamp=datetime.datetime.now(datetime.timezone.utc).isoformat(),
             action=safe_action,

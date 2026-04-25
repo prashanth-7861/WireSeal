@@ -132,7 +132,11 @@ Your vault, clients, and settings in %APPDATA%\WireSeal will be preserved." \
       ; still on disk — remove it manually, then proceed with install.
       DetailPrint "Removing previous version $R0 from $R2..."
       ClearErrors
-      ExecWait '$R1 /S _?=$R2' $R3
+      ; Quote $R1 (UninstallString from registry) and $R2 (InstallLocation)
+      ; defensively — if %ProgramFiles% contains a space or a crafted registry
+      ; value holds additional tokens, an unquoted $R1 would be split by the
+      ; Windows command-line parser and leak arguments (or inject commands).
+      ExecWait '"$R1" /S _?="$R2"' $R3
       IfErrors uninstallFailed 0
       StrCmp $R3 0 uninstallOk uninstallFailed
 

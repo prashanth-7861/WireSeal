@@ -2610,5 +2610,161 @@ def restore_cmd(src: str) -> None:
             pass_bytes[i] = 0
 
 
+@cli.command("uninstall")
+@click.option("--purge", is_flag=True, default=False,
+              help="Also delete the vault data directory (~/.config/wireseal "
+                   "on Linux, %APPDATA%\\WireSeal on Windows, "
+                   "~/Library/Application Support/WireSeal on macOS).")
+@click.option("--yes", "-y", is_flag=True, default=False,
+              help="Non-interactive — assume yes to all prompts.")
+def uninstall(purge: bool, yes: bool) -> None:
+    """Uninstall WireSeal — invokes the platform uninstall script.
+
+    \b
+    Looks for scripts/uninstall-{linux,macos,windows}.{sh,ps1} relative to the
+    package install. Falls back to printing manual instructions if the script
+    is missing (e.g. running from a PyInstaller frozen binary).
+
+    Privileged operation: requires sudo on Linux/macOS, Administrator on
+    Windows. The CLI itself does not escalate — re-run under sudo / elevated
+    PowerShell if you hit a permission error.
+    """
+    import platform as _platform
+    import shutil
+
+    system = _platform.system()
+    repo_root = Path(__file__).resolve().parents[2]
+    scripts_dir = repo_root / "scripts"
+
+    # Map system → (script_name, interpreter, default_args)
+    script_map: dict[str, tuple[str, list[str]]] = {
+        "Linux":   ("uninstall-linux.sh",   ["bash"]),
+        "Darwin":  ("uninstall-macos.sh",   ["bash"]),
+        "Windows": ("uninstall-windows.ps1",
+                    ["powershell.exe", "-ExecutionPolicy", "Bypass", "-File"]),
+    }
+
+    entry = script_map.get(system)
+    if entry is None:
+        raise click.ClickException(f"Unsupported platform: {system}")
+
+    script_name, interp = entry
+    script_path = scripts_dir / script_name
+
+    if not script_path.exists():
+        click.echo(f"Uninstall script not found at {script_path}", err=True)
+        click.echo("This usually means you're running from a frozen binary.",
+                   err=True)
+        click.echo(f"Manual steps: see {repo_root}/README.md#uninstall", err=True)
+        raise SystemExit(1)
+
+    cmd = list(interp) + [str(script_path)]
+    if system == "Windows":
+        if purge: cmd.append("-Purge")
+        if yes:   cmd.append("-Yes")
+    else:
+        if purge: cmd.append("--purge")
+        if yes:   cmd.append("--yes")
+
+    # Sanity-check interpreter exists; bash/powershell.exe are usually on PATH.
+    if not shutil.which(interp[0]):
+        raise click.ClickException(
+            f"Required interpreter '{interp[0]}' not found on PATH."
+        )
+
+    click.echo(f"Running: {' '.join(cmd)}")
+    raise SystemExit(subprocess.call(cmd))
+
+
+@cli.group("service")
+def service() -> None:
+    """Manage the WireSeal background service (systemd / launchd / Task Scheduler).
+
+    \b
+    Subcommands:
+      install    Register the API server to run in the background.
+      uninstall  Remove the registered service.
+      start      Start the service now.
+      stop       Stop the service now.
+      status     Show installed / running / enabled flags.
+    """
+    pass
+
+
+def _service_adapter():
+    from wireseal.platform.detect import get_adapter
+    adapter = get_adapter()
+    for name in (
+        "install_api_service", "uninstall_api_service",
+        "start_api_service", "stop_api_service", "api_service_status",
+    ):
+        if not hasattr(adapter, name):
+            raise click.ClickException(
+                f"Platform adapter does not implement {name}() — "
+                "background-service registration is not available on this OS."
+            )
+    return adapter
+
+
+@service.command("install")
+@click.option("--bind", default="127.0.0.1", show_default=True,
+              help="Address the dashboard binds to.")
+@click.option("--port", default=8080, type=int, show_default=True,
+              help="Dashboard listen port.")
+@click.option("--no-autostart", is_flag=True, default=False,
+              help="Register the service but do NOT start at boot.")
+def service_install(bind: str, port: int, no_autostart: bool) -> None:
+    """Register the API server as a background service.
+
+    \b
+    Linux:   /etc/systemd/system/wireseal-api.service
+    macOS:   /Library/LaunchDaemons/com.wireseal.api.plist
+    Windows: Task Scheduler task `WireSeal-API` (run as SYSTEM)
+    """
+    adapter = _service_adapter()
+    adapter.install_api_service(
+        bind=bind, port=port, autostart=(not no_autostart)
+    )
+    click.echo(
+        f"Service installed (bind={bind}, port={port}, "
+        f"autostart={'yes' if not no_autostart else 'no'})."
+    )
+    click.echo("Run 'wireseal service start' to start it now.")
+
+
+@service.command("uninstall")
+def service_uninstall() -> None:
+    """Stop and remove the background service."""
+    adapter = _service_adapter()
+    adapter.uninstall_api_service()
+    click.echo("Service uninstalled.")
+
+
+@service.command("start")
+def service_start() -> None:
+    """Start the background service."""
+    adapter = _service_adapter()
+    adapter.start_api_service()
+    click.echo("Service started.")
+
+
+@service.command("stop")
+def service_stop() -> None:
+    """Stop the background service."""
+    adapter = _service_adapter()
+    adapter.stop_api_service()
+    click.echo("Service stopped.")
+
+
+@service.command("status")
+def service_status() -> None:
+    """Show installed / running / enabled status."""
+    adapter = _service_adapter()
+    s = adapter.api_service_status()
+    for k in ("installed", "running", "enabled"):
+        marker = "✓" if s.get(k) else "✗"
+        click.echo(f"  {marker} {k}")
+
+
 if __name__ == "__main__":
     cli()

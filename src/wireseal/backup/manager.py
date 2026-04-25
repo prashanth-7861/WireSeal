@@ -11,9 +11,11 @@ never touches the live vault file.
 """
 from __future__ import annotations
 
+import ipaddress
 import os
 import re
 import shutil
+import socket
 import subprocess
 import sys
 import urllib.request
@@ -97,6 +99,81 @@ def _validate_ssh_component(value: str, name: str, pattern: re.Pattern) -> None:
         raise ValueError(
             f"backup_config.{name} contains invalid characters: {value!r}"
         )
+
+
+# Localhost aliases that must be rejected regardless of DNS resolution.
+_LOCALHOST_ALIASES = frozenset({
+    "localhost",
+    "localhost.localdomain",
+    "ip6-localhost",
+})
+
+
+def _validate_webdav_url(url: str) -> None:
+    """Reject WebDAV URLs that could cause SSRF against internal infrastructure.
+
+    Rules enforced (SEC-031):
+    - Scheme must be 'https' (plain HTTP discarded; internal services rarely
+      have public certs so HTTPS is a meaningful gate).
+    - Hostname must not be a known localhost alias.
+    - Every IP address the hostname resolves to must not be private,
+      loopback, link-local, multicast, reserved, or unspecified.
+
+    Raises:
+        ValueError: with a descriptive message if any rule is violated.
+    """
+    parsed = urllib.parse.urlparse(url)
+    if parsed.scheme != "https":
+        raise ValueError(
+            f"webdav must be https (got scheme={parsed.scheme!r})"
+        )
+    host = parsed.hostname
+    if not host:
+        raise ValueError("webdav_url contains no hostname")
+    if host.lower() in _LOCALHOST_ALIASES:
+        raise ValueError(
+            f"webdav_url hostname {host!r} is a localhost alias and is not allowed"
+        )
+    try:
+        addr_infos = socket.getaddrinfo(host, None)
+    except OSError as exc:
+        raise ValueError(f"webdav_url hostname {host!r} could not be resolved: {exc}") from exc
+    for _family, _type, _proto, _canonname, sockaddr in addr_infos:
+        raw_ip = sockaddr[0]
+        try:
+            addr = ipaddress.ip_address(raw_ip)
+        except ValueError:
+            continue
+        if (
+            addr.is_private
+            or addr.is_loopback
+            or addr.is_link_local
+            or addr.is_multicast
+            or addr.is_reserved
+            or addr.is_unspecified
+        ):
+            raise ValueError(
+                f"webdav_url resolves to a non-routable IP address ({addr}); "
+                "only public internet addresses are allowed"
+            )
+
+
+def validate_webdav_config(cfg: dict) -> None:
+    """Validate WebDAV backup configuration for SSRF safety.
+
+    Exposed so that api.py can call this when saving config without needing
+    to import the full BackupManager class.
+
+    Args:
+        cfg: backup config dict; must contain 'webdav_url'.
+
+    Raises:
+        ValueError: if webdav_url is missing or fails SSRF validation.
+    """
+    webdav_url = cfg.get("webdav_url")
+    if not webdav_url:
+        raise ValueError("backup_config.webdav_url is required")
+    _validate_webdav_url(webdav_url)
 
 
 @dataclass
@@ -198,6 +275,8 @@ class BackupManager:
         webdav_url = cfg.get("webdav_url")
         if not webdav_url:
             raise ValueError("backup_config.webdav_url required for WebDAV destination")
+        # SEC-031: Validate URL for SSRF before making any outbound request.
+        _validate_webdav_url(webdav_url)
         webdav_user = cfg.get("webdav_user", "")
         webdav_pass = cfg.get("webdav_pass", "")
         url = webdav_url.rstrip("/") + "/" + urllib.parse.quote(fname)

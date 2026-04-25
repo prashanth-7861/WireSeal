@@ -45,6 +45,30 @@ class DuckDNSError(Exception):
 
 
 # ---------------------------------------------------------------------------
+# Internal helpers
+# ---------------------------------------------------------------------------
+
+def _redact(url: str) -> str:
+    """Return *url* with the ``token=`` query parameter value replaced by ``***``.
+
+    DNS-03: The DuckDNS API requires the token in the query string (no
+    Authorization header alternative exists per the DuckDNS spec). This helper
+    MUST be used whenever the URL is passed to any logger, audit entry, or
+    error message so the token never appears in logs or proxies.
+
+    Example::
+
+        _redact("https://www.duckdns.org/update?domains=x&token=abc123&ip=1.2.3.4")
+        # -> "https://www.duckdns.org/update?domains=x&token=***&ip=1.2.3.4"
+    """
+    return urllib.parse.re.sub(  # type: ignore[attr-defined]
+        r"((?:^|[&?])token=)[^&]*",
+        r"\1***",
+        url,
+    )
+
+
+# ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 

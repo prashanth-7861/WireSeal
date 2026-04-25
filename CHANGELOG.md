@@ -7,6 +7,193 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.7.14] — 2026-04-24
+
+### Added — Background-service registration (all platforms)
+
+- **WireSeal API server can now run as an OS-managed background service**,
+  surviving terminal close and (optionally) starting at boot. Per-platform
+  implementation:
+  - **Linux** — writes `/etc/systemd/system/wireseal-api.service`
+    (`Type=simple`, `Restart=on-failure`, `User=root`, `NoNewPrivileges`,
+    `ProtectSystem=full`, `ProtectHome=yes`, `PrivateTmp=yes`). Uses
+    `systemctl daemon-reload` and `systemctl enable` for auto-start.
+  - **macOS** — writes `/Library/LaunchDaemons/com.wireseal.api.plist`
+    (`RunAtLoad=true`, `KeepAlive=true`, stdout/err in `/var/log/`). Uses
+    `launchctl bootout` before `bootstrap` only when content changed
+    (avoids spurious reloads).
+  - **Windows** — registers Scheduled Task `WireSeal-API` (`/SC ONSTART
+    /RU SYSTEM /RL HIGHEST`). Avoids `sc.exe create` because Python click
+    doesn't natively respond to SCM control messages — Task Scheduler
+    runs the same `wireseal serve` binary at boot under SYSTEM with the
+    same effective privileges.
+- **CLI sub-group `wireseal service`** — `install`, `uninstall`, `start`,
+  `stop`, `status`. The `install` command accepts `--bind`, `--port`,
+  `--no-autostart`. `status` prints `installed / running / enabled`
+  with green/red checkmarks.
+- **Five HTTP endpoints** (vault-unlock-gated):
+  `GET /api/service/status`, `POST /api/service/install`,
+  `POST /api/service/uninstall`, `POST /api/service/start`,
+  `POST /api/service/stop`. Audit-logged as `service-install` /
+  `service-uninstall`.
+- **Settings → Background Service card** — three indicator pills
+  (Registered, Auto-start, Running) backed by 60-second polling +
+  manual Refresh button. Install button when not installed; Start /
+  Stop + Uninstall pair when installed. Includes an info panel showing
+  on-disk paths per OS (`/etc/systemd/system/...`, `/Library/.../com.wireseal.api.plist`,
+  `Task Scheduler: WireSeal-API`).
+- **Uninstall scripts now drop the API service**:
+  - `scripts/uninstall-linux.sh` — adds `wireseal-api.service` to the
+    `systemctl stop / disable` loop and to the unit-removal list.
+  - `scripts/uninstall-macos.sh` — `launchctl bootout
+    system/com.wireseal.api` + `rm /Library/LaunchDaemons/com.wireseal.api.plist`.
+  - `scripts/uninstall-windows.ps1` — `schtasks /End` + `/Delete /F /TN
+    WireSeal-API`.
+
+### Added — Port policy (blocklist + warn-list + recommended)
+
+- **`_validate_wg_port()`** classifies every port pick into BLOCK / WARN /
+  OK. Wired into `/api/init` AND `/api/change-port` so bad ports are caught
+  before any disk or network side effect.
+- **Blocklist (rejected with 400):** UDP ports for DNS (53), DHCP (67/68),
+  TFTP (69), NTP (123), NetBIOS (137/138), SNMP (161/162), IKE (500),
+  syslog (514), RIP (520), SSDP/UPnP (1900), mDNS (5353), LLMNR (5355),
+  plus port 0. Picking these would break the host or collide with critical
+  services on at least one of Linux/macOS/Windows defaults.
+- **Warn-list (require `confirm_warning: true`):** UDP/443 (QUIC),
+  UDP/4500 (IPsec NAT-T), UDP/3389 (RDP UDP transport), UDP/8080. Plus the
+  privileged range 1-1023. The dashboard surfaces the warning and offers
+  an **"Apply anyway"** button that resubmits with the override flag.
+- **OK by default:** anything 1024-65535 not on either list. WireGuard's
+  default 51820 lands here clean.
+- **`GET /api/port-policy`** — public endpoint (no unlock needed) that
+  returns `{default, min, max, privileged_max, blocked, warnings,
+  recommended}` so the UI can colour-code the input field and show the
+  full block/warn lists in a `<details>` panel.
+- **Settings → Change Port dialog now shows:**
+  - Recommended-port quick-pick chips (51820, 51821, 51822, 4500, 443).
+  - Collapsible "Port restrictions" section listing every blocked + flagged
+    port with the reason.
+  - Orange "Port flagged by policy" callout when the backend returns a
+    400 with a warning, plus "Apply anyway" submit that forwards
+    `confirm_warning: true`.
+- **TCP-only services (22 SSH, 80 HTTP, 25 SMTP, 110 POP3, 3306 MySQL,
+  6379 Redis…) are deliberately NOT blocked** — WireGuard is UDP, so the
+  OS hosts both transports on the same port number without conflict. The
+  only WireGuard-relevant restrictions are UDP services.
+
+### Hardened — Port + endpoint change handlers
+
+- **Pre-render before vault write.** `_h_change_port` now builds the new
+  `wg0.conf` *before* committing the new port to the vault. If the render
+  fails (missing keys, malformed subnet, builder bug) the request returns
+  500 with the vault untouched — no half-applied state.
+- **Bug fix:** `_h_change_port` previously read `state.server["server_ip"]`,
+  which doesn't exist (the canonical key is `state.server["ip"]`). Every
+  port-change call would have raised `KeyError` at runtime. Fixed.
+- **Stricter endpoint validation.** `_validate_endpoint()` now rejects URL
+  schemes (`http://`, `ftp://`), control characters, whitespace inside
+  hostnames, over-long inputs (>255 chars), and out-of-range ports
+  (`host:0`, `host:99999`). Accepts IPv4, bracketed IPv6, hostname/FQDN,
+  with optional `:port` suffix.
+- **Audit-log failures never block a successful response** — wrapped in
+  try/except so a read-only-FS audit log can't roll back a port change.
+- **Catch-all around vault open/save** so a decrypt error returns 500 with
+  a clean message instead of leaking a stack trace.
+
+### Added — Live port change (post-init)
+
+- **`POST /api/change-port`** — full port reconciliation pipeline. Validates
+  range (1–65535), refuses no-op, then: (1) reads peers + keys from the
+  vault, (2) **pre-renders the new wg0.conf with the new `ListenPort` and
+  aborts with 500 if render fails (vault untouched)**, (3) commits the new
+  port to the vault, (4) deploys the rendered config via the platform
+  adapter, (5) calls `apply_firewall_rules(new_port, ...)` so the platform
+  code drops the old `wireseal-wg0-in` rule and opens the new one —
+  `nftables` on Linux, `pfctl` on macOS, `netsh advfirewall` on Windows —
+  (6) re-opens the firewalld zone where applicable, (7) restarts the
+  tunnel via `_reload_wireguard()`. Steps 4-7 capture failures as non-fatal
+  warnings so a partial reconciliation still leaves the vault consistent
+  for the next `wireseal serve`. Audit-logged as `change-port` with old +
+  new values + warnings.
+- **Settings → Server Settings → "Change Port" button.** Modal accepts
+  numeric input, shows the background steps (firewall reconcile, config
+  re-render, tunnel restart) and a yellow callout that existing peers
+  cache the endpoint and must re-scan QR codes after the change.
+- **`/api/update-endpoint` now refuses in client-mode vaults** via
+  `_require_server_mode()` — previously it would silently mutate
+  `state.server` on a vault that has no server keypair.
+- Dashboard `api.changePort(port: number)` client wrapper added to
+  `Dashboard/src/app/api.ts`.
+
+### Added — User-chosen port + endpoint at vault init
+
+- **Init dialog now exposes Subnet, WireGuard Port, and Endpoint Source.**
+  The backend has always accepted `subnet`, `port`, and `endpoint` on
+  `POST /api/init`, but the dashboard only sent `mode` — leaving every
+  install on UDP 51820 + auto-detected public IPv4. The setup form now
+  surfaces all three so users running multiple WireSeal servers (one per
+  device, behind the same NAT/account) can pick non-overlapping ports.
+- **Endpoint preset dropdown (10 sources):** auto-detect public IPv4
+  (recommended), manual IPv4, manual hostname/FQDN, DuckDNS, No-IP /
+  Dynu / FreeDNS, Cloudflare DDNS, LAN IPv4 (LAN-only VPN), public IPv6,
+  Tailscale IPv4, or fully custom `host[:port]`. Auto presets leave the
+  endpoint blank so the backend resolver fills it in; manual presets
+  pre-fill a placeholder and require user input. Validation is
+  client-side first (CIDR format, port 1–65535) with backend re-validation.
+- **Stripped pre-emptive UDP 51820 firewall rule from
+  `install-windows.ps1`.** Previously the installer hardcoded a
+  `WireSeal-WireGuard-UDP-51820` rule before the user picked a port, so a
+  custom port left UDP 51820 open *and* required a second rule. Firewall
+  management is now owned exclusively by the platform adapter
+  (`platform/windows.py:apply_firewall_rules`), which reads the chosen
+  port from the unlocked vault and reconciles `wireseal-wg0-in` at every
+  `wireseal init` / `wireseal serve`.
+
+### Fixed — Client config download
+
+- **`Download config` button now works inside pywebview/WebView2.**
+  Previously the dashboard called `window.open(/api/clients/<n>/config/download)`,
+  which on Windows + WebView2 opened a blank popup and dropped the
+  `Content-Disposition: attachment` response. The handler now `fetch()`es the
+  config in the current document, wraps it in a Blob URL, and triggers a
+  synthetic `<a download>` click — matching the native browser save flow on
+  every platform.
+
+### Added — Uninstall flow (all platforms)
+
+- **`scripts/uninstall-linux.sh`** — removes `/usr/local/bin/wireseal`, the
+  virtualenv, the systemd units (`wireseal.service`, `wireseal-dns.service`),
+  the `wireseal` nftables table, and the `wireseal` sudoers drop-in. Stops the
+  tunnel via `wg-quick down wg0` first. `--purge` also deletes
+  `~/.config/wireseal`.
+- **`scripts/uninstall-macos.sh`** — removes both system + user wrappers, the
+  virtualenv, the `com.wireseal.dns` launchd plist (via `launchctl bootout`
+  before deletion), and flushes the `wireseal` pf anchor. `--purge` also
+  deletes `~/Library/Application Support/WireSeal`.
+- **`scripts/uninstall-windows.ps1`** — stops + removes the
+  `WireGuardTunnel$wg0` service (via `wireguard.exe /uninstalltunnelservice`
+  when the .conf is found), drops the firewall rule, removes the install dir,
+  the virtualenv, and the `C:\Program Files\WireSeal` PATH entry. `-Purge`
+  also deletes `%APPDATA%\WireSeal`.
+- **Reinstall detection in install scripts** — running `install-linux.sh`,
+  `install-macos.sh`, or `install-windows.ps1` against an existing install
+  now detects the prior version and prompts `[r]einstall / [u]ninstall /
+  [c]ancel`. The installers also accept `--uninstall` (Linux/macOS) or
+  `-Uninstall` (Windows) as a passthrough so users have a single discoverable
+  entry point.
+- **`wireseal uninstall` CLI command** — auto-detects the platform and
+  shells out to the matching uninstall script. Accepts `--purge` and
+  `--yes/-y`. Falls back to a clear error message when run from a frozen
+  PyInstaller binary (where the script tree is absent).
+- **Settings → Danger Zone → "Uninstall WireSeal" button** — opens an
+  instructions dialog with OS-detected, copy-to-clipboard commands. By design
+  the dialog never auto-executes the uninstall: it would have to terminate
+  the dashboard server it is running inside, and admin/sudo can't be
+  delegated from the browser context safely.
+
+---
+
 ## [0.7.13] — 2026-04-21
 
 ### Added — Windows installer auto-upgrade

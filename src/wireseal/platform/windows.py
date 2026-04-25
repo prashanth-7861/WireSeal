@@ -1000,3 +1000,97 @@ class WindowsAdapter(AbstractPlatformAdapter):
         if not interface:
             raise SetupError("Cannot detect outbound network interface")
         return interface
+
+    # ------------------------------------------------------------------
+    # API server background-service lifecycle (Task Scheduler).
+    #
+    # Why Task Scheduler instead of `sc.exe create`: a true Windows service
+    # has to respond to SCM control messages (Stop / Pause), which our
+    # Python click app doesn't natively do. Task Scheduler runs the same
+    # `wireseal serve` binary at boot under SYSTEM with -RunLevel Highest,
+    # which is functionally equivalent for a long-lived API server.
+    # ------------------------------------------------------------------
+
+    _API_TASK_NAME = "WireSeal-API"
+
+    def install_api_service(
+        self, bind: str = "127.0.0.1", port: int = 8080,
+        autostart: bool = True,
+    ) -> None:
+        """Register a Scheduled Task that runs `wireseal serve` at boot.
+
+        Args:
+            bind:      Address the dashboard binds to.
+            port:      Dashboard port.
+            autostart: If False, register the task but disable the boot
+                       trigger so user starts it manually via Task Scheduler.
+        """
+        wireseal_exe = shutil.which("wireseal") or r"C:\Program Files\WireSeal\wireseal.cmd"
+        # Build the schtasks command. /SC ONSTART runs at boot, /RU SYSTEM
+        # gives root-equivalent privileges, /RL HIGHEST allows wg-quick.
+        cmd = [
+            "schtasks.exe", "/Create", "/F",
+            "/TN", self._API_TASK_NAME,
+            "/SC", "ONSTART" if autostart else "ONLOGON",
+            "/RU", "SYSTEM",
+            "/RL", "HIGHEST",
+            "/TR", f'"{wireseal_exe}" serve --bind {bind} --port {port}',
+        ]
+        subprocess.run(cmd, check=True, creationflags=_NO_WIN)
+
+        if not autostart:
+            # Disable the trigger so the task is registered but won't fire.
+            subprocess.run(
+                ["schtasks.exe", "/Change", "/TN", self._API_TASK_NAME,
+                 "/DISABLE"],
+                check=False, creationflags=_NO_WIN,
+            )
+
+    def uninstall_api_service(self) -> None:
+        """Delete the Scheduled Task (idempotent)."""
+        subprocess.run(
+            ["schtasks.exe", "/End", "/TN", self._API_TASK_NAME],
+            check=False, creationflags=_NO_WIN, capture_output=True,
+        )
+        subprocess.run(
+            ["schtasks.exe", "/Delete", "/F", "/TN", self._API_TASK_NAME],
+            check=False, creationflags=_NO_WIN, capture_output=True,
+        )
+
+    def start_api_service(self) -> None:
+        subprocess.run(
+            ["schtasks.exe", "/Run", "/TN", self._API_TASK_NAME],
+            check=True, creationflags=_NO_WIN,
+        )
+
+    def stop_api_service(self) -> None:
+        subprocess.run(
+            ["schtasks.exe", "/End", "/TN", self._API_TASK_NAME],
+            check=False, creationflags=_NO_WIN, capture_output=True,
+        )
+
+    def api_service_status(self) -> dict:
+        """Return ``{installed, running, enabled}``.
+
+        ``schtasks /Query /V /FO LIST`` parsing — looking for "Status"
+        (Running/Ready/Disabled) and "Scheduled Task State".
+        """
+        try:
+            out = subprocess.run(
+                ["schtasks.exe", "/Query", "/TN", self._API_TASK_NAME,
+                 "/V", "/FO", "LIST"],
+                capture_output=True, text=True, check=False,
+                creationflags=_NO_WIN,
+            )
+        except Exception:
+            return {"installed": False, "running": False, "enabled": False}
+        if out.returncode != 0:
+            return {"installed": False, "running": False, "enabled": False}
+        text = out.stdout or ""
+        running = bool(re.search(r"Status:\s*Running", text))
+        enabled = "Disabled" not in re.search(
+            r"Scheduled Task State:\s*([^\r\n]+)", text
+        ).group(1) if re.search(
+            r"Scheduled Task State:\s*([^\r\n]+)", text
+        ) else False
+        return {"installed": True, "running": running, "enabled": enabled}

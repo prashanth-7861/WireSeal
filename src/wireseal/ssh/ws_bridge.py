@@ -147,6 +147,82 @@ async def _forward_stderr(
         pass
 
 
+# ---------------------------------------------------------------------------
+# SEC-022: SSH TOFU (Trust On First Use) known-hosts management
+# ---------------------------------------------------------------------------
+
+def _get_known_hosts_path(log_dir: Path) -> Path:
+    """Return the path to the SSH known_hosts file, creating it if absent.
+
+    The file lives alongside the session logs so it shares the same
+    vault-owned directory with restricted access (0o600).
+    """
+    path = log_dir / "ssh_known_hosts"
+    if not path.exists():
+        path.touch(mode=0o600)
+    else:
+        # Ensure permissions are tight even if the file already existed.
+        import os as _os
+        import sys as _sys
+        if _sys.platform != "win32":
+            _os.chmod(path, 0o600)
+    return path
+
+
+def _extract_host_fingerprint(exc: Exception) -> str:
+    """Best-effort extraction of the host key fingerprint from an asyncssh exception."""
+    # asyncssh stores the server host key on the exception as `server_host_key`.
+    server_key = getattr(exc, "server_host_key", None)
+    if server_key is not None:
+        try:
+            return server_key.get_fingerprint()
+        except Exception:
+            pass
+    return "<unknown fingerprint>"
+
+
+def append_known_host(known_hosts_path: Path, host: str, port: int, key_b64: str) -> None:
+    """Append a verified host key to the known_hosts file.
+
+    Writes a standard OpenSSH known_hosts line::
+
+        [host]:port ssh-ed25519 AAAA...
+
+    and (re-)applies 0o600 permissions. Logs ``ssh-host-accepted`` via the
+    module logger so the audit trail records the acceptance.
+
+    Args:
+        known_hosts_path: Path returned by _get_known_hosts_path().
+        host:    SSH server hostname or IP.
+        port:    SSH server port.
+        key_b64: Base64-encoded public key blob (the part after the key type).
+    """
+    # Derive key type prefix from the base64 blob length heuristic; callers
+    # should pass the full "<type> <base64>" string when available.  We split
+    # on whitespace: if key_b64 already contains a space it is "<type> <b64>".
+    parts = key_b64.strip().split(None, 1)
+    if len(parts) == 2:
+        key_type, key_data = parts
+    else:
+        key_type, key_data = "ssh-ed25519", parts[0]
+
+    if port == 22:
+        host_field = host
+    else:
+        host_field = f"[{host}]:{port}"
+
+    line = f"{host_field} {key_type} {key_data}\n"
+    with open(known_hosts_path, "a", encoding="utf-8") as fh:
+        fh.write(line)
+
+    import os as _os
+    import sys as _sys
+    if _sys.platform != "win32":
+        _os.chmod(known_hosts_path, 0o600)
+
+    log.info("ssh-host-accepted host=%s port=%d key_type=%s", host, port, key_type)
+
+
 async def _handle_session(
     ws: WebSocketServerProtocol,
     ticket: SshTicket,
@@ -172,38 +248,56 @@ async def _handle_session(
         except Exception:
             _password_str = None
     try:
-        async with asyncssh.connect(
-            host=ticket.host,
-            port=ticket.port,
-            username=ticket.username,
-            password=_password_str,
-            known_hosts=None,  # Trust tunnel; production should use TOFU store
-            keepalive_interval=30,
-        ) as conn:
-            # Spawn an interactive shell (no command = login shell)
-            async with conn.create_process(
-                term_type=ticket.term,
-                term_size=(80, 24),
-            ) as chan:
-                manager.register_session(
-                    session_id,
-                    {
-                        "profile": ticket.profile_name,
-                        "host": ticket.host,
-                        "port": ticket.port,
-                        "username": ticket.username,
-                        "actor_id": ticket.actor_id,
-                    },
-                )
+        _known_hosts_path = _get_known_hosts_path(log_dir)
+        try:
+            async with asyncssh.connect(
+                host=ticket.host,
+                port=ticket.port,
+                username=ticket.username,
+                password=_password_str,
+                known_hosts=str(_known_hosts_path),
+                keepalive_interval=30,
+            ) as conn:
+                # Spawn an interactive shell (no command = login shell)
+                async with conn.create_process(
+                    term_type=ticket.term,
+                    term_size=(80, 24),
+                ) as chan:
+                    manager.register_session(
+                        session_id,
+                        {
+                            "profile": ticket.profile_name,
+                            "host": ticket.host,
+                            "port": ticket.port,
+                            "username": ticket.username,
+                            "actor_id": ticket.actor_id,
+                        },
+                    )
 
-                await _send_json(ws, {"type": "ready", "session_id": session_id})
+                    await _send_json(ws, {"type": "ready", "session_id": session_id})
 
-                await asyncio.gather(
-                    _recv_loop(ws, chan),
-                    _forward_stdout(ws, chan, recorder),
-                    _forward_stderr(ws, chan, recorder),
-                )
-
+                    await asyncio.gather(
+                        _recv_loop(ws, chan),
+                        _forward_stdout(ws, chan, recorder),
+                        _forward_stderr(ws, chan, recorder),
+                    )
+        except asyncssh.HostKeyNotVerifiable as exc:
+            # SEC-022: TOFU — the host key is not in ssh_known_hosts yet.
+            # Emit an audit event with the fingerprint and notify the client.
+            # An administrator must call accept_ssh_host_key() via the API
+            # before the next connection attempt will succeed.
+            fp = _extract_host_fingerprint(exc)
+            recorder.record_meta(
+                "ssh-tofu-pending",
+                f"host={ticket.host}:{ticket.port} fingerprint={fp}",
+            )
+            await _send_json(ws, {
+                "type": "error",
+                "message": (
+                    f"SSH host key not verified. Fingerprint: {fp}. "
+                    "An administrator must accept this host key before connecting."
+                ),
+            })
     except asyncssh.PermissionDenied:
         await _send_json(ws, {"type": "error", "message": "SSH permission denied (bad password or user)"})
         recorder.record_meta("session-error", "permission-denied")

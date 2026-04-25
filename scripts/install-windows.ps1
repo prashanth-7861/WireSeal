@@ -1,7 +1,7 @@
-#Requires -Version 5.1
+﻿#Requires -Version 5.1
 <#
 .SYNOPSIS
-    WireSeal – Windows setup & launcher
+    WireSeal - Windows setup & launcher
 
 .DESCRIPTION
     Installs prerequisites (Python, WireGuard), creates a virtual environment,
@@ -17,12 +17,68 @@
     WireGuard on Windows uses the official kernel driver (wintun).
 #>
 
+[CmdletBinding()]
+param(
+    [switch]$Uninstall,
+    [switch]$Purge,
+    [switch]$Yes
+)
+
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 $RepoDir   = Split-Path -Parent $PSScriptRoot
 $VenvDir   = Join-Path $RepoDir '.venv'
 $InstallDir = 'C:\Program Files\WireSeal'
+
+# ---------------------------------------------------------------------------
+# Uninstall passthrough - `.\install-windows.ps1 -Uninstall [-Purge] [-Yes]`
+# ---------------------------------------------------------------------------
+if ($Uninstall) {
+    $UninstallScript = Join-Path $PSScriptRoot 'uninstall-windows.ps1'
+    if (-not (Test-Path $UninstallScript)) {
+        Write-Host "[wireseal] ERROR: uninstall-windows.ps1 not found at $UninstallScript" -ForegroundColor Red
+        exit 1
+    }
+    $args = @()
+    if ($Purge) { $args += '-Purge' }
+    if ($Yes)   { $args += '-Yes' }
+    & $UninstallScript @args
+    exit $LASTEXITCODE
+}
+
+# ---------------------------------------------------------------------------
+# Detect existing install - offer reinstall / uninstall / cancel.
+# ---------------------------------------------------------------------------
+$WrapperCmdPath = Join-Path $InstallDir 'wireseal.cmd'
+if ((Test-Path $WrapperCmdPath) -and (Test-Path $VenvDir)) {
+    $installedVer = "unknown"
+    try {
+        $venvWireseal = Join-Path $VenvDir 'Scripts\wireseal.exe'
+        if (Test-Path $venvWireseal) {
+            $verOut = & $venvWireseal --version 2>$null
+            if ($verOut) { $installedVer = ($verOut -split '\s+')[-1] }
+        }
+    } catch { }
+    Write-Host ""
+    Write-Host "[wireseal] Existing install detected (version: $installedVer)." -ForegroundColor Yellow
+    Write-Host "  [r] Reinstall (overwrite venv + wrapper, keep vault)"
+    Write-Host "  [u] Uninstall (run uninstall-windows.ps1)"
+    Write-Host "  [c] Cancel"
+    $choice = Read-Host "Choose [r/u/c]"
+    switch -Regex ($choice) {
+        '^[rR]$' { Write-Host "[wireseal] Proceeding with reinstall..." -ForegroundColor Green }
+        '^[uU]$' {
+            $UninstallScript = Join-Path $PSScriptRoot 'uninstall-windows.ps1'
+            & $UninstallScript
+            exit $LASTEXITCODE
+        }
+        default {
+            Write-Host "[wireseal] Cancelled."
+            exit 0
+        }
+    }
+}
 
 function Write-Info  { param($msg) Write-Host "[wireseal] $msg" -ForegroundColor Green }
 function Write-Warn  { param($msg) Write-Host "[wireseal] $msg" -ForegroundColor Yellow }
@@ -37,7 +93,7 @@ if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administra
     exit 1
 }
 
-Write-Info "Windows $([System.Environment]::OSVersion.Version) – setup starting"
+Write-Info "Windows $([System.Environment]::OSVersion.Version) - setup starting"
 
 # ---------------------------------------------------------------------------
 # 2. Install WireGuard for Windows (official installer via winget)
@@ -57,7 +113,7 @@ if (-not (Test-Path $wgPath)) {
 }
 
 # ---------------------------------------------------------------------------
-# 3. Find or install Python 3.12 – 3.14
+# 3. Find or install Python 3.12 - 3.14
 # ---------------------------------------------------------------------------
 $Python = $null
 $MinMinor = 12
@@ -77,7 +133,7 @@ foreach ($candidate in @('python3.14','python3.13','python3.12','python','py')) 
 }
 
 if (-not $Python) {
-    Write-Info "Python 3.12–3.14 not found. Installing via winget..."
+    Write-Info "Python 3.12-3.14 not found. Installing via winget..."
     if (Get-Command winget -ErrorAction SilentlyContinue) {
         winget install --id Python.Python.3.13 --silent --accept-source-agreements --accept-package-agreements
         $env:PATH += ";$env:LocalAppData\Programs\Python\Python313"
@@ -141,21 +197,15 @@ if ($SysPath -notlike "*$InstallDir*") {
 }
 
 # ---------------------------------------------------------------------------
-# 7. Windows Firewall – open WireGuard UDP port 51820
+# 7. Windows Firewall - deferred to runtime
+#
+# We previously pre-opened UDP 51820 here, but that hardcoded the port and
+# left a stale rule behind when the user picked a different one at vault
+# init. Firewall management is now owned by the platform adapter:
+# `wireseal init` (or `wireseal serve`) reads the chosen port from the
+# unlocked vault and creates/updates `wireseal-wg0-in` accordingly.
 # ---------------------------------------------------------------------------
-$RuleName = 'WireSeal-WireGuard-UDP-51820'
-if (-not (Get-NetFirewallRule -Name $RuleName -ErrorAction SilentlyContinue)) {
-    New-NetFirewallRule -Name $RuleName `
-        -DisplayName 'WireSeal WireGuard (UDP 51820)' `
-        -Direction Inbound `
-        -Protocol UDP `
-        -LocalPort 51820 `
-        -Action Allow `
-        -Profile Any | Out-Null
-    Write-Info "Firewall rule added: UDP 51820 inbound"
-} else {
-    Write-Info "Firewall rule already exists: $RuleName"
-}
+Write-Info "Firewall rule will be added by 'wireseal init' using your chosen port."
 
 # ---------------------------------------------------------------------------
 # 8. Run self-test

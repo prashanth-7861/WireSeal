@@ -14,6 +14,35 @@ import { ClientLayout } from "./ClientLayout";
 
 type VaultState = "loading" | "uninitialized" | "locked" | "unlocked";
 
+// ── Endpoint presets ────────────────────────────────────────────────────────
+// User picks how the endpoint advertised to clients should be derived. "auto"
+// presets leave the field blank — backend will resolve at init time. Manual
+// presets pre-fill or require user to type the value.
+type EndpointPresetKey =
+  | "auto-public-ipv4"
+  | "manual-ipv4"
+  | "manual-hostname"
+  | "duckdns"
+  | "noip"
+  | "cloudflare-ddns"
+  | "lan-ipv4"
+  | "ipv6-public"
+  | "tailscale"
+  | "custom";
+
+const ENDPOINT_PRESETS: { key: EndpointPresetKey; label: string; placeholder?: string; auto?: boolean }[] = [
+  { key: "auto-public-ipv4", label: "Auto-detect public IPv4 (recommended)", auto: true },
+  { key: "manual-ipv4",      label: "Manual IPv4 address",                   placeholder: "203.0.113.42" },
+  { key: "manual-hostname",  label: "Manual hostname / FQDN",                placeholder: "vpn.example.com" },
+  { key: "duckdns",          label: "DuckDNS subdomain",                     placeholder: "myhost.duckdns.org" },
+  { key: "noip",             label: "No-IP / Dynu / FreeDNS hostname",       placeholder: "myhost.ddns.net" },
+  { key: "cloudflare-ddns",  label: "Cloudflare DDNS hostname",              placeholder: "vpn.mydomain.com" },
+  { key: "lan-ipv4",         label: "LAN IPv4 (LAN-only VPN)",               placeholder: "192.168.1.10" },
+  { key: "ipv6-public",      label: "Public IPv6 address",                   placeholder: "[2001:db8::1]" },
+  { key: "tailscale",        label: "Tailscale IPv4",                        placeholder: "100.x.y.z" },
+  { key: "custom",           label: "Custom (host or host:port)",            placeholder: "vpn.example.com:51820" },
+];
+
 export function Layout() {
   return (
     <AppModeProvider>
@@ -33,6 +62,14 @@ function LayoutInner() {
   const [passphraseMode, setPassphraseMode] = useState<"setup" | "unlock">("unlock");
   const [passphrase, setPassphrase] = useState("");
   const [confirmPassphrase, setConfirmPassphrase] = useState("");
+
+  // Server-mode init parameters (only shown when initializing a NEW server vault).
+  // Each WireSeal server picks its own port + advertised endpoint so multiple
+  // devices on the same network/account don't collide.
+  const [initSubnet, setInitSubnet] = useState("10.0.0.0/24");
+  const [initPort, setInitPort] = useState("51820");
+  const [endpointPreset, setEndpointPreset] = useState<EndpointPresetKey>("auto-public-ipv4");
+  const [initEndpoint, setInitEndpoint] = useState("");
   const [showPw, setShowPw] = useState(false);
   const [authError, setAuthError] = useState("");
   const [authLoading, setAuthLoading] = useState(false);
@@ -263,7 +300,38 @@ function LayoutInner() {
         // encrypted vault only — no server keypair, no WireGuard install,
         // no firewall rules, no tunnel service.
         const initMode: "server" | "client" = mode === "client" ? "client" : "server";
-        const result = await api.init(passphrase, { mode: initMode });
+
+        // Build server-mode opts. Validate inputs before hitting the backend so
+        // bad values surface a UI error instead of an opaque 400.
+        const opts: { mode: "server" | "client"; subnet?: string; port?: number; endpoint?: string } = {
+          mode: initMode,
+        };
+        if (initMode === "server") {
+          // Subnet: CIDR-ish sanity check (full validation is server-side).
+          if (initSubnet.trim() && !/^\d{1,3}(\.\d{1,3}){3}\/\d{1,2}$/.test(initSubnet.trim())) {
+            setAuthError("Subnet must be CIDR (e.g. 10.0.0.0/24)");
+            setAuthLoading(false);
+            return;
+          }
+          // Port: 1..65535. WireGuard convention: prefer >=1024 to avoid
+          // privileged-port races, but backend accepts any.
+          const portNum = parseInt(initPort, 10);
+          if (!Number.isFinite(portNum) || portNum < 1 || portNum > 65535) {
+            setAuthError("Port must be 1–65535");
+            setAuthLoading(false);
+            return;
+          }
+          opts.subnet = initSubnet.trim() || undefined;
+          opts.port   = portNum;
+          // Endpoint: only forward when user supplied a manual / preset value.
+          // "auto-public-ipv4" leaves it empty so the backend resolves it.
+          const endpointVal = initEndpoint.trim();
+          if (endpointPreset !== "auto-public-ipv4" && endpointVal) {
+            opts.endpoint = endpointVal;
+          }
+        }
+
+        const result = await api.init(passphrase, opts);
         if (initMode === "server") {
           setInitResult({
             server_ip: result.server_ip ?? "",
@@ -671,6 +739,82 @@ function LayoutInner() {
                           placeholder="Confirm passphrase"
                           disabled={authLoading}
                         />
+                      </div>
+                    )}
+
+                    {/* Server-mode network params — only shown when initializing a NEW server vault. */}
+                    {passphraseMode === "setup" && mode !== "client" && (
+                      <div className="space-y-4 pt-2 border-t border-gray-100">
+                        <p className="text-xs font-medium text-gray-500 uppercase tracking-wide">Network Settings</p>
+
+                        <div className="grid grid-cols-2 gap-3">
+                          <div>
+                            <label className="block text-sm font-medium text-gray-700 mb-1.5">Subnet</label>
+                            <input
+                              type="text"
+                              value={initSubnet}
+                              onChange={(e) => setInitSubnet(e.target.value)}
+                              className="w-full px-3 py-2 border border-gray-300 rounded-lg font-mono text-sm focus:ring-2 focus:ring-blue-500"
+                              placeholder="10.0.0.0/24"
+                              disabled={authLoading}
+                            />
+                            <p className="text-xs text-gray-400 mt-1">RFC1918 CIDR</p>
+                          </div>
+                          <div>
+                            <label className="block text-sm font-medium text-gray-700 mb-1.5">WireGuard Port</label>
+                            <input
+                              type="number"
+                              min={1}
+                              max={65535}
+                              value={initPort}
+                              onChange={(e) => setInitPort(e.target.value)}
+                              className="w-full px-3 py-2 border border-gray-300 rounded-lg font-mono text-sm focus:ring-2 focus:ring-blue-500"
+                              placeholder="51820"
+                              disabled={authLoading}
+                            />
+                            <p className="text-xs text-gray-400 mt-1">UDP, 1–65535</p>
+                          </div>
+                        </div>
+
+                        <div>
+                          <label className="block text-sm font-medium text-gray-700 mb-1.5">Endpoint Source</label>
+                          <select
+                            value={endpointPreset}
+                            onChange={(e) => {
+                              const k = e.target.value as EndpointPresetKey;
+                              setEndpointPreset(k);
+                              const preset = ENDPOINT_PRESETS.find((p) => p.key === k);
+                              // Clear field when switching to an auto-detect preset; keep current value otherwise.
+                              if (preset?.auto) setInitEndpoint("");
+                            }}
+                            className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 bg-white"
+                            disabled={authLoading}
+                          >
+                            {ENDPOINT_PRESETS.map((p) => (
+                              <option key={p.key} value={p.key}>{p.label}</option>
+                            ))}
+                          </select>
+                          {(() => {
+                            const preset = ENDPOINT_PRESETS.find((p) => p.key === endpointPreset);
+                            if (!preset || preset.auto) {
+                              return (
+                                <p className="text-xs text-gray-400 mt-1">
+                                  WireSeal will detect your public IPv4 at init time.
+                                </p>
+                              );
+                            }
+                            return (
+                              <input
+                                type="text"
+                                value={initEndpoint}
+                                onChange={(e) => setInitEndpoint(e.target.value)}
+                                className="w-full mt-2 px-3 py-2 border border-gray-300 rounded-lg font-mono text-sm focus:ring-2 focus:ring-blue-500"
+                                placeholder={preset.placeholder}
+                                disabled={authLoading}
+                              />
+                            );
+                          })()}
+                        </div>
                       </div>
                     )}
 
