@@ -3060,6 +3060,126 @@ def _h_service_stop(req: "_Handler", _groups: tuple) -> dict:
     return {"ok": True, **adapter.api_service_status()}
 
 
+# ---------------------------------------------------------------------------
+# Self-uninstall — fork the platform uninstall script and exit the API
+# process so the script can clean up files this process holds open.
+#
+# Privileged operation:
+#   - Requires unlocked vault (passphrase confirms intent).
+#   - Requires `confirm: "UNINSTALL"` body literal so a CSRF or stray POST
+#     can't trigger destructive cleanup.
+#   - Spawns the uninstall script with `--yes` so it runs non-interactively.
+#   - Schedules the API process to exit ~2 s after responding so the HTTP
+#     200 lands before the server terminates.
+# ---------------------------------------------------------------------------
+def _h_uninstall(req: "_Handler", _groups: tuple) -> dict:
+    _require_unlocked()
+    body = req._json()
+    if body.get("confirm") != "UNINSTALL":
+        raise _ApiError(
+            "POST body must include {\"confirm\": \"UNINSTALL\"} to proceed.",
+            400,
+        )
+    purge = bool(body.get("purge", False))
+
+    import platform as _platform
+    import shutil
+    import threading
+    import time as _time
+    import os as _os
+
+    system = _platform.system()
+    # Resolve the bundled script path relative to the package install. When
+    # running from a PyInstaller frozen binary the scripts live in the
+    # extracted _MEIPASS; when running from source they live at <repo>/scripts.
+    pkg_dir = Path(__file__).resolve().parents[2]
+    scripts_dir = pkg_dir / "scripts"
+
+    if system == "Linux":
+        script = scripts_dir / "uninstall-linux.sh"
+        cmd = ["bash", str(script), "--yes"]
+        if purge:
+            cmd.append("--purge")
+    elif system == "Darwin":
+        script = scripts_dir / "uninstall-macos.sh"
+        cmd = ["bash", str(script), "--yes"]
+        if purge:
+            cmd.append("--purge")
+    elif system == "Windows":
+        script = scripts_dir / "uninstall-windows.ps1"
+        cmd = [
+            "powershell.exe", "-ExecutionPolicy", "Bypass",
+            "-File", str(script), "-Yes",
+        ]
+        if purge:
+            cmd.append("-Purge")
+    else:
+        raise _ApiError(f"Unsupported platform: {system}", 501)
+
+    if not script.exists():
+        raise _ApiError(
+            f"Uninstall script not found at {script}. Frozen-binary "
+            "users should run the OS-native uninstaller from "
+            "Add/Remove Programs / .pkg / .deb instead.",
+            500,
+        )
+
+    interpreter = cmd[0]
+    if not shutil.which(interpreter):
+        raise _ApiError(
+            f"Required interpreter '{interpreter}' not found on PATH.", 500
+        )
+
+    from wireseal.security.audit import AuditLog
+    actor = _session.get("admin_id", "owner")
+    try:
+        AuditLog(_AUDIT_PATH).log(
+            "uninstall", {"system": system, "purge": purge}, actor=actor,
+        )
+    except Exception:
+        pass
+
+    # Spawn the uninstall script DETACHED so it survives this process exit.
+    # On Windows we need DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP so the
+    # child isn't killed when the API process terminates.
+    spawn_kwargs: dict = {
+        "stdin":  subprocess.DEVNULL,
+        "stdout": subprocess.DEVNULL,
+        "stderr": subprocess.DEVNULL,
+        "close_fds": True,
+    }
+    if system == "Windows":
+        DETACHED_PROCESS = 0x00000008
+        CREATE_NEW_PROCESS_GROUP = 0x00000200
+        spawn_kwargs["creationflags"] = (
+            DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP
+        )
+    else:
+        spawn_kwargs["start_new_session"] = True
+
+    try:
+        subprocess.Popen(cmd, **spawn_kwargs)
+    except Exception as exc:
+        raise _ApiError(f"Failed to spawn uninstall script: {exc}", 500)
+
+    # Schedule API exit AFTER the HTTP response is flushed. 2 s is enough
+    # for the response to round-trip; the uninstall script will outlive us.
+    def _delayed_exit() -> None:
+        _time.sleep(2.0)
+        _os._exit(0)
+
+    threading.Thread(target=_delayed_exit, daemon=True).start()
+
+    return {
+        "ok":     True,
+        "system": system,
+        "purge":  purge,
+        "note":   "Uninstall started. The API server is shutting down. "
+                  "Refresh this page after a few seconds — it should fail "
+                  "to connect once the service is gone.",
+    }
+
+
 def _h_port_policy(req: "_Handler", _groups: tuple) -> dict:
     """Public-readable port policy used by the UI to colour-code port input.
 
@@ -5296,6 +5416,7 @@ _ROUTES: list[tuple[str, re.Pattern, Any]] = [
     ("POST",   re.compile(r"^/api/service/uninstall$"),      _h_service_uninstall),
     ("POST",   re.compile(r"^/api/service/start$"),          _h_service_start),
     ("POST",   re.compile(r"^/api/service/stop$"),           _h_service_stop),
+    ("POST",   re.compile(r"^/api/uninstall$"),              _h_uninstall),
     ("POST",   re.compile(r"^/api/rotate-server-keys$"),                    _h_rotate_server_keys),
     # Admin mode
     ("POST",   re.compile(r"^/api/admin/authenticate$"),                 _h_admin_authenticate),

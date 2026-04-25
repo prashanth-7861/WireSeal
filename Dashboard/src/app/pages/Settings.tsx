@@ -106,6 +106,9 @@ export function Settings() {
   // Uninstall
   const [showUninstallDialog, setShowUninstallDialog] = useState(false);
   const [copiedIdx, setCopiedIdx] = useState<number | null>(null);
+  const [uninstallPurge, setUninstallPurge] = useState(false);
+  const [uninstallRunning, setUninstallRunning] = useState(false);
+  const [uninstallDone, setUninstallDone] = useState(false);
   const detectedOs = detectOs();
 
   const [error, setError] = useState("");
@@ -119,6 +122,39 @@ export function Settings() {
     } catch {
       setError("Clipboard write failed — copy manually");
       setSuccess("");
+    }
+  };
+
+  // Server-side uninstall: requests POST /api/uninstall with confirm
+  // sentinel. Backend spawns the platform uninstall script detached and
+  // exits the API process ~2s later. UI flips to "uninstall running" state
+  // because every subsequent fetch will fail (the server is gone).
+  const runUninstall = async () => {
+    if (uninstallRunning || uninstallDone) return;
+    const confirmMsg = uninstallPurge
+      ? "Uninstall WireSeal AND delete vault data? This is irreversible — all vault keys, client configs, and audit history will be lost."
+      : "Uninstall WireSeal? Vault data will be preserved at the OS-default path.";
+    if (!window.confirm(confirmMsg)) return;
+    setUninstallRunning(true);
+    try {
+      const res = await api.uninstall(uninstallPurge);
+      // Backend will exit ~2s after responding. Mark done and surface the
+      // expected disconnection so the user knows what to expect next.
+      setUninstallDone(true);
+      flash(res.note);
+    } catch (e: unknown) {
+      // Two failure modes: (1) backend rejected (auth, validation) — show
+      // the message; (2) the connection dropped because the server already
+      // exited — treat as success because the uninstall is in flight.
+      const msg = e instanceof Error ? e.message : String(e);
+      if (/Failed to fetch|NetworkError|connection/i.test(msg)) {
+        setUninstallDone(true);
+        flash("Uninstall in progress — API server has stopped.");
+      } else {
+        flashError(msg);
+      }
+    } finally {
+      setUninstallRunning(false);
     }
   };
 
@@ -679,19 +715,52 @@ export function Settings() {
 
       {/* Change Port Dialog */}
       {showPortDialog && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
-          <div className="bg-white rounded-lg shadow-xl p-6 w-full max-w-md">
-            <div className="flex items-center gap-3 mb-6">
-              <div className="w-12 h-12 bg-gray-100 rounded-full flex items-center justify-center">
-                <Globe className="w-6 h-6 text-gray-700" />
+        <div
+          className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4"
+          onClick={(e) => {
+            // Click outside dialog dismisses it (ignore clicks on the dialog itself).
+            if (e.target === e.currentTarget && !portLoading) {
+              setShowPortDialog(false);
+              setError("");
+              setNewPort("");
+              setPortWarning(null);
+            }
+          }}
+        >
+          <div className="bg-white rounded-lg shadow-xl w-full max-w-md max-h-[90vh] flex flex-col">
+            {/* Sticky header with X close — solves "cannot close popup" bug. */}
+            <div className="flex items-start justify-between gap-3 p-6 border-b border-gray-100 flex-shrink-0">
+              <div className="flex items-center gap-3">
+                <div className="w-12 h-12 bg-gray-100 rounded-full flex items-center justify-center">
+                  <Globe className="w-6 h-6 text-gray-700" />
+                </div>
+                <div>
+                  <h2 className="text-xl font-semibold text-gray-900">Change WireGuard Port</h2>
+                  <p className="text-sm text-gray-500">UDP, 1-65535. Tunnel restarts.</p>
+                </div>
               </div>
-              <div>
-                <h2 className="text-xl font-semibold text-gray-900">Change WireGuard Port</h2>
-                <p className="text-sm text-gray-500">UDP, 1–65535. Tunnel restarts.</p>
-              </div>
+              <button
+                type="button"
+                onClick={() => {
+                  setShowPortDialog(false);
+                  setError("");
+                  setNewPort("");
+                  setPortWarning(null);
+                }}
+                className="p-1 rounded hover:bg-gray-100 transition-colors flex-shrink-0"
+                disabled={portLoading}
+                aria-label="Close"
+              >
+                <X className="w-5 h-5 text-gray-500" />
+              </button>
             </div>
 
-            <form onSubmit={handleChangePort} className="space-y-4">
+            <form
+              onSubmit={handleChangePort}
+              className="flex flex-col flex-1 min-h-0"
+            >
+              {/* Scrollable body — keeps Apply button visible when content is tall. */}
+              <div className="flex-1 overflow-y-auto p-6 space-y-4">
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-2">New Port</label>
                 <input
@@ -788,7 +857,10 @@ export function Settings() {
                 </div>
               )}
 
-              <div className="flex gap-3 pt-2">
+              </div>
+
+              {/* Sticky footer — Cancel + Apply always visible regardless of body scroll. */}
+              <div className="flex gap-3 p-6 border-t border-gray-100 flex-shrink-0 bg-white rounded-b-lg">
                 <button
                   type="button"
                   onClick={() => { setShowPortDialog(false); setError(""); setNewPort(""); setPortWarning(null); }}
@@ -945,13 +1017,74 @@ export function Settings() {
               <div className="bg-yellow-50 border border-yellow-200 rounded-lg p-3 flex gap-3">
                 <AlertTriangle className="w-5 h-5 text-yellow-700 flex-shrink-0 mt-0.5" />
                 <div className="text-sm text-yellow-900">
-                  <p className="font-medium mb-1">This dialog does not auto-execute.</p>
+                  <p className="font-medium mb-1">Two ways to uninstall:</p>
                   <p>
-                    Uninstalling requires admin/sudo and would terminate the running dashboard
-                    server. Copy a command below and run it in a privileged terminal.
+                    <strong>(1) Run from this dashboard</strong> using the red button below — backend
+                    spawns the platform uninstall script and shuts down the API server. Requires the
+                    server to already be running with the privileges it was installed with (root /
+                    Administrator).
+                  </p>
+                  <p className="mt-1.5">
+                    <strong>(2) Run manually</strong> — copy a command below and execute it in an
+                    elevated terminal. Use this if the run-now path errors out.
                   </p>
                 </div>
               </div>
+
+              {/* Run-from-dashboard control */}
+              {!uninstallDone && (
+                <div className="border border-red-200 bg-red-50 rounded-lg p-4 space-y-3">
+                  <div className="flex items-start gap-3">
+                    <Trash2 className="w-5 h-5 text-red-700 flex-shrink-0 mt-0.5" />
+                    <div className="flex-1">
+                      <p className="font-medium text-red-900">Run uninstall now</p>
+                      <p className="text-xs text-red-800 mt-1">
+                        Spawns <code>scripts/uninstall-{detectedOs === "windows" ? "windows.ps1" : detectedOs === "macos" ? "macos.sh" : "linux.sh"}</code> with <code>--yes</code>, then exits the API server.
+                        The dashboard will go offline.
+                      </p>
+                    </div>
+                  </div>
+                  <label className="flex items-center gap-2 text-sm text-red-900 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={uninstallPurge}
+                      onChange={(e) => setUninstallPurge(e.target.checked)}
+                      disabled={uninstallRunning}
+                      className="rounded border-red-300"
+                    />
+                    Also delete vault data ({detectedOs === "windows"
+                      ? "%APPDATA%\\WireSeal"
+                      : detectedOs === "macos"
+                        ? "~/Library/Application Support/WireSeal"
+                        : "~/.config/wireseal"}) — irreversible
+                  </label>
+                  <button
+                    onClick={runUninstall}
+                    disabled={uninstallRunning}
+                    className="w-full px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700 transition-colors flex items-center justify-center gap-2 disabled:opacity-60"
+                  >
+                    <Trash2 className="w-4 h-4" />
+                    {uninstallRunning
+                      ? "Running..."
+                      : uninstallPurge
+                        ? "Uninstall + Purge Vault"
+                        : "Uninstall (keep vault)"}
+                  </button>
+                </div>
+              )}
+
+              {uninstallDone && (
+                <div className="border border-green-200 bg-green-50 rounded-lg p-4 flex gap-3">
+                  <CheckCircle className="w-5 h-5 text-green-700 flex-shrink-0 mt-0.5" />
+                  <div className="text-sm text-green-900">
+                    <p className="font-medium">Uninstall in progress.</p>
+                    <p className="mt-1">
+                      The API server is shutting down. Close this window — the dashboard will not
+                      reconnect because the service is being removed.
+                    </p>
+                  </div>
+                </div>
+              )}
 
               {UNINSTALL_COMMANDS[detectedOs].map((entry, idx) => (
                 <div key={idx} className="space-y-1.5">

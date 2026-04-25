@@ -396,6 +396,17 @@ export const api = {
       enabled: boolean;
     }>("POST", "/service/stop"),
 
+  // Server-side uninstall — spawns the platform uninstall script and exits
+  // the API process ~2 s after responding. Caller MUST handle the
+  // subsequent connection failure (the dashboard goes offline).
+  uninstall: (purge: boolean = false) =>
+    _fetch<{
+      ok: boolean;
+      system: string;
+      purge: boolean;
+      note: string;
+    }>("POST", "/uninstall", { confirm: "UNINSTALL", purge }),
+
   setPin: (pin: string) =>
     _fetch<{ ok: boolean }>("POST", "/set-pin", { pin }),
 

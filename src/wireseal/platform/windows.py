@@ -1013,37 +1013,67 @@ class WindowsAdapter(AbstractPlatformAdapter):
 
     _API_TASK_NAME = "WireSeal-API"
 
+    def _find_wireseal_launcher(self) -> str:
+        """Return an absolute, schtasks-friendly command for `wireseal serve`.
+
+        Resolution order (most reliable first):
+
+        1. Running from a PyInstaller-frozen binary → use ``sys.executable``
+           directly. The exe IS the wireseal launcher.
+        2. Running from a venv with the console script installed →
+           ``<venv>/Scripts/wireseal.exe`` (preferred over the ``.cmd``
+           shim because Task Scheduler under SYSTEM is flaky with batch
+           wrappers).
+        3. Fallback → ``python.exe -m wireseal.main``.
+        """
+        import sys
+        if getattr(sys, "frozen", False):
+            return f'"{sys.executable}"'
+
+        venv_exe = Path(sys.executable).parent / "wireseal.exe"
+        if venv_exe.exists():
+            return f'"{venv_exe}"'
+
+        return f'"{sys.executable}" -m wireseal.main'
+
     def install_api_service(
         self, bind: str = "127.0.0.1", port: int = 8080,
         autostart: bool = True,
     ) -> None:
         """Register a Scheduled Task that runs `wireseal serve` at boot.
 
-        Args:
-            bind:      Address the dashboard binds to.
-            port:      Dashboard port.
-            autostart: If False, register the task but disable the boot
-                       trigger so user starts it manually via Task Scheduler.
+        Captures schtasks stderr on failure so the dashboard surfaces an
+        actionable message instead of a silent ``CalledProcessError``.
         """
-        wireseal_exe = shutil.which("wireseal") or r"C:\Program Files\WireSeal\wireseal.cmd"
-        # Build the schtasks command. /SC ONSTART runs at boot, /RU SYSTEM
-        # gives root-equivalent privileges, /RL HIGHEST allows wg-quick.
+        launcher = self._find_wireseal_launcher()
+        # /SC ONSTART = at boot. /RU SYSTEM = root-equiv. /RL HIGHEST = wg-quick.
+        # The whole /TR value is one argv element — schtasks parses it.
+        tr_cmd = f"{launcher} serve --bind {bind} --port {port}"
         cmd = [
             "schtasks.exe", "/Create", "/F",
             "/TN", self._API_TASK_NAME,
             "/SC", "ONSTART" if autostart else "ONLOGON",
             "/RU", "SYSTEM",
             "/RL", "HIGHEST",
-            "/TR", f'"{wireseal_exe}" serve --bind {bind} --port {port}',
+            "/TR", tr_cmd,
         ]
-        subprocess.run(cmd, check=True, creationflags=_NO_WIN)
+        res = subprocess.run(
+            cmd, capture_output=True, text=True,
+            creationflags=_NO_WIN,
+        )
+        if res.returncode != 0:
+            err = (res.stderr or res.stdout or "").strip()
+            raise SetupError(
+                f"schtasks /Create failed (exit {res.returncode}): "
+                f"{err or 'no stderr captured'}. Run as Administrator."
+            )
 
         if not autostart:
             # Disable the trigger so the task is registered but won't fire.
             subprocess.run(
                 ["schtasks.exe", "/Change", "/TN", self._API_TASK_NAME,
                  "/DISABLE"],
-                check=False, creationflags=_NO_WIN,
+                check=False, creationflags=_NO_WIN, capture_output=True,
             )
 
     def uninstall_api_service(self) -> None:
@@ -1058,10 +1088,16 @@ class WindowsAdapter(AbstractPlatformAdapter):
         )
 
     def start_api_service(self) -> None:
-        subprocess.run(
+        res = subprocess.run(
             ["schtasks.exe", "/Run", "/TN", self._API_TASK_NAME],
-            check=True, creationflags=_NO_WIN,
+            capture_output=True, text=True, creationflags=_NO_WIN,
         )
+        if res.returncode != 0:
+            err = (res.stderr or res.stdout or "").strip()
+            raise SetupError(
+                f"schtasks /Run failed (exit {res.returncode}): "
+                f"{err or 'no stderr captured'}"
+            )
 
     def stop_api_service(self) -> None:
         subprocess.run(
