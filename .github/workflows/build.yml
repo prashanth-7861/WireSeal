@@ -30,9 +30,11 @@ jobs:
         run: |
           # pygments 2.19.2 — no fix released yet (dev-only, pinned by pip-audit itself)
           # pytest 8.4.2 CVE-2025-71176 — dev-only; fix in 9.x which has breaking changes for our plugin matrix
+          # pip 26.0.1 CVE-2026-3219 — no fix released yet, runner-bundled pip
           pip-audit \
             --ignore-vuln CVE-2026-4539 \
-            --ignore-vuln CVE-2025-71176
+            --ignore-vuln CVE-2025-71176 \
+            --ignore-vuln CVE-2026-3219
       - name: Run unit tests
         run: pytest --tb=short -q -m "not integration"
         env:
