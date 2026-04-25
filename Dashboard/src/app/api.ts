@@ -216,11 +216,39 @@ export interface ClientConfigFull extends ClientConfig {
   config_text: string;
 }
 
+export interface ClientTunnelInterfaceStats {
+  name?: string;
+  public_key?: string;
+  listening_port?: string;
+  fwmark?: string;
+}
+
+export interface ClientTunnelPeerStats {
+  public_key?: string;
+  endpoint?: string;
+  allowed_ips?: string;
+  latest_handshake?: string;
+  transfer?: string;
+  rx_bytes?: number;
+  tx_bytes?: number;
+  persistent_keepalive?: string;
+}
+
+export interface ClientTunnelStats {
+  interface: ClientTunnelInterfaceStats;
+  peer: ClientTunnelPeerStats;
+}
+
 export interface ClientTunnelStatus {
   connected: boolean;
   profile: string | null;
   interface: string;
   wg_output?: string;
+  stats?: ClientTunnelStats;
+  // True when peer has handshaken at least once. False when interface is up
+  // but no peer response (unreachable endpoint, wrong key, NAT-traversal
+  // failure). Undefined when stats are unavailable.
+  handshake_ok?: boolean;
 }
 
 export interface SshSessionInfo {
@@ -505,6 +533,15 @@ export const api = {
 
   clientDeleteConfig: (name: string) =>
     _fetch<{ ok: boolean }>("DELETE", `/client/configs/${encodeURIComponent(name)}`),
+
+  clientUpdateConfig: (name: string, config_text: string) =>
+    _fetch<{
+      ok: boolean;
+      name: string;
+      server_endpoint?: string;
+      interface_ip?: string;
+      updated_at: string;
+    }>("PUT", `/client/configs/${encodeURIComponent(name)}`, { config_text }),
 
   clientTunnelUp: (name: string) =>
     _fetch<{ interface: string; profile: string; status: string }>(

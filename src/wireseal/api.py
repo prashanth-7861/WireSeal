@@ -585,6 +585,23 @@ def _require_server_mode() -> None:
         )
 
 
+def _require_client_mode() -> None:
+    """Reject the request if the current vault is in server mode.
+
+    Client-only endpoints (import/list/update/delete imported configs,
+    bring up/down the wg-client interface) must never execute against a
+    server vault — the server vault has no client_configs and `wg-client`
+    would conflict with the server's wg0 interface.
+    """
+    cache = _session.get("cache")
+    if cache is not None and cache.get("mode") == "server":
+        raise _ApiError(
+            "This operation is not available in server mode. "
+            "Server and client roles are mutually exclusive on a single device.",
+            409,
+        )
+
+
 # ---------------------------------------------------------------------------
 # PIN helpers — encrypt/decrypt passphrase with a short PIN
 # ---------------------------------------------------------------------------
@@ -5026,6 +5043,7 @@ def _h_update_install(req: "_Handler", _groups: tuple) -> dict:
 def _h_client_import_config(req: "_Handler", _groups: tuple) -> dict:
     """POST /api/client/configs — Import a WireGuard .conf into the vault."""
     _require_unlocked()
+    _require_client_mode()
     body = req._json()
     name = body.get("name", "").strip()
     config_text = body.get("config_text", "")
@@ -5067,6 +5085,7 @@ def _h_client_import_config(req: "_Handler", _groups: tuple) -> dict:
 def _h_client_list_configs(req: "_Handler", _groups: tuple) -> dict:
     """GET /api/client/configs — List all imported client configs."""
     _require_unlocked()
+    _require_client_mode()
 
     with _lock:
         vault = _session["vault"]
@@ -5088,6 +5107,7 @@ def _h_client_get_config(req: "_Handler", groups: tuple) -> dict:
     audit-logged.
     """
     _require_unlocked()
+    _require_client_mode()
     name = groups[0]
 
     # Parse ?reveal=... from the request path (query string).
@@ -5131,6 +5151,7 @@ def _h_client_get_config(req: "_Handler", groups: tuple) -> dict:
 def _h_client_delete_config(req: "_Handler", groups: tuple) -> dict:
     """DELETE /api/client/configs/<name> — Delete an imported config."""
     _require_unlocked()
+    _require_client_mode()
     name = groups[0]
 
     with _lock:
@@ -5155,9 +5176,49 @@ def _h_client_delete_config(req: "_Handler", groups: tuple) -> dict:
     return {"ok": True}
 
 
+def _h_client_update_config(req: "_Handler", groups: tuple) -> dict:
+    """PUT /api/client/configs/<name> — Replace the .conf for an existing profile.
+
+    Use case: server admin rotated keys or changed the WireGuard port.
+    Client pastes the new .conf to update without losing the profile.
+    """
+    _require_unlocked()
+    _require_client_mode()
+    name = groups[0]
+
+    body = req._json()
+    config_text = body.get("config_text", "")
+    if not isinstance(config_text, str) or not config_text.strip():
+        raise _ApiError("config_text must be a non-empty string", 400)
+
+    with _lock:
+        vault = _session["vault"]
+        passphrase = _session["passphrase"]
+
+    from wireseal.client.config_store import update_config
+    from wireseal.security.audit import AuditLog
+
+    with vault.open(passphrase) as state:
+        try:
+            meta = update_config(state._data, name, config_text)
+        except KeyError:
+            raise _ApiError(f"Profile '{name}' not found", 404)
+        except ValueError as exc:
+            raise _ApiError(str(exc), 400)
+        vault.save(state, passphrase)
+
+    AuditLog(_VAULT_DIR / "audit.log").log(
+        "client-config-update",
+        {"name": name},
+        actor=_session.get("admin_id", "owner"),
+    )
+    return {"ok": True, "name": name, **meta}
+
+
 def _h_client_tunnel_up(req: "_Handler", groups: tuple) -> dict:
     """POST /api/client/tunnel/up — Bring up the WireGuard client tunnel."""
     _require_unlocked()
+    _require_client_mode()
     name = groups[0]
 
     with _lock:
@@ -5190,6 +5251,7 @@ def _h_client_tunnel_up(req: "_Handler", groups: tuple) -> dict:
 def _h_client_tunnel_down(req: "_Handler", _groups: tuple) -> dict:
     """POST /api/client/tunnel/down — Bring down the WireGuard client tunnel."""
     _require_unlocked()
+    _require_client_mode()
 
     from wireseal.client.tunnel import tunnel_down
     from wireseal.security.audit import AuditLog
@@ -5210,6 +5272,7 @@ def _h_client_tunnel_down(req: "_Handler", _groups: tuple) -> dict:
 def _h_client_tunnel_status(req: "_Handler", _groups: tuple) -> dict:
     """GET /api/client/tunnel/status — Get current tunnel status."""
     _require_unlocked()
+    _require_client_mode()
 
     from wireseal.client.tunnel import tunnel_status
 
@@ -5470,6 +5533,7 @@ _ROUTES: list[tuple[str, re.Pattern, Any]] = [
     ("POST",   re.compile(r"^/api/client/configs$"),                     _h_client_import_config),
     ("GET",    re.compile(r"^/api/client/configs/([^/]+)$"),             _h_client_get_config),
     ("DELETE", re.compile(r"^/api/client/configs/([^/]+)$"),             _h_client_delete_config),
+    ("PUT",    re.compile(r"^/api/client/configs/([^/]+)$"),             _h_client_update_config),
     ("POST",   re.compile(r"^/api/client/tunnel/up/([^/]+)$"),          _h_client_tunnel_up),
     ("POST",   re.compile(r"^/api/client/tunnel/down$"),                _h_client_tunnel_down),
     ("GET",    re.compile(r"^/api/client/tunnel/status$"),              _h_client_tunnel_status),
@@ -5703,6 +5767,7 @@ class _Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):   self._dispatch("POST")
     def do_DELETE(self): self._dispatch("DELETE")
+    def do_PUT(self):    self._dispatch("PUT")
 
 
 # ---------------------------------------------------------------------------

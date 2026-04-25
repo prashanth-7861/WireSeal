@@ -7,6 +7,71 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.7.18] — 2026-04-25
+
+### Hardened — Client mode: stability + state reconciliation
+
+The client side now survives API restarts, manual `wg-quick` invocations,
+crashed config writes, and same-profile reconnects without UI lying.
+
+- **`tunnel_status()` reconciles cache against the kernel.** Previously
+  the dashboard trusted module-level `_state["connected"]` exclusively,
+  so a restarted API process showed "Disconnected" even when the
+  `wg-client` interface was still up. Now `wg show wg-client` is the
+  source of truth — cache is updated to match. Same logic catches
+  external `wg-quick down` (UI flips to disconnected) and external
+  `wg-quick up` (UI adopts the tunnel).
+- **`tunnel_down()` addresses the interface by name, not config path.**
+  If the deployed `.conf` was wiped by a different process or system
+  cleanup, `wg-quick down /etc/wireguard/wg-client.conf` would throw
+  ENOENT. Now uses `wg-quick down wg-client`, which falls back to the
+  canonical config path internally. Also tolerates "Cannot find device"
+  / "No such device" stderr as a successful no-op so a
+  partially-stopped tunnel can be cleared.
+- **`tunnel_up()` allows same-profile reconnect.** Previously
+  reconnecting to the same profile threw "Tunnel already active".
+  Returns `status: "already-connected"` instead so the UI doesn't
+  surface a spurious error on idempotent calls.
+- **Atomic config write.** `_deploy_config()` writes to
+  `wg-client.conf.tmp`, fsyncs, then renames. A disk-full or
+  process-crash mid-write no longer leaves a half-written
+  `wg-client.conf` for the next `wg-quick up` to choke on.
+
+### Added — Client mode: handshake-failed signal
+
+- **`tunnel_status()` now returns `handshake_ok: bool`.** True when the
+  parsed `wg show` output reports a finite `latest handshake: … ago`
+  string. False when the interface is up but no peer response has been
+  received — the typical signature of an unreachable endpoint, wrong
+  server key, or NAT/firewall blocking UDP.
+- **Connect.tsx banner flips amber when handshake fails.** "VPN
+  Connected" → "Tunnel up, no handshake" with hint "Check server
+  reachability + key match." Catches the painful debug case where the
+  tunnel claims to be up but no traffic flows.
+
+### Added — Client mode: edit imported profile
+
+- **`PUT /api/client/configs/<name>`** + Dashboard `api.clientUpdateConfig()`
+  + Edit pencil button next to each profile. Use case: the server admin
+  rotated keys or changed the WireGuard port. Client receives a fresh
+  `.conf`, clicks Edit, pastes the new content, saves. Profile name
+  stays the same; `imported_at` preserved; `updated_at` set to now.
+- Validates the new config (Interface section + Peer + PrivateKey) and
+  rejects a paste that still contains `<redacted>` for PrivateKey.
+- Dispatcher gained a `do_PUT` method to dispatch the new route.
+
+### Added — Cross-mode 409 enforcement on client endpoints
+
+- Server vs client mode are mutually exclusive on a single device. The
+  vault locks the role at init. Until now, only the server endpoints
+  enforced this via `_require_server_mode()` — client endpoints were
+  ungated, so a server-mode vault could call `/api/client/configs` and
+  corrupt state. New `_require_client_mode()` helper applied to all 8
+  client endpoints (`import`, `list`, `get`, `update`, `delete`,
+  `tunnel up/down/status`).
+
+---
+
 ## [0.7.17] — 2026-04-25
 
 ### Fixed — Linux systemd unit name

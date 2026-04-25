@@ -168,3 +168,41 @@ def delete_config(state_data: dict[str, Any], name: str) -> None:
     if name not in configs:
         raise KeyError(f"Profile '{name}' not found")
     del configs[name]
+
+
+def update_config(
+    state_data: dict[str, Any],
+    name: str,
+    config_text: str,
+) -> dict[str, str]:
+    """Replace the stored config_text for an existing profile.
+
+    Use case: server admin changed the WireGuard port or rotated the
+    server keypair. Client receives a new .conf and pastes it here.
+    Preserves the ``imported_at`` timestamp; refreshes endpoint + ip
+    metadata from the new text. Adds ``updated_at``.
+
+    Args:
+        state_data:  Vault state ``_data`` dict (mutated in place).
+        name:        Existing profile name.
+        config_text: New raw .conf content.
+
+    Raises:
+        KeyError:   If ``name`` does not exist.
+        ValueError: If ``config_text`` is missing required sections.
+    """
+    configs = state_data.get("client_configs", {})
+    if name not in configs:
+        raise KeyError(f"Profile '{name}' not found")
+
+    errors = validate_conf(config_text)
+    if errors:
+        raise ValueError(f"Invalid config: {'; '.join(errors)}")
+
+    meta = _parse_conf_metadata(config_text)
+    now = datetime.now(timezone.utc).isoformat()
+    entry = configs[name]
+    entry["config_text"] = config_text
+    entry["updated_at"] = now
+    entry.update(meta)
+    return {"updated_at": now, **meta}
