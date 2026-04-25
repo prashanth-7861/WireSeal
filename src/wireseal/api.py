@@ -3089,11 +3089,25 @@ def _h_uninstall(req: "_Handler", _groups: tuple) -> dict:
     import os as _os
 
     system = _platform.system()
-    # Resolve the bundled script path relative to the package install. When
-    # running from a PyInstaller frozen binary the scripts live in the
-    # extracted _MEIPASS; when running from source they live at <repo>/scripts.
-    pkg_dir = Path(__file__).resolve().parents[2]
-    scripts_dir = pkg_dir / "scripts"
+    # Resolve the bundled script path. Resolution order:
+    #   1. PyInstaller-frozen → ``sys._MEIPASS/scripts`` (set by PyInstaller
+    #      when the bundle is extracted at runtime).
+    #   2. Source checkout → ``<repo>/scripts`` (parents[2] of api.py).
+    #   3. ``WIRESEAL_SCRIPTS_DIR`` env var override (for unusual layouts).
+    import sys as _sys
+    scripts_dir: Path | None = None
+    env_override = _os.environ.get("WIRESEAL_SCRIPTS_DIR")
+    if env_override:
+        scripts_dir = Path(env_override)
+    elif getattr(_sys, "frozen", False):
+        meipass = getattr(_sys, "_MEIPASS", None)
+        if meipass:
+            scripts_dir = Path(meipass) / "scripts"
+    if scripts_dir is None or not scripts_dir.exists():
+        try:
+            scripts_dir = Path(__file__).resolve().parents[2] / "scripts"
+        except (IndexError, OSError):
+            scripts_dir = Path("scripts")
 
     if system == "Linux":
         script = scripts_dir / "uninstall-linux.sh"

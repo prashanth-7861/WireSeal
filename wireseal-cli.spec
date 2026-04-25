@@ -16,6 +16,9 @@ a = Analysis(
     datas=[
         ('src/wireseal/templates', 'wireseal/templates'),
         ('Dashboard/dist',         'dashboard'),
+        # scripts/ — required for `wireseal uninstall` to locate the
+        # platform uninstall script when running from the frozen binary.
+        ('scripts',                'scripts'),
     ],
     hiddenimports=[
         'wireseal.platform.linux',

@@ -7,6 +7,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.7.16] — 2026-04-25
+
+### Fixed — Cross-platform parity for service install + uninstall
+
+The v0.7.15 release patched the Windows service-install bug, but the same
+issues existed on Linux and macOS. Brought every binary to parity:
+
+- **Linux service install** — new `_find_wireseal_launcher()` resolves to
+  `sys.executable` when frozen, `/usr/local/bin/wireseal` when wrapper
+  installed, then any `wireseal` on PATH, and finally `python -m wireseal.main`.
+  Replaces the previous hard-coded `/usr/local/bin/wireseal` fallback that
+  pointed at a non-existent path inside PyInstaller frozen binaries.
+- **macOS service install** — same launcher resolver as Linux, but emits
+  `ProgramArguments` as a list (matches `plistlib` schema). Also handles
+  `~/.local/bin/wireseal` for non-sudo installs.
+- **Linux/macOS service start/stop** — previously used `check=True` which
+  raised an opaque `CalledProcessError` with no detail. Now captures
+  `systemctl` / `launchctl` stderr and raises `SetupError` with the exact
+  exit code + error text — same shape as the Windows fix in v0.7.15.
+- **launchctl bootstrap exit-37 tolerance** — `launchctl bootstrap` returns
+  exit 37 when the daemon is already loaded (idempotent reinstall). No
+  longer treated as fatal.
+- **launchctl kill graceful** — exit nonzero with "Could not find service"
+  is treated as already-stopped (idempotent stop).
+- **`POST /api/uninstall` script discovery** — added 3-tier resolution:
+  (1) `WIRESEAL_SCRIPTS_DIR` env override, (2) PyInstaller `_MEIPASS/scripts`,
+  (3) source `<repo>/scripts`. Frozen binaries can now actually find the
+  bundled uninstall scripts.
+- **PyInstaller spec files** — `wireseal.spec` and `wireseal-cli.spec` now
+  bundle `scripts/` into `_MEIPASS/scripts`, otherwise the frozen binary
+  ships without the platform uninstall scripts.
+
+---
+
 ## [0.7.15] — 2026-04-25
 
 ### Fixed — Change Port dialog overflow

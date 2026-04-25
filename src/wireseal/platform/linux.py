@@ -1147,6 +1147,26 @@ class LinuxAdapter(AbstractPlatformAdapter):
     _API_SERVICE_NAME = "wireseal-api.service"
     _API_SERVICE_PATH = Path("/etc/systemd/system/wireseal-api.service")
 
+    def _find_wireseal_launcher(self) -> str:
+        """Return the absolute command to invoke `wireseal serve`.
+
+        Resolution order:
+          1. PyInstaller-frozen binary → ``sys.executable``
+          2. ``/usr/local/bin/wireseal`` (system wrapper from install script)
+          3. Any ``wireseal`` on PATH
+          4. Fallback → ``<sys.executable> -m wireseal.main``
+        """
+        import sys
+        if getattr(sys, "frozen", False):
+            return sys.executable
+        wrapper = Path("/usr/local/bin/wireseal")
+        if wrapper.exists():
+            return str(wrapper)
+        which = shutil.which("wireseal")
+        if which:
+            return which
+        return f"{sys.executable} -m wireseal.main"
+
     def install_api_service(
         self, bind: str = "127.0.0.1", port: int = 8080,
         autostart: bool = True,
@@ -1154,12 +1174,10 @@ class LinuxAdapter(AbstractPlatformAdapter):
         """Write `/etc/systemd/system/wireseal-api.service` and (optionally)
         enable it at boot.
 
-        Args:
-            bind:      Address the dashboard binds to.
-            port:      Dashboard port.
-            autostart: ``systemctl enable`` the unit so it starts at boot.
+        Captures `systemctl daemon-reload` / `enable` failures and surfaces
+        them as `SetupError` so the dashboard can show an actionable message.
         """
-        wireseal_bin = shutil.which("wireseal") or "/usr/local/bin/wireseal"
+        wireseal_bin = self._find_wireseal_launcher()
         unit = (
             "[Unit]\n"
             "Description=WireSeal dashboard / API server\n"
@@ -1183,13 +1201,34 @@ class LinuxAdapter(AbstractPlatformAdapter):
             "[Install]\n"
             "WantedBy=multi-user.target\n"
         )
-        self._API_SERVICE_PATH.write_text(unit)
-        os.chmod(self._API_SERVICE_PATH, 0o644)
-        subprocess.run(["systemctl", "daemon-reload"], check=False)
-        if autostart:
-            subprocess.run(
-                ["systemctl", "enable", self._API_SERVICE_NAME], check=False
+        try:
+            self._API_SERVICE_PATH.write_text(unit)
+            os.chmod(self._API_SERVICE_PATH, 0o644)
+        except OSError as exc:
+            raise SetupError(
+                f"Failed to write {self._API_SERVICE_PATH}: {exc}. "
+                "Run as root."
             )
+
+        res = subprocess.run(
+            ["systemctl", "daemon-reload"],
+            capture_output=True, text=True,
+        )
+        if res.returncode != 0:
+            raise SetupError(
+                f"systemctl daemon-reload failed: "
+                f"{(res.stderr or '').strip() or 'unknown error'}"
+            )
+        if autostart:
+            res = subprocess.run(
+                ["systemctl", "enable", self._API_SERVICE_NAME],
+                capture_output=True, text=True,
+            )
+            if res.returncode != 0:
+                raise SetupError(
+                    f"systemctl enable failed: "
+                    f"{(res.stderr or '').strip() or 'unknown error'}"
+                )
 
     def uninstall_api_service(self) -> None:
         """Stop, disable, and remove the systemd unit file."""
@@ -1206,14 +1245,26 @@ class LinuxAdapter(AbstractPlatformAdapter):
         subprocess.run(["systemctl", "daemon-reload"], check=False)
 
     def start_api_service(self) -> None:
-        subprocess.run(
-            ["systemctl", "start", self._API_SERVICE_NAME], check=True
+        res = subprocess.run(
+            ["systemctl", "start", self._API_SERVICE_NAME],
+            capture_output=True, text=True,
         )
+        if res.returncode != 0:
+            raise SetupError(
+                f"systemctl start {self._API_SERVICE_NAME} failed: "
+                f"{(res.stderr or '').strip() or 'unknown error'}"
+            )
 
     def stop_api_service(self) -> None:
-        subprocess.run(
-            ["systemctl", "stop", self._API_SERVICE_NAME], check=True
+        res = subprocess.run(
+            ["systemctl", "stop", self._API_SERVICE_NAME],
+            capture_output=True, text=True,
         )
+        if res.returncode != 0:
+            raise SetupError(
+                f"systemctl stop {self._API_SERVICE_NAME} failed: "
+                f"{(res.stderr or '').strip() or 'unknown error'}"
+            )
 
     def api_service_status(self) -> dict:
         """Return ``{installed, running, enabled}`` booleans."""

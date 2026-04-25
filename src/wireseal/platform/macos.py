@@ -871,24 +871,43 @@ class MacOSAdapter(AbstractPlatformAdapter):
     _API_SERVICE_LABEL = "com.wireseal.api"
     _API_SERVICE_PATH = Path("/Library/LaunchDaemons/com.wireseal.api.plist")
 
+    def _find_wireseal_launcher(self) -> list[str]:
+        """Return a `ProgramArguments`-style list (executable + flags only).
+
+        Resolution order:
+          1. PyInstaller-frozen binary → ``[sys.executable]``
+          2. ``/usr/local/bin/wireseal`` (system wrapper)
+          3. ``$HOME/.local/bin/wireseal`` (user wrapper)
+          4. Any ``wireseal`` on PATH
+          5. Fallback → ``[sys.executable, "-m", "wireseal.main"]``
+        """
+        import sys
+        if getattr(sys, "frozen", False):
+            return [sys.executable]
+        for candidate in (
+            "/usr/local/bin/wireseal",
+            f"{os.path.expanduser('~')}/.local/bin/wireseal",
+        ):
+            if os.path.exists(candidate):
+                return [candidate]
+        which = shutil.which("wireseal")
+        if which:
+            return [which]
+        return [sys.executable, "-m", "wireseal.main"]
+
     def install_api_service(
         self, bind: str = "127.0.0.1", port: int = 8080,
         autostart: bool = True,
     ) -> None:
         """Write a LaunchDaemon plist for the WireSeal dashboard.
 
-        Args:
-            bind:      Address the dashboard binds to.
-            port:      Dashboard port.
-            autostart: Set ``RunAtLoad=true`` so it starts at boot.
+        Captures `launchctl bootstrap` failure and surfaces it via SetupError.
         """
-        wireseal_bin = shutil.which("wireseal") or "/usr/local/bin/wireseal"
+        launcher = self._find_wireseal_launcher()
         plist_dict = {
             "Label": self._API_SERVICE_LABEL,
-            "ProgramArguments": [
-                wireseal_bin, "serve",
-                "--bind", bind,
-                "--port", str(port),
+            "ProgramArguments": launcher + [
+                "serve", "--bind", bind, "--port", str(port),
             ],
             "RunAtLoad": bool(autostart),
             "KeepAlive": True,
@@ -896,7 +915,6 @@ class MacOSAdapter(AbstractPlatformAdapter):
             "StandardOutPath":   "/var/log/wireseal-api.log",
         }
         plist_bytes = plistlib.dumps(plist_dict)
-        # Reload only when content actually changed (avoids spurious bootouts).
         content_changed = True
         if self._API_SERVICE_PATH.exists():
             try:
@@ -905,17 +923,30 @@ class MacOSAdapter(AbstractPlatformAdapter):
                 )
             except OSError:
                 content_changed = True
-        atomic_write(self._API_SERVICE_PATH, plist_bytes, mode=0o644)
-        os.chown(self._API_SERVICE_PATH, 0, 0)  # root:wheel
+        try:
+            atomic_write(self._API_SERVICE_PATH, plist_bytes, mode=0o644)
+            os.chown(self._API_SERVICE_PATH, 0, 0)  # root:wheel
+        except OSError as exc:
+            raise SetupError(
+                f"Failed to write {self._API_SERVICE_PATH}: {exc}. Run with sudo."
+            )
+
         if content_changed:
             subprocess.run(
                 ["launchctl", "bootout", f"system/{self._API_SERVICE_LABEL}"],
                 check=False, capture_output=True,
             )
-        subprocess.run(
+        res = subprocess.run(
             ["launchctl", "bootstrap", "system", str(self._API_SERVICE_PATH)],
-            check=False, capture_output=True,
+            capture_output=True, text=True,
         )
+        # bootstrap returns nonzero when the daemon is already loaded — only
+        # treat exit codes other than 0 / 37 (already-loaded) as fatal.
+        if res.returncode not in (0, 37):
+            raise SetupError(
+                f"launchctl bootstrap failed (exit {res.returncode}): "
+                f"{(res.stderr or '').strip() or 'unknown error'}"
+            )
 
     def uninstall_api_service(self) -> None:
         """Stop the LaunchDaemon and remove its plist."""
@@ -927,16 +958,28 @@ class MacOSAdapter(AbstractPlatformAdapter):
             self._API_SERVICE_PATH.unlink()
 
     def start_api_service(self) -> None:
-        subprocess.run(
+        res = subprocess.run(
             ["launchctl", "kickstart", "-k", f"system/{self._API_SERVICE_LABEL}"],
-            check=True, capture_output=True,
+            capture_output=True, text=True,
         )
+        if res.returncode != 0:
+            raise SetupError(
+                f"launchctl kickstart failed (exit {res.returncode}): "
+                f"{(res.stderr or '').strip() or 'unknown error'}"
+            )
 
     def stop_api_service(self) -> None:
-        subprocess.run(
+        # `launchctl kill` returns nonzero when the service isn't running —
+        # not an error from the user's perspective. Surface only true failures.
+        res = subprocess.run(
             ["launchctl", "kill", "TERM", f"system/{self._API_SERVICE_LABEL}"],
-            check=False, capture_output=True,
+            capture_output=True, text=True,
         )
+        if res.returncode != 0 and "Could not find service" not in (res.stderr or ""):
+            raise SetupError(
+                f"launchctl kill failed (exit {res.returncode}): "
+                f"{(res.stderr or '').strip() or 'unknown error'}"
+            )
 
     def api_service_status(self) -> dict:
         """Return ``{installed, running, enabled}``.
