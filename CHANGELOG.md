@@ -7,6 +7,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.7.15] — 2026-04-25
+
+### Fixed — Change Port dialog overflow
+
+- The dialog grew tall enough on small viewports that the Apply / Cancel
+  buttons were pushed off screen and the user could not close the popup
+  at all. Restructured to `max-h-[90vh]` flex column with sticky header
+  (X close button), scrollable body, and sticky footer pinned to the
+  bottom — Apply + Cancel always visible. Click outside the dialog also
+  dismisses now.
+
+### Fixed — Add Service on Windows
+
+- `install_api_service()` previously called `wireseal.cmd` via Task
+  Scheduler under SYSTEM, which silently failed because Task Scheduler
+  is unreliable invoking `.cmd` shims. New `_find_wireseal_launcher()`
+  picks the right entry point: PyInstaller-frozen → `sys.executable`,
+  venv → `Scripts\wireseal.exe`, fallback → `python.exe -m wireseal.main`.
+- `install_api_service` and `start_api_service` now capture schtasks
+  stderr and raise `SetupError` with the exact exit code + error text
+  instead of an opaque `CalledProcessError`.
+
+### Added — Run-uninstall-now from the dashboard
+
+- New `POST /api/uninstall` — requires unlocked vault + `confirm:
+  "UNINSTALL"` body literal. Spawns `scripts/uninstall-{linux,macos,windows}.{sh,ps1}`
+  detached (`DETACHED_PROCESS|CREATE_NEW_PROCESS_GROUP` on Windows,
+  `start_new_session` on Unix), then exits the API process ~2 s after
+  responding so the HTTP 200 lands first and the uninstall script can
+  clean up files this process held open.
+- **Settings → Uninstall dialog now actually uninstalls.** Previously
+  the dialog only displayed copy-paste commands. New red "Uninstall
+  (keep vault) / Uninstall + Purge Vault" button alongside the manual
+  commands. Purge checkbox toggles `--purge` / `-Purge`. Network
+  failure after the click is treated as success because the server is
+  intentionally shutting down.
+- Dashboard `api.uninstall(purge: boolean)` wrapper added.
+
+---
+
 ## [0.7.14] — 2026-04-24
 
 ### Added — Background-service registration (all platforms)
