@@ -1144,8 +1144,12 @@ class LinuxAdapter(AbstractPlatformAdapter):
     # auto-starts at boot when enabled.
     # ------------------------------------------------------------------
 
-    _API_SERVICE_NAME = "wireseal-api.service"
-    _API_SERVICE_PATH = Path("/etc/systemd/system/wireseal-api.service")
+    # User-friendly unit name: `systemctl enable wireseal` works directly.
+    # Legacy installs wrote `wireseal-api.service` — kept for migration.
+    _API_SERVICE_NAME = "wireseal.service"
+    _API_SERVICE_PATH = Path("/etc/systemd/system/wireseal.service")
+    _LEGACY_SERVICE_NAME = "wireseal-api.service"
+    _LEGACY_SERVICE_PATH = Path("/etc/systemd/system/wireseal-api.service")
 
     def _find_wireseal_launcher(self) -> str:
         """Return the absolute command to invoke `wireseal serve`.
@@ -1167,16 +1171,47 @@ class LinuxAdapter(AbstractPlatformAdapter):
             return which
         return f"{sys.executable} -m wireseal.main"
 
+    def _migrate_legacy_unit(self) -> None:
+        """Stop + disable + remove the v0.7.14-v0.7.16 `wireseal-api.service`
+        unit if present. Runs as part of every install so reinstall picks
+        up the new name automatically.
+        """
+        if not self._LEGACY_SERVICE_PATH.exists():
+            return
+        subprocess.run(
+            ["systemctl", "stop", self._LEGACY_SERVICE_NAME],
+            check=False, capture_output=True,
+        )
+        subprocess.run(
+            ["systemctl", "disable", self._LEGACY_SERVICE_NAME],
+            check=False, capture_output=True,
+        )
+        try:
+            self._LEGACY_SERVICE_PATH.unlink()
+        except OSError:
+            pass
+
     def install_api_service(
         self, bind: str = "127.0.0.1", port: int = 8080,
         autostart: bool = True,
     ) -> None:
-        """Write `/etc/systemd/system/wireseal-api.service` and (optionally)
+        """Write `/etc/systemd/system/wireseal.service` and (optionally)
         enable it at boot.
+
+        The unit name is `wireseal.service` so the natural commands work:
+
+            sudo systemctl start  wireseal
+            sudo systemctl stop   wireseal
+            sudo systemctl status wireseal
+            sudo systemctl enable wireseal
+
+        Legacy installs (v0.7.14-v0.7.16) wrote `wireseal-api.service` —
+        `_migrate_legacy_unit()` removes it on every reinstall.
 
         Captures `systemctl daemon-reload` / `enable` failures and surfaces
         them as `SetupError` so the dashboard can show an actionable message.
         """
+        self._migrate_legacy_unit()
         wireseal_bin = self._find_wireseal_launcher()
         unit = (
             "[Unit]\n"
@@ -1231,17 +1266,25 @@ class LinuxAdapter(AbstractPlatformAdapter):
                 )
 
     def uninstall_api_service(self) -> None:
-        """Stop, disable, and remove the systemd unit file."""
-        subprocess.run(
-            ["systemctl", "stop", self._API_SERVICE_NAME],
-            check=False, capture_output=True,
-        )
-        subprocess.run(
-            ["systemctl", "disable", self._API_SERVICE_NAME],
-            check=False, capture_output=True,
-        )
-        if self._API_SERVICE_PATH.exists():
-            self._API_SERVICE_PATH.unlink()
+        """Stop, disable, and remove the systemd unit file. Also drops the
+        legacy `wireseal-api.service` if present so users upgrading from
+        v0.7.14-v0.7.16 don't end up with both units installed.
+        """
+        for name in (self._API_SERVICE_NAME, self._LEGACY_SERVICE_NAME):
+            subprocess.run(
+                ["systemctl", "stop", name],
+                check=False, capture_output=True,
+            )
+            subprocess.run(
+                ["systemctl", "disable", name],
+                check=False, capture_output=True,
+            )
+        for path in (self._API_SERVICE_PATH, self._LEGACY_SERVICE_PATH):
+            if path.exists():
+                try:
+                    path.unlink()
+                except OSError:
+                    pass
         subprocess.run(["systemctl", "daemon-reload"], check=False)
 
     def start_api_service(self) -> None:

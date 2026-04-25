@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.7.17] — 2026-04-25
+
+### Fixed — Linux systemd unit name
+
+- **Renamed `wireseal-api.service` → `wireseal.service`.** Users who tried
+  `sudo systemctl enable wireseal` got `Failed to enable unit: Unit file
+  wireseal.service does not exist` because the unit was registered under
+  `wireseal-api.service`. The new name matches the binary, so all four
+  natural commands work without surprise:
+
+      sudo systemctl start  wireseal
+      sudo systemctl stop   wireseal
+      sudo systemctl status wireseal
+      sudo systemctl enable wireseal
+
+- **Auto-migration on reinstall.** `_migrate_legacy_unit()` runs at the
+  start of `install_api_service()` to stop, disable, and remove the legacy
+  `wireseal-api.service` so users upgrading from v0.7.14-v0.7.16 don't end
+  up with two units.
+- **Uninstall handles both names.** `uninstall_api_service()` now stops +
+  disables + removes both `wireseal.service` and `wireseal-api.service`.
+- **Settings UI hint** — Background Service info panel now shows the new
+  path and the four `systemctl` commands users can run manually.
+- **`uninstall-linux.sh`** already handled both names — no change needed.
+
+---
+
 ## [0.7.16] — 2026-04-25
 
 ### Fixed — Cross-platform parity for service install + uninstall

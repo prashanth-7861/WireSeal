@@ -543,10 +543,14 @@ export function Settings() {
           <div className="bg-blue-50 border border-blue-200 rounded-lg p-3 text-xs text-blue-900">
             <p className="font-medium mb-1">Where this lives on disk:</p>
             <ul className="list-disc list-inside space-y-0.5 font-mono">
-              <li>Linux: <code>/etc/systemd/system/wireseal-api.service</code></li>
+              <li>Linux: <code>/etc/systemd/system/wireseal.service</code></li>
               <li>macOS: <code>/Library/LaunchDaemons/com.wireseal.api.plist</code></li>
               <li>Windows: Task Scheduler task <code>WireSeal-API</code> (run as SYSTEM)</li>
             </ul>
+            <p className="font-medium mt-2 mb-1">Manual control (Linux):</p>
+            <pre className="text-[11px]">{`sudo systemctl start  wireseal
+sudo systemctl stop   wireseal
+sudo systemctl status wireseal`}</pre>
           </div>
         </div>
       </div>
