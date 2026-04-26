@@ -7,6 +7,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.7.21] — 2026-04-26
+
+### Fixed — Fresh Start failed with `challenge_token is required`
+
+- `POST /api/fresh-start` requires a `challenge_token` per SEC-002 to
+  block CSRF-driven vault destruction. The token was written to disk by
+  `POST /api/fresh-start/challenge` and could only be read by a process
+  with local filesystem access — the dashboard JS could not. Result:
+  every Fresh-Start click from the dashboard returned 400.
+- **New endpoint `GET /api/fresh-start/challenge-token`** returns the
+  written token via HTTP, but only when the request is (a) same-origin,
+  AND (b) from a loopback IP (`127.0.0.1` / `::1`). Both gates together
+  preserve the original threat model: a cross-origin browser CSRF still
+  cannot read it (same-origin check fails), and a remote network
+  attacker cannot reach 127.0.0.1 in the first place. The dashboard,
+  bound to localhost over the same origin, satisfies both.
+- **Dashboard `api.freshStart()` rewritten** as a 3-step async flow:
+  challenge → read-token → fresh-start-with-token. Single user click,
+  same UX, no token plumbing visible.
+- This unblocks the user-reported flow: server-mode vault → click Fresh
+  Start → vault destroyed → mode picker → select Client → ClientLayout.
+  Bug 1 ("Client mode redirects to server") was a downstream symptom of
+  this Fresh-Start failure — Bug 2 fix unblocks Bug 1.
+
+### Fixed — About page showed stale "v0.7.8"
+
+- `Dashboard/src/app/pages/About.tsx` had `CURRENT_VERSION = "0.7.8"`
+  hardcoded since v0.7.8. Replaced with a live `useEffect` fetch from
+  `GET /api/health` (now includes a `version` field). Falls back to
+  "unknown" on transient network failure.
+- `_h_health()` returns `version` from `wireseal.__version__`. Six-key
+  schema test in `tests/security/test_api_hardening.py` updated to
+  include the new field.
+
+---
+
 ## [0.7.20] — 2026-04-26
 
 ### Fixed — Misleading "switch modes from sidebar" subtitle

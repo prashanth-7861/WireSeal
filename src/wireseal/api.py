@@ -1009,11 +1009,16 @@ def _h_health(req: "_Handler", _groups: tuple) -> dict:
     """Lightweight health endpoint for monitoring — no auth, no subprocess."""
     import time
     uptime = int(time.monotonic() - _server_start_time) if _server_start_time else 0
+    try:
+        from wireseal import __version__ as _wireseal_version
+    except Exception:
+        _wireseal_version = "unknown"
     return {
         "status": "ok",
         "vault_initialized": _VAULT_PATH.exists(),
         "vault_locked": _session["vault"] is None,
         "uptime_seconds": uptime,
+        "version": _wireseal_version,
     }
 
 
@@ -2517,6 +2522,51 @@ def _h_terminate(req: "_Handler", _groups: tuple) -> dict:
         raise _ApiError("Failed to stop WireGuard interface.", 500)
     except FileNotFoundError:
         raise _ApiError("wg-quick not found — is WireGuard installed?", 500)
+
+
+def _h_fresh_start_challenge_read(req: "_Handler", _groups: tuple) -> dict:
+    """Return the fresh-start challenge token from disk.
+
+    GET /api/fresh-start/challenge-token
+
+    Original SEC-002 design required the caller to read the challenge
+    file from the local filesystem — that ruled out the dashboard JS
+    (no FS access) and forced fresh-start to be CLI-only. The dashboard
+    then ran fresh-start with no token and got 400.
+
+    This endpoint re-exposes the token through HTTP, but ONLY when the
+    request originates from the local loopback interface AND passes the
+    same-origin check. A cross-origin browser CSRF cannot reach a
+    same-origin endpoint by definition; a remote network attacker can't
+    bind to 127.0.0.1 from outside. Both gates together preserve the
+    "physical/admin filesystem access" property that SEC-002 wanted.
+    """
+    _require_same_origin(req)
+
+    # Loopback-only — refuse if the connection came from elsewhere.
+    client_ip = req.client_address[0] if req.client_address else ""
+    if client_ip not in ("127.0.0.1", "::1", "localhost"):
+        raise _ApiError(
+            "Fresh-start token is only readable from the local machine.",
+            403,
+        )
+
+    path = _fresh_start_challenge_path()
+    if not path.exists():
+        raise _ApiError(
+            "No challenge issued. POST /api/fresh-start/challenge first.",
+            404,
+        )
+
+    try:
+        raw = path.read_text(encoding="ascii").strip().splitlines()
+    except OSError as exc:
+        raise _ApiError(f"Failed to read challenge file: {exc}", 500)
+    if not raw:
+        raise _ApiError("Challenge file is empty.", 500)
+
+    token = raw[0]
+    return {"ok": True, "challenge_token": token}
 
 
 def _h_fresh_start_challenge(req: "_Handler", _groups: tuple) -> dict:
@@ -5483,8 +5533,9 @@ _ROUTES: list[tuple[str, re.Pattern, Any]] = [
     ("POST",   re.compile(r"^/api/change-passphrase$"),      _h_change_passphrase),
     ("POST",   re.compile(r"^/api/start$"),                  _h_start_server),
     ("POST",   re.compile(r"^/api/terminate$"),              _h_terminate),
-    ("POST",   re.compile(r"^/api/fresh-start/challenge$"),  _h_fresh_start_challenge),
-    ("POST",   re.compile(r"^/api/fresh-start$"),            _h_fresh_start),
+    ("POST",   re.compile(r"^/api/fresh-start/challenge$"),         _h_fresh_start_challenge),
+    ("GET",    re.compile(r"^/api/fresh-start/challenge-token$"),   _h_fresh_start_challenge_read),
+    ("POST",   re.compile(r"^/api/fresh-start$"),                   _h_fresh_start),
     ("POST",   re.compile(r"^/api/update-endpoint$"),        _h_update_endpoint),
     ("POST",   re.compile(r"^/api/change-port$"),            _h_change_port),
     ("GET",    re.compile(r"^/api/port-policy$"),            _h_port_policy),

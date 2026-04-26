@@ -1,4 +1,5 @@
-import { useState, useCallback } from "react";
+import { useState, useCallback, useEffect } from "react";
+import { api } from "../api";
 import {
   Shield, Lock, Key, Layers, Github, Terminal, Globe, ExternalLink, User,
   RefreshCw, CheckCircle, AlertTriangle, ArrowUpRight, Heart, BookOpen,
@@ -7,7 +8,8 @@ import {
 
 /* ───────────────────────── Constants ───────────────────────── */
 
-const CURRENT_VERSION = "0.7.8";
+// Fallback when /api/health is unreachable; usually overwritten on mount.
+const FALLBACK_VERSION = "unknown";
 const GITHUB_URL = "https://github.com/prashanth-7861/WireSeal";
 
 const FEATURES = [
@@ -331,6 +333,15 @@ function useAutoUpdate() {
 export function About() {
   const update = useAutoUpdate();
   const [changelogExpanded, setChangelogExpanded] = useState(false);
+  // Live version from /api/health — overrides FALLBACK_VERSION once fetched.
+  const [currentVersion, setCurrentVersion] = useState<string>(FALLBACK_VERSION);
+  useEffect(() => {
+    let alive = true;
+    api.health().then((h) => {
+      if (alive && h.version) setCurrentVersion(h.version);
+    }).catch(() => { /* keep fallback */ });
+    return () => { alive = false; };
+  }, []);
   const visibleChangelog = changelogExpanded ? CHANGELOG : CHANGELOG.slice(0, 3);
 
   return (
@@ -353,7 +364,7 @@ export function About() {
           <div>
             <h2 className="text-2xl font-bold">WireSeal</h2>
             <p className="text-blue-200 text-sm">Secure · Automated · Cross-platform</p>
-            <p className="text-blue-300/70 text-xs mt-0.5 font-mono">v{CURRENT_VERSION}</p>
+            <p className="text-blue-300/70 text-xs mt-0.5 font-mono">v{currentVersion}</p>
           </div>
         </div>
         <p className="text-blue-100 leading-relaxed max-w-xl">
@@ -390,7 +401,7 @@ export function About() {
         {update.state === "up-to-date" && (
           <div className="mt-4 flex items-center gap-2 bg-green-500/20 border border-green-400/30 rounded-lg px-4 py-2.5 text-sm">
             <CheckCircle className="w-4 h-4 text-green-300 flex-shrink-0" />
-            <span className="text-green-100">You're on the latest version (v{CURRENT_VERSION}).</span>
+            <span className="text-green-100">You're on the latest version (v{currentVersion}).</span>
           </div>
         )}
         {update.state === "update-available" && update.info && (
@@ -400,7 +411,7 @@ export function About() {
                 <AlertTriangle className="w-4 h-4 text-amber-300 flex-shrink-0" />
                 <span className="text-amber-100">
                   Update available: <strong>v{update.info.latestVersion}</strong>
-                  <span className="text-amber-200/60 ml-1">(you have v{CURRENT_VERSION})</span>
+                  <span className="text-amber-200/60 ml-1">(you have v{currentVersion})</span>
                 </span>
               </div>
               <div className="flex items-center gap-2 ml-3 flex-shrink-0">

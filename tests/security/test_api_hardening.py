@@ -89,11 +89,15 @@ def test_health_uptime_is_zero_before_serve_starts() -> None:
 def test_health_returns_expected_schema() -> None:
     api._server_start_time = time.monotonic()
     result = api._h_health(None, ())
+    # `version` was added in v0.7.21 so the dashboard About page can render
+    # the live version instead of a stale hardcoded constant. The other
+    # five keys remain the original SEC-002 contract.
     assert set(result.keys()) == {
         "status",
         "vault_initialized",
         "vault_locked",
         "uptime_seconds",
+        "version",
     }
 
 

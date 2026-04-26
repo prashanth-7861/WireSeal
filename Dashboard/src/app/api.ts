@@ -356,8 +356,26 @@ export const api = {
   terminate: () =>
     _fetch<{ ok: boolean }>("POST", "/terminate"),
 
-  freshStart: () =>
-    _fetch<{ ok: boolean }>("POST", "/fresh-start", { confirm: "CONFIRM" }),
+  // Three-step fresh-start flow:
+  //   1. POST /fresh-start/challenge   — backend writes a token to disk
+  //   2. GET  /fresh-start/challenge-token — read it back (loopback + same-origin)
+  //   3. POST /fresh-start             — submit token + confirm sentinel
+  //
+  // The detour through the disk-written token is SEC-002: a cross-origin
+  // browser CSRF can hit step 1 but is blocked at step 2 (same-origin) and
+  // a remote attacker can't reach 127.0.0.1 in the first place. The
+  // dashboard, running on the same machine over loopback, passes both
+  // gates and gets to call step 3.
+  freshStart: async (): Promise<{ ok: boolean }> => {
+    await _fetch<{ ok: boolean }>("POST", "/fresh-start/challenge");
+    const tokRes = await _fetch<{ ok: boolean; challenge_token: string }>(
+      "GET", "/fresh-start/challenge-token"
+    );
+    return _fetch<{ ok: boolean }>("POST", "/fresh-start", {
+      confirm: "CONFIRM",
+      challenge_token: tokRes.challenge_token,
+    });
+  },
 
   updateEndpoint: (endpoint?: string) =>
     _fetch<{ ok: boolean; endpoint: string }>("POST", "/update-endpoint", { endpoint }),
@@ -516,8 +534,8 @@ export const api = {
   restoreBackup: (backup_path: string, passphrase: string): Promise<{ ok: boolean; message: string }> =>
     _fetch<{ ok: boolean; message: string }>("POST", "/backup/restore", { backup_path, passphrase }),
 
-  health: (): Promise<{ status: string; vault_initialized: boolean; vault_locked: boolean; uptime_seconds: number }> =>
-    _fetch<{ status: string; vault_initialized: boolean; vault_locked: boolean; uptime_seconds: number }>("GET", "/health"),
+  health: (): Promise<{ status: string; vault_initialized: boolean; vault_locked: boolean; uptime_seconds: number; version?: string }> =>
+    _fetch<{ status: string; vault_initialized: boolean; vault_locked: boolean; uptime_seconds: number; version?: string }>("GET", "/health"),
 
   // ── Client mode — config management + tunnel ──────────────────────────────
   clientListConfigs: () =>
