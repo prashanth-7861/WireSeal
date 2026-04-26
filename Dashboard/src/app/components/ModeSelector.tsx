@@ -87,7 +87,7 @@ export function ModeSelector() {
           <ArrowRight className="w-5 h-5" />
         </button>
 
-        <p className="text-blue-400/30 text-xs">You can switch modes anytime from the sidebar</p>
+        <p className="text-blue-400/30 text-xs">Mode is locked at vault init. To switch later, Fresh-Start the vault.</p>
       </div>
     </div>
   );

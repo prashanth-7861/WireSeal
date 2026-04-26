@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.7.20] — 2026-04-26
+
+### Fixed — Misleading "switch modes from sidebar" subtitle
+
+- ModeSelector subtitle said *"You can switch modes anytime from the
+  sidebar"* — incorrect since v0.7.19 removed the Switch button (it
+  silently flipped back to vault.mode). Replaced with **"Mode is locked
+  at vault init. To switch later, Fresh-Start the vault."**
+
+This is the only behavioural change. v0.7.19 client-mode flow is verified
+working in both dev (`vite dev` against `wireseal serve --no-gui`) and the
+frozen Windows binary (`WireSeal.exe serve --no-gui` against a fresh
+`USERPROFILE`-rooted vault dir): mode picker → Client → passphrase setup
+→ `POST /api/init {mode: "client"}` → 200 → `ClientLayout` renders with
+Connect/Terminal/Settings/About sidebar, no Switch button.
+
+If you previously saw "client mode redirects to server" on v0.7.19,
+the cause was an existing **server-mode vault** from v0.7.18 or earlier:
+the vault locks the role at init, so unlocking surfaces the original
+mode regardless of localStorage. Fresh-Start (Settings → Danger Zone)
+destroys the vault and lets you pick the other mode at the next launch.
+
+---
+
 ## [0.7.19] — 2026-04-25
 
 ### Fixed — "Switch mode" button silently flipped back to vault mode

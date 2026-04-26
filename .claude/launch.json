@@ -8,6 +8,18 @@
       "port": 8080
     },
     {
+      "name": "wireseal-server-fresh",
+      "runtimeExecutable": "python",
+      "runtimeArgs": ["-c", "import os, sys; os.environ['USERPROFILE']=r'E:\\wireseal-test-home'; os.environ['HOME']=r'E:\\wireseal-test-home'; os.makedirs(os.environ['USERPROFILE'], exist_ok=True); sys.path.insert(0,'src'); from wireseal.api import serve; serve(host='127.0.0.1', port=8090, gui=False)"],
+      "port": 8090
+    },
+    {
+      "name": "wireseal-binary-test",
+      "runtimeExecutable": "C:\\Windows\\System32\\cmd.exe",
+      "runtimeArgs": ["/c", "set USERPROFILE=E:\\wireseal-test-home && set HOME=E:\\wireseal-test-home && C:\\Users\\mudig\\AppData\\Local\\Temp\\v0.7.19-zip\\ext\\WireSeal\\WireSeal.exe serve --no-gui --port 8091"],
+      "port": 8091
+    },
+    {
       "name": "pytest (unit tests)",
       "runtimeExecutable": "python",
       "runtimeArgs": ["-m", "pytest", "-m", "not integration", "-q"],
