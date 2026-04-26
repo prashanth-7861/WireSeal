@@ -66,13 +66,11 @@ export function ClientLayout({ onLock, onSwitchMode }: ClientLayoutProps) {
         </div>
 
         <div className="p-2 border-t border-gray-100 space-y-0.5">
-          <button
-            onClick={onSwitchMode}
-            className="flex items-center gap-3 px-3 py-2.5 rounded-lg w-full text-gray-500 hover:bg-gray-100 hover:text-gray-700 transition-colors text-sm"
-          >
-            <ArrowLeftRight className="w-4 h-4" />
-            <span>Switch to Server</span>
-          </button>
+          {/* Removed "Switch to Server" — server vs client roles are locked
+              to the vault at init. clearMode() would just re-sync to
+              vault.mode and flip back, leaving the user stuck. To switch
+              roles, run Fresh-Start (Settings) which destroys the vault
+              and lets the user re-init in the other mode. */}
           <button
             onClick={onLock}
             className="flex items-center gap-3 px-3 py-2.5 rounded-lg w-full text-gray-500 hover:bg-gray-100 hover:text-gray-700 transition-colors text-sm"

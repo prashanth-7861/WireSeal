@@ -523,8 +523,14 @@ class WindowsAdapter(AbstractPlatformAdapter):
             ["sc.exe", "query", service_name],
             shell=False, capture_output=True, creationflags=_NO_WIN,
         )
-        if existing.returncode != 0:
-            # Install the tunnel service (creates WireGuardTunnel$wg0 and triggers DPAPI encryption)
+        newly_installed = existing.returncode != 0
+        if newly_installed:
+            # Install the tunnel service (creates WireGuardTunnel$wg0 and
+            # triggers DPAPI encryption). NOTE: `wireguard.exe
+            # /installtunnelservice` STARTS the service immediately as a
+            # side effect — `sc.exe config start=demand` only affects
+            # FUTURE boots. We immediately stop it below so the user is
+            # the one who decides when the tunnel comes up.
             subprocess.run(
                 [str(WG_EXE), "/installtunnelservice", str(config_path)],
                 shell=False,
@@ -546,6 +552,18 @@ class WindowsAdapter(AbstractPlatformAdapter):
             capture_output=True,
             creationflags=_NO_WIN,
         )
+
+        # If we just installed the service, stop it immediately. The
+        # registration stays so `sc.exe start` works on user demand, but
+        # the tunnel itself does not run until the Start button is hit.
+        if newly_installed:
+            subprocess.run(
+                ["sc.exe", "stop", service_name],
+                shell=False,
+                check=False,  # ERROR 1062 = not started, treat as success
+                capture_output=True,
+                creationflags=_NO_WIN,
+            )
 
     def disable_tunnel_service(self, interface: str = "wg0") -> None:
         """Stop and uninstall the WireGuard tunnel service.

@@ -7,6 +7,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.7.19] — 2026-04-25
+
+### Fixed — "Switch mode" button silently flipped back to vault mode
+
+- **Removed the misleading "Switch to Client" / "Switch to Server" sidebar
+  buttons** from both `Layout.tsx` (server) and `ClientLayout.tsx` (client).
+  They called `clearMode()` then `navigate(...)`, which cleared the
+  localStorage mode hint. The next render saw `mode === null` so
+  `ModeSelector` rendered. The user picked the OTHER mode → `setMode(...)`
+  → next `probeVault()` re-synced from the vault → role flipped right back
+  to the original. Result: clicking "Switch to Client" appeared to do
+  nothing on a server vault, leaving users confused.
+- **Server vs client roles are locked at vault init.** Switching requires
+  Fresh-Start (Settings → Danger Zone → Fresh Start), which destroys the
+  vault and lets the user re-init in the other mode. Sidebar Switch
+  button removed entirely on both layouts so the action that can't
+  succeed is no longer offered.
+
+### Fixed — Windows tunnel auto-started after vault init
+
+- **`enable_tunnel_service()` now stops the tunnel immediately after
+  installing it.** `wireguard.exe /installtunnelservice` STARTS the
+  service as a side effect — `sc.exe config start=demand` only affects
+  *future* boots, not the current session. Newly-installed servers
+  therefore had a running WireGuard tunnel before the user clicked Start
+  on the dashboard. The fix issues `sc.exe stop` after install + config
+  on the freshly-installed-only path, so the user's first interaction
+  decides when the tunnel comes up. Linux + macOS were already correct
+  (Linux `enable_tunnel_service` is a no-op; macOS writes the plist with
+  `RunAtLoad=False` and never bootstraps).
+
+---
+
 ## [0.7.18] — 2026-04-25
 
 ### Hardened — Client mode: stability + state reconciliation

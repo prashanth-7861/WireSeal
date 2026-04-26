@@ -1073,13 +1073,12 @@ function LayoutInner() {
         </div>
 
         <div className="p-2 border-t border-gray-100 space-y-1">
-          <button
-            onClick={() => { clearMode(); navigate("/client"); }}
-            className="flex items-center gap-3 px-3 py-2.5 rounded-lg w-full text-gray-500 hover:bg-gray-100 hover:text-gray-700 transition-colors text-sm"
-          >
-            <ArrowLeftRight className="w-4 h-4" />
-            <span>Switch to Client</span>
-          </button>
+          {/* Removed "Switch to Client" — server vs client roles are locked
+              to the vault at init. clearing localStorage mode would just
+              re-sync to vault.mode and flip back, leaving the user stuck.
+              To switch roles, the user must Fresh-Start (Settings → Danger
+              Zone) which destroys the vault and lets them re-init in the
+              other mode. */}
           <button
             onClick={handleLock}
             className="flex items-center gap-3 px-3 py-2.5 rounded-lg w-full text-gray-500 hover:bg-gray-100 hover:text-gray-700 transition-colors text-sm"
