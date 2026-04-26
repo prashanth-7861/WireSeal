@@ -1203,7 +1203,14 @@ def _h_init_locked(req: "_Handler", _groups: tuple = ()) -> dict:
 
         # Build cache directly from initial_state instead of re-opening the
         # vault (which would run Argon2id KDF again, adding ~5s of latency).
+        # `mode` MUST be present so:
+        #   1. /api/vault-info returns "mode": "server" → Dashboard's
+        #      probeVault() can sync the React mode state to "server" and
+        #      render the server Layout instead of the mode picker.
+        #   2. _require_server_mode() / _require_client_mode() see the
+        #      correct value and gate cross-mode endpoint access.
         cache = {
+            "mode":   "server",
             "server": {
                 "ip":       server_ip,
                 "subnet":   pool.subnet_str,

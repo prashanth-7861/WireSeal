@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.7.22] — 2026-04-26
+
+### Fixed — Server mode unusable after init (cache.mode missing)
+
+- `_h_init` server-mode path built the in-memory cache without a `mode`
+  field. `_h_vault_info` therefore returned `mode: null` after a
+  successful server init. The dashboard's `probeVault()` only sets the
+  React mode when `info.mode` is `"server"` or `"client"` — `null` left
+  the picker showing again, gave the impression that "server can't be
+  used", and broke `_require_server_mode` / `_require_client_mode` cross-
+  mode gates because they read the same null value.
+- Fix: the cache built post-`Vault.create()` now includes `"mode":
+  "server"`, matching the client-mode path that already had it. Single
+  one-line addition in `src/wireseal/api.py`.
+- This single fix unblocks both user-reported symptoms:
+  1. **Server mode**: probeVault syncs `mode = "server"` → server Layout
+     renders → Dashboard / Clients / Settings / etc all reachable.
+  2. **PIN setup**: was a downstream symptom — the PIN endpoint itself
+     worked (returned 200), but the dashboard PIN dialog was opened
+     against a UI in an inconsistent mode state. With mode synced
+     correctly, the PIN flow works end-to-end (verified via preview:
+     mode picker → Server → init → "Set a Quick Unlock PIN" dialog →
+     enter PIN → sidebar shows "Quick PIN: Remove" indicator).
+
+---
+
 ## [0.7.21] — 2026-04-26
 
 ### Fixed — Fresh Start failed with `challenge_token is required`
