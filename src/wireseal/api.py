@@ -1310,7 +1310,27 @@ def _h_init_locked(req: "_Handler", _groups: tuple = ()) -> dict:
     except Exception as exc:
         if passphrase is not None:
             passphrase.wipe()
-        raise _ApiError("Server initialization failed.", 500)
+        # Log full traceback to stderr + AppData log so users can copy the
+        # real error when reporting bugs. Generic wrapper kept so we never
+        # leak sensitive paths or keys to the HTTP response body — only the
+        # exception class + message goes back, full traceback stays local.
+        import traceback as _tb
+        _tb.print_exc()
+        try:
+            from wireseal.security.audit import AuditLog
+            AuditLog(_AUDIT_PATH).log(
+                "init-failed",
+                {"error_class": type(exc).__name__, "error": str(exc)[:500]},
+                actor="system",
+            )
+        except Exception:
+            pass
+        raise _ApiError(
+            f"Server initialization failed ({type(exc).__name__}: {exc}). "
+            "Check %APPDATA%\\WireSeal\\wireseal-gui.log on Windows or "
+            "audit.log on Unix for the full traceback.",
+            500,
+        )
     finally:
         wipe_string(passphrase_str)
 

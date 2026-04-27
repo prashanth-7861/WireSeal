@@ -7,6 +7,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.7.23] — 2026-04-26
+
+### Fixed — NSIS auto-upgrade silently failed (double-quoted UninstallString)
+
+- The Windows installer's `.onInit` upgrade detection wrote
+  `UninstallString` to the registry pre-quoted (Windows convention) and
+  then re-quoted it again when invoking the previous uninstaller:
+  `ExecWait '"$R1" /S _?="$R2"'`. With `$R1` already containing inner
+  quotes, the resulting command line was `""C:\path\uninstall.exe""`
+  which Windows can't parse — `ExecWait` returned without running the
+  old uninstaller, so the new installer wrote files on top of the old
+  install **without removing them first**. Users ended up with mixed
+  files from two versions and "stale binary still running" symptoms
+  even after running the new setup.exe.
+- **Fix:** drop the outer quotes around `$R1` in the ExecWait call.
+  Pass `$R1` verbatim (already quoted in registry per Windows
+  convention). Only quote `$R2` (`InstallLocation`, may contain spaces).
+  This is the documented NSIS pattern; we had it wrong.
+- Verified by inspecting the NSIS docs and the AddRemoveProgramsAPI
+  recommendations — `UninstallString` is meant to be invoked verbatim,
+  not re-quoted.
+
+### Improved — `_h_init` surfaces real exception class + message
+
+- Server-mode init wrapped every internal failure in a generic
+  "Server initialization failed." 500. Users reporting "server can't
+  be used" had no information beyond that string. We swallowed:
+  KeyError on missing imports, OSError on `Vault.create()`, network
+  errors during `resolve_public_ip()`, anything from
+  `adapter.install_wireguard()`, etc.
+- Now the response surfaces the exception **class name + message**
+  (e.g. `"Server initialization failed (OSError: [Errno 13] Permission
+  denied: '/etc/wireguard')."`) and the full traceback is
+  `traceback.print_exc()`'d to stderr AND logged as an `init-failed`
+  audit entry with `error_class` + truncated message. No secrets, no
+  paths-as-data, just the diagnostic.
+- For users on `WireSeal.exe` (no console), the GUI log at
+  `%APPDATA%\WireSeal\wireseal-gui.log` still captures the traceback
+  via the existing exception handler in `serve()`.
+
+---
+
 ## [0.7.22] — 2026-04-26
 
 ### Fixed — Server mode unusable after init (cache.mode missing)
