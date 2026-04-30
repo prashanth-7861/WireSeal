@@ -356,6 +356,16 @@ export function Settings() {
     setResetLoading(true);
     try {
       await api.freshStart();
+      // Clear cached mode hint and any other dashboard-cached state so the
+      // post-reload mode picker re-prompts for server vs client. Without
+      // this the user can't switch roles via Fresh-Start — localStorage
+      // would still hold the previous mode and skip the picker.
+      try {
+        localStorage.removeItem("wireseal_mode");
+        localStorage.removeItem("vault_users");
+      } catch {
+        /* ignore */
+      }
       flash("Fresh start complete — vault and configs wiped");
       setTimeout(() => window.location.reload(), 2000);
     } catch (e: unknown) {

@@ -441,6 +441,21 @@ function LayoutInner() {
       setShowFreshStart(false);
       setVaultState("uninitialized");
       setPinSet(false);
+      // Clear stale mode hint. Without this, the next render skips the
+      // ModeSelector (because `mode !== null`) and goes straight to the
+      // setup form with the OLD mode — meaning the user can't pick a
+      // different mode after Fresh-Start, and the setup form shows the
+      // wrong fields (Subnet/Port/Endpoint hidden if old mode was
+      // "client", or shown if it was "server"). Clearing both the
+      // localStorage value and the React state forces the picker.
+      clearMode();
+      // Belt + braces: also drop any other dashboard-cached state that
+      // could survive a Fresh-Start and confuse the next vault.
+      try {
+        localStorage.removeItem("vault_users");
+      } catch {
+        /* ignore */
+      }
     } catch (err: unknown) {
       setAuthError(err instanceof Error ? err.message : "Fresh start failed");
     } finally {

@@ -7,6 +7,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.7.24] — 2026-04-27
+
+### Fixed — Fresh-Start didn't clear localStorage mode (root cause of "binary missing fields" symptom)
+
+User-reported pattern: "whenever the WireGuard tunnel runs, server mode
+shows; otherwise client mode" — and "in the binaries it's not asking
+all the options (Subnet/Port/Endpoint)".
+
+Both pointed at the same bug. `handleFreshStart()` in `Layout.tsx` and
+`Settings.tsx` called `api.freshStart()` to wipe the vault, but **never
+cleared localStorage `wireseal_mode`**.
+
+Sequence:
+1. User inits as Client (or Server) at first launch.
+2. `setMode("client")` writes `wireseal_mode=client` to localStorage.
+3. User clicks Fresh-Start → vault destroyed.
+4. Page re-renders. `vaultState=uninitialized`, `mode="client"` (still).
+5. `Layout.tsx:490` mode-picker gate is
+   `vaultState === "uninitialized" && mode === null` — false because
+   `mode !== null`. Picker is **skipped**.
+6. User goes straight to passphrase setup with mode=client → setup
+   form hides Subnet/Port/Endpoint fields (correctly, for client
+   mode), but the user wanted to switch to server and never had the
+   chance.
+
+The "tunnel running ↔ server mode" correlation was the symptom: tunnel
+running == previous init was Server == localStorage already "server".
+Tunnel down == previous init was Client (or never inited) == "client".
+
+**Fix:** both Fresh-Start handlers now call `clearMode()` /
+`localStorage.removeItem("wireseal_mode")` after `api.freshStart()`
+succeeds. Layout's React state also resets to `null`, so the next
+render reaches the ModeSelector gate.
+
+Drop `vault_users` from localStorage too (admin list cache from the
+old vault).
+
+### Out of scope — installer auto-upgrade
+
+v0.7.23 fixed the NSIS double-quote bug in `.onInit`. v0.7.24 inherits
+that fix unchanged.
+
+---
+
 ## [0.7.23] — 2026-04-26
 
 ### Fixed — NSIS auto-upgrade silently failed (double-quoted UninstallString)
