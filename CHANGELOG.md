@@ -7,6 +7,65 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.7.25] — 2026-04-30
+
+### Fixed — Client tunnel-up sent redacted PrivateKey to wg-quick
+
+User-reported "adding a server's config gives errors. private keys
+deleting when applied". Backend `_h_client_tunnel_up` was reading the
+imported config back via `get_config(...)` which defaulted to
+`reveal_private_key=False`, so wg-quick received `PrivateKey =
+<redacted>` and refused to bring the tunnel up. The original
+PrivateKey was never lost — it lived in the encrypted vault on disk
+the entire time — but the dashboard call path scrubbed it before
+handing the bytes to wg-quick.
+
+### Hardened — `client/config_store` split into intent-typed accessors
+
+The single `get_config(state, name, *, reveal_private_key=False)`
+function was a footgun. The dangerous mode (full PrivateKey) was one
+keyword arg away from every caller and easy to forget at a new call
+site. v0.7.25 splits it into two purpose-built functions whose names
+encode the redaction policy:
+
+- **`get_config_redacted(state, name)`** — `config_text` always has
+  `PrivateKey = <redacted>`. Use for HTTP response bodies, list views,
+  Edit dialog pre-fill, and anywhere the bytes might land in browser
+  memory, HTTP history, proxy logs, or screenshots.
+- **`get_config_revealed(state, name)`** — `config_text` byte-for-byte
+  identical to the stored config including PrivateKey. Use ONLY at
+  legitimate reveal sites (wg-quick tunnel-up, user-confirmed
+  `?reveal=1` GET, QR re-export). Caller MUST audit-log the access.
+
+The legacy `get_config` symbol is **deleted with no backwards-compat
+shim**. Any future call site that tries to use it gets an
+`AttributeError` at import time — a compile error rather than a
+silent leak. `tests/client/test_config_store.py:test_legacy_get_config_symbol_removed`
+pins this contract.
+
+`_h_client_tunnel_up` now also writes a `client-config-revealed`
+audit entry **before** invoking wg-quick so a crash mid-tunnel still
+leaves a trace of which profile was decrypted to disk.
+
+### Tests — 12 new in `tests/client/test_config_store.py`
+
+- `test_redacted_strips_private_key` — redaction contract
+- `test_redacted_preserves_other_fields` — Endpoint, Address, PSK survive
+- `test_redacted_does_not_mutate_vault_state` — vault on disk unchanged
+- `test_redacted_raises_keyerror_for_missing_profile`
+- `test_revealed_preserves_private_key` — byte-for-byte equality with stored
+- `test_revealed_does_not_mutate_vault_state`
+- `test_revealed_returns_shallow_copy` — caller can mutate without affecting vault
+- `test_revealed_raises_keyerror_for_missing_profile`
+- `test_legacy_get_config_symbol_removed` — backwards-compat shim must NOT exist
+- `test_redact_helper_handles_indented_private_key`
+- `test_redact_helper_preserves_trailing_newline`
+- `test_redact_helper_is_case_insensitive`
+
+Total suite: **311 passed / 2 skipped / 0 failed**.
+
+---
+
 ## [0.7.24] — 2026-04-27
 
 ### Fixed — Fresh-Start didn't clear localStorage mode (root cause of "binary missing fields" symptom)

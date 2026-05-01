@@ -138,28 +138,71 @@ def _redact_private_key(config_text: str) -> str:
     return "\n".join(out_lines) + ("\n" if config_text.endswith("\n") else "")
 
 
-def get_config(
-    state_data: dict[str, Any],
-    name: str,
-    *,
-    reveal_private_key: bool = False,
-) -> dict[str, Any]:
-    """Get a single config by name. Raises KeyError if not found.
+def _get_entry_or_raise(state_data: dict[str, Any], name: str) -> dict[str, Any]:
+    """Internal helper — fetch the raw stored entry or raise KeyError.
 
-    SEC-020: by default, ``config_text`` has its PrivateKey redacted so
-    that routine config fetches do not persist key material in browser
-    memory, HTTP history, or log files. Callers that legitimately need
-    the full config (e.g., QR/QR download) must pass
-    ``reveal_private_key=True`` and audit-log the reveal event.
+    Callers must NOT invoke this directly. Use one of the two
+    intent-typed accessors below so the redaction policy is encoded
+    in the function name and cannot be forgotten by future maintainers.
     """
     configs = state_data.get("client_configs", {})
     if name not in configs:
         raise KeyError(f"Profile '{name}' not found")
-    entry = dict(configs[name])
-    if not reveal_private_key and "config_text" in entry:
+    # Return a shallow copy so callers can mutate without touching the vault.
+    return dict(configs[name])
+
+
+def get_config_redacted(
+    state_data: dict[str, Any],
+    name: str,
+) -> dict[str, Any]:
+    """Public-facing read — ``config_text`` has PrivateKey replaced by
+    ``<redacted>``.
+
+    SEC-020 baseline. Use this for:
+      * HTTP GET response bodies the dashboard consumes (list views,
+        Edit pre-fill, profile metadata).
+      * Anywhere the config text might end up in browser memory, HTTP
+        history, proxy logs, or screenshots.
+
+    The original PrivateKey stays in the vault on disk — only the copy
+    handed to the caller is sanitised. Use :func:`get_config_revealed`
+    when the consumer is the OS WireGuard daemon (wg-quick) or the
+    user's own QR re-export and audit-log the access at the call site.
+
+    Raises:
+        KeyError: profile not found.
+    """
+    entry = _get_entry_or_raise(state_data, name)
+    if "config_text" in entry:
         entry["config_text"] = _redact_private_key(entry["config_text"])
-        entry["private_key_redacted"] = True
     return entry
+
+
+def get_config_revealed(
+    state_data: dict[str, Any],
+    name: str,
+) -> dict[str, Any]:
+    """Authoritative read — returns the full config including PrivateKey.
+
+    Use this ONLY when:
+      * Bringing the WireGuard tunnel up via ``wg-quick`` (daemon needs
+        the real key to derive the public key + sign handshakes).
+      * The user explicitly requested a reveal via a confirmed UI action
+        (``?reveal=1`` query, "Show key" button) and the call site
+        audit-logs the reveal event with actor + reason.
+      * Re-exporting the user's own client config to QR / .conf for
+        another device they control.
+
+    The caller is responsible for audit-logging via
+    ``AuditLog.log("client-config-revealed", ...)``. This module does
+    not log the access itself because the appropriate context (actor,
+    HTTP path, reason) lives at the API handler.
+
+    Raises:
+        KeyError: profile not found.
+    """
+    return _get_entry_or_raise(state_data, name)
 
 
 def delete_config(state_data: dict[str, Any], name: str) -> None:

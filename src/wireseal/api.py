@@ -5203,20 +5203,29 @@ def _h_client_get_config(req: "_Handler", groups: tuple) -> dict:
         vault = _session["vault"]
         passphrase = _session["passphrase"]
 
-    from wireseal.client.config_store import get_config
+    from wireseal.client.config_store import (
+        get_config_redacted,
+        get_config_revealed,
+    )
     from wireseal.security.audit import AuditLog
 
     with vault.open(passphrase) as state:
         try:
-            config = get_config(state._data, name, reveal_private_key=reveal)
+            # Pick the accessor by intent. The function NAME encodes the
+            # redaction policy so a future maintainer can't accidentally
+            # leak the PrivateKey by forgetting a boolean flag.
+            if reveal:
+                config = get_config_revealed(state._data, name)
+            else:
+                config = get_config_redacted(state._data, name)
         except KeyError:
             raise _ApiError(f"Profile '{name}' not found", 404)
 
     if reveal:
         try:
             AuditLog(_AUDIT_PATH).log(
-                "client-config-reveal",
-                {"name": name},
+                "client-config-revealed",
+                {"name": name, "via": "http-get"},
                 actor=_session.get("admin_id", "owner"),
             )
         except Exception:
@@ -5302,22 +5311,38 @@ def _h_client_tunnel_up(req: "_Handler", groups: tuple) -> dict:
         vault = _session["vault"]
         passphrase = _session["passphrase"]
 
-    from wireseal.client.config_store import get_config
+    from wireseal.client.config_store import get_config_revealed
     from wireseal.client.tunnel import tunnel_up
     from wireseal.security.audit import AuditLog
 
     with vault.open(passphrase) as state:
         try:
-            config = get_config(state._data, name)
+            # wg-quick needs the real PrivateKey to bring the tunnel up.
+            # `get_config_revealed` returns the unredacted text — the only
+            # legitimate reveal sites are tunnel-up, user-confirmed reveal
+            # in the GET endpoint, and QR re-export.
+            config = get_config_revealed(state._data, name)
         except KeyError:
             raise _ApiError(f"Profile '{name}' not found", 404)
+
+    # Audit-log the reveal BEFORE invoking wg-quick so a crash mid-tunnel
+    # still leaves a trace of which profile was decrypted to disk.
+    audit = AuditLog(_VAULT_DIR / "audit.log")
+    try:
+        audit.log(
+            "client-config-revealed",
+            {"name": name, "via": "tunnel-up"},
+            actor=_session.get("admin_id", "owner"),
+        )
+    except Exception:
+        pass
 
     try:
         result = tunnel_up(config["config_text"], name)
     except RuntimeError as exc:
         raise _ApiError(str(exc), 500)
 
-    AuditLog(_VAULT_DIR / "audit.log").log(
+    audit.log(
         "client-tunnel-up",
         {"profile": name},
         actor=_session.get("admin_id", "owner"),
