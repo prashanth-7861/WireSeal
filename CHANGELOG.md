@@ -7,6 +7,124 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.8.0] — 2026-05-04
+
+### Added — Kill Switch (Windows / Linux / macOS)
+
+New `src/wireseal/client/kill_switch.py` module blocks all non-VPN traffic
+when the WireGuard tunnel drops unexpectedly.
+
+**Strategy per platform:**
+- **Windows** — `netsh advfirewall` rules; blocks all except WireGuard
+  endpoint UDP + loopback. Rules prefixed `WireSeal-KillSwitch` for clean
+  cleanup.
+- **Linux** — dedicated `WIRESEAL_KILLSWITCH` iptables chain; all INPUT /
+  OUTPUT traffic dropped except the WireGuard endpoint UDP, the tunnel
+  interface, and loopback.
+- **macOS** — `pf` anchor `com.wireseal.killswitch`; loaded via
+  `/etc/pf.anchors/com.wireseal.killswitch`; pass rules for WG endpoint
+  and loopback, block all else.
+
+Kill switch **engages** when `tunnel_up()` is called with
+`enable_kill_switch=True` and **disengages** on intentional
+`tunnel_down()`. If the tunnel drops unexpectedly while the kill switch is
+active, traffic stays blocked until the user explicitly disconnects or
+reconnects — preventing any cleartext data leaving the device.
+
+Endpoint validation in `_validate_endpoint()` uses `ipaddress.ip_address`
+to reject malformed input before it reaches firewall rule construction.
+
+`tunnel_status()` now includes `"kill_switch": bool` in its response so
+the dashboard can reflect live kill-switch state.
+
+### Added — Tunnel Mode Selection (split-vpn / split-lan / full)
+
+Server-side and client-side infrastructure to set per-client `AllowedIPs`
+at provisioning time rather than always defaulting to `0.0.0.0/0`.
+
+**Three modes:**
+
+| Mode | `AllowedIPs` written to client .conf | Use case |
+|------|--------------------------------------|----------|
+| `split-vpn` *(default)* | VPN subnet only (e.g. `10.0.0.0/24`) | Access VPN peers only; internet stays local |
+| `split-lan` | VPN subnet + server's LAN subnet | Expose server-side LAN to trusted client |
+| `full` | `0.0.0.0/0` | Full tunnel; all client traffic routed through VPN |
+
+**Dashboard UI** (`Clients.tsx`): Add-Client dialog now shows a radio
+group with mode descriptions and warnings. Default is `split-vpn`.
+Selection resets to default when dialog closes.
+
+**API** (`POST /clients`): accepts optional `tunnel_mode` field (validated
+server-side; unknown values return 400). Response includes `tunnel_mode`
+and `allowed_ips` fields.
+
+**ConfigBuilder** (`render_client_config`): new `allowed_ips` parameter
+(default `"0.0.0.0/0"` for backwards compat). Passed through to the
+Jinja2 template.
+
+### Added — LAN Subnet Detection at Server Init
+
+`detect_lan_subnet()` implemented on all three platform adapters:
+
+- **Linux** (`ip -o -f inet addr show <iface>`) — extracts CIDR and
+  computes network via `ipaddress.IPv4Interface`.
+- **macOS** (`ifconfig <iface>`) — parses `inet … netmask 0x…` hex mask,
+  converts to prefix length.
+- **Windows** (`Get-NetIPAddress` via base64-encoded `-EncodedCommand`) —
+  interface alias validated against `[a-zA-Z0-9 \-_().]+` before use;
+  PowerShell injection prevented by `EncodedCommand`.
+
+On `POST /api/init`, the detected subnet is saved to `state.server["lan_subnet"]`
+and the session cache. If detection fails a non-fatal warning is appended
+to the init response. `GET /api/status` now includes `lan_subnet` in its
+response body.
+
+### Added — Client Settings Page
+
+New full Settings UI in `Dashboard/src/app/pages/client/ClientSettings.tsx`
+(replacing the stub). Loads and saves via the new `/client/settings` API.
+
+**Settings exposed:**
+
+| Setting | Type | Description |
+|---------|------|-------------|
+| `auto_connect_profile` | string \| null | Profile name to connect on unlock |
+| `auto_lock_minutes` | number | Minutes of inactivity before re-lock |
+| `kill_switch` | bool | Enable kill switch when tunnel comes up |
+| `dns_override` | string | Comma-separated DNS servers to inject |
+
+### Added — DNS Override on Connect
+
+`apply_dns_override(config_text, dns_servers)` in `tunnel.py` replaces or
+injects a `DNS =` line in the `[Interface]` section before calling
+wg-quick. Works whether DNS already exists in the config or not; handles
+multi-section configs correctly; is a pure function (no side effects).
+
+### Added — Auto-Connect on Unlock (client mode)
+
+`POST /api/unlock` in client mode now reads `auto_connect_profile` from
+the client settings after successful authentication. If set, it:
+1. Reads the profile via `get_config_revealed()`
+2. Applies DNS override if configured
+3. Calls `tunnel_up()` with `enable_kill_switch` from settings
+4. Returns `"auto_connected": "<profile>"` in the unlock response (or
+   `"auto_connect_error": "<msg>"` on failure — unlock still succeeds)
+
+### Added — `/client/settings` API endpoints
+
+- `GET /client/settings` — returns current client settings
+- `PUT /client/settings` — partial update (unknown keys ignored); persisted
+  to vault
+- Frontend: `api.clientSettingsGet()` / `api.clientSettingsPut(partial)`
+  in `Dashboard/src/app/api.ts`
+
+### Added — `ClientSettings` and `SshSavedHost` TypeScript interfaces
+
+Typed interfaces added to `api.ts` for the new settings shape and SSH
+saved-host entries.
+
+---
+
 ## [0.7.25] — 2026-04-30
 
 ### Fixed — Client tunnel-up sent redacted PrivateKey to wg-quick

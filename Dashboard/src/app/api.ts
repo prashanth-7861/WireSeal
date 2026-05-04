@@ -81,12 +81,15 @@ export interface Peer {
   name: string;
 }
 
+export type TunnelMode = "split-lan" | "split-vpn" | "full";
+
 export interface Status {
   running: boolean;
   interface: string;
   server_ip: string;
   endpoint: string;
   port: number;
+  lan_subnet: string;
   peers: Peer[];
   total_clients: number;
 }
@@ -251,6 +254,21 @@ export interface ClientTunnelStatus {
   handshake_ok?: boolean;
 }
 
+export interface ClientSettings {
+  auto_connect_profile: string | null;
+  auto_lock_minutes: number;
+  kill_switch: boolean;
+  dns_override: string;
+  ssh_saved_hosts: SshSavedHost[];
+}
+
+export interface SshSavedHost {
+  host: string;
+  port: number;
+  username: string;
+  label: string;
+}
+
 export interface SshSessionInfo {
   session_id: string;
   profile: string;
@@ -306,8 +324,12 @@ export const api = {
   listClients: () =>
     _fetch<Client[]>("GET", "/clients"),
 
-  addClient: (name: string, ttl_seconds?: number) =>
-    _fetch<Client>("POST", "/clients", ttl_seconds != null ? { name, ttl_seconds } : { name }),
+  addClient: (name: string, ttl_seconds?: number, tunnel_mode?: TunnelMode) =>
+    _fetch<Client>("POST", "/clients", {
+      name,
+      ...(ttl_seconds != null && { ttl_seconds }),
+      ...(tunnel_mode && { tunnel_mode }),
+    }),
 
   removeClient: (name: string) =>
     _fetch<{ ok: boolean }>("DELETE", `/clients/${encodeURIComponent(name)}`),
@@ -587,4 +609,11 @@ export const api = {
 
   sshSessions: () =>
     _fetch<{ sessions: SshSessionInfo[] }>("GET", "/ssh/sessions"),
+
+  // ── Client settings ─────────────────────────────────────────────────────────
+  clientSettingsGet: () =>
+    _fetch<ClientSettings>("GET", "/client/settings"),
+
+  clientSettingsPut: (settings: Partial<ClientSettings>) =>
+    _fetch<ClientSettings>("PUT", "/client/settings", settings),
 };

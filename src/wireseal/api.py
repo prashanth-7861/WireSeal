@@ -788,12 +788,13 @@ def _refresh_cache(state: Any) -> dict:
     return {
         "mode": "server",
         "server": {
-            "ip":       state.server.get("ip", ""),
-            "subnet":   state.server.get("subnet",
-                            state.ip_pool.get("subnet", "")),
-            "port":     state.server.get("port", 51820),
-            "endpoint": state.server.get("endpoint", ""),
-            "duckdns":  state.server.get("duckdns_domain", ""),
+            "ip":         state.server.get("ip", ""),
+            "subnet":     state.server.get("subnet",
+                              state.ip_pool.get("subnet", "")),
+            "port":       state.server.get("port", 51820),
+            "endpoint":   state.server.get("endpoint", ""),
+            "duckdns":    state.server.get("duckdns_domain", ""),
+            "lan_subnet": state.server.get("lan_subnet", ""),
         },
         "clients": {
             name: {
@@ -1293,6 +1294,22 @@ def _h_init_locked(req: "_Handler", _groups: tuple = ()) -> dict:
         except Exception as exc:
             warnings_list.append("Tunnel service failed.")
 
+        # Detect LAN subnet for split-tunnel AllowedIPs.
+        lan_subnet = ""
+        try:
+            lan_subnet = adapter.detect_lan_subnet()
+        except Exception:
+            warnings_list.append("LAN subnet detection failed — split-tunnel will use VPN subnet only.")
+        if lan_subnet:
+            try:
+                with vault.open(passphrase) as state:
+                    state.server["lan_subnet"] = lan_subnet
+                    vault.save(state, passphrase)
+                with _lock:
+                    _session["cache"]["server"]["lan_subnet"] = lan_subnet
+            except Exception:
+                warnings_list.append("Could not persist LAN subnet to vault.")
+
         if port_warning:
             warnings_list.append(f"Port {port}: {port_warning}")
         return {
@@ -1302,6 +1319,7 @@ def _h_init_locked(req: "_Handler", _groups: tuple = ()) -> dict:
             "public_key":   pub_key_str,
             "endpoint":     endpoint,
             "port":         port,
+            "lan_subnet":   lan_subnet or None,
             "warnings":     warnings_list if warnings_list else None,
             "port_warning": port_warning,
         }
@@ -1417,10 +1435,39 @@ def _h_unlock(req: "_Handler", _groups: tuple) -> dict:
         _clear_unlock_failures(client_ip)
         AuditLog(_AUDIT_PATH).log("unlock-web", {"admin_id": admin_id}, actor=admin_id)
 
-        # Tunnel is NOT auto-started on unlock. The user controls the
-        # WireGuard server lifecycle explicitly from the Dashboard's
-        # Start/Stop buttons (POST /api/start, POST /api/terminate).
-        return {"ok": True, "role": admin_role}
+        # Server mode: tunnel is NOT auto-started on unlock. The user
+        # controls the WireGuard server via Dashboard Start/Stop buttons.
+        # Client mode: honour auto_connect_profile setting if configured.
+        auto_profile = None
+        if _MODE == "client":
+            try:
+                client_settings = _get_client_settings(
+                    type("_S", (), {"data": cache})()
+                )
+                auto_profile = client_settings.get("auto_connect_profile")
+            except Exception:
+                pass
+
+        result: dict = {"ok": True, "role": admin_role}
+        if auto_profile:
+            try:
+                from wireseal.client.config_store import get_config_revealed
+                from wireseal.client.tunnel import apply_dns_override, tunnel_up
+
+                with vault.open(passphrase) as st2:
+                    cfg = get_config_revealed(st2._data, auto_profile)
+
+                config_text = cfg["config_text"]
+                ks_en = bool(client_settings.get("kill_switch"))
+                dns_ov = client_settings.get("dns_override", "")
+                if dns_ov:
+                    config_text = apply_dns_override(config_text, dns_ov)
+                tunnel_up(config_text, auto_profile, enable_kill_switch=ks_en)
+                result["auto_connected"] = auto_profile
+            except Exception as exc:
+                result["auto_connect_error"] = str(exc)
+
+        return result
     finally:
         wipe_string(passphrase_str)
 
@@ -1531,6 +1578,7 @@ def _h_status(req: "_Handler", _groups: tuple) -> dict:
         "server_ip":     cache.get("server", {}).get("ip", ""),
         "endpoint":      cache.get("server", {}).get("endpoint", ""),
         "port":          cache.get("server", {}).get("port", 51820),
+        "lan_subnet":    cache.get("server", {}).get("lan_subnet", ""),
         "peers":         peers,
         "total_clients": len(cache.get("clients", {})),
     }
@@ -1806,6 +1854,10 @@ def _h_add_client(req: "_Handler", _groups: tuple) -> dict:
             "Name must be alphanumeric + hyphens only, max 32 chars", 400
         )
 
+    tunnel_mode = body.get("tunnel_mode", "split-vpn")
+    if tunnel_mode not in ("split-lan", "split-vpn", "full"):
+        raise _ApiError("tunnel_mode must be 'split-lan', 'split-vpn', or 'full'.", 400)
+
     with _lock:
         vault      = _session["vault"]
         passphrase = _session["passphrase"]
@@ -1839,6 +1891,15 @@ def _h_add_client(req: "_Handler", _groups: tuple) -> dict:
         server_ip       = state.server["ip"]
         server_pub_key  = _extract(state.server["public_key"])
 
+        vpn_subnet  = state.ip_pool.get("subnet", "10.0.0.0/24")
+        lan_subnet  = state.server.get("lan_subnet", "")
+        if tunnel_mode == "full":
+            allowed_ips = "0.0.0.0/0"
+        elif tunnel_mode == "split-lan" and lan_subnet:
+            allowed_ips = f"{vpn_subnet}, {lan_subnet}"
+        else:
+            allowed_ips = vpn_subnet
+
         builder       = ConfigBuilder()
         client_config = builder.render_client_config(
             client_private_key=priv_key_str,
@@ -1848,6 +1909,7 @@ def _h_add_client(req: "_Handler", _groups: tuple) -> dict:
             psk=psk_str,
             server_endpoint=server_endpoint,
             mtu=_detect_mtu(),
+            allowed_ips=allowed_ips,
         )
 
         clients_dir     = _VAULT_DIR / "clients"
@@ -1916,6 +1978,8 @@ def _h_add_client(req: "_Handler", _groups: tuple) -> dict:
             "ttl_seconds":    _ttl_secs,
             "ttl_expires_at": _ttl_expires,
             "heartbeat_token": heartbeat_token,
+            "tunnel_mode":    tunnel_mode,
+            "allowed_ips":    allowed_ips,
         }
         state.ip_pool["allocated"]        = pool.get_allocated()
         state.integrity[f"client-{name}"] = config_hash
@@ -2036,6 +2100,7 @@ def _h_client_qr(req: "_Handler", groups: tuple) -> dict:
             psk=_extract(cdata["psk"]),
             server_endpoint=_resolve_client_endpoint(state.server),
             mtu=_detect_mtu(),
+            allowed_ips=cdata.get("allowed_ips", "0.0.0.0/0"),
         )
 
     try:
@@ -2103,6 +2168,7 @@ def _h_client_config(req: "_Handler", groups: tuple) -> dict:
             psk=_extract(cdata["psk"]),
             server_endpoint=_resolve_client_endpoint(state.server),
             mtu=_detect_mtu(),
+            allowed_ips=cdata.get("allowed_ips", "0.0.0.0/0"),
         )
 
     AuditLog(_AUDIT_PATH).log("export-config", {"client": name}, actor=_actor_id)
@@ -2136,6 +2202,7 @@ def _h_client_config_download(req: "_Handler", groups: tuple) -> None:
             psk=_extract(cdata["psk"]),
             server_endpoint=_resolve_client_endpoint(state.server),
             mtu=_detect_mtu(),
+            allowed_ips=cdata.get("allowed_ips", "0.0.0.0/0"),
         )
 
     AuditLog(_AUDIT_PATH).log("export-config", {"client": name}, actor=_actor_id)
@@ -3834,6 +3901,7 @@ def _h_rotate_client_keys(req: "_Handler", groups: tuple) -> dict:
             psk=new_psk_str,
             server_endpoint=server_endpoint,
             mtu=_detect_mtu(),
+            allowed_ips=client_data.get("allowed_ips", "0.0.0.0/0"),
         )
 
         # Build updated server config
@@ -3993,6 +4061,7 @@ def _h_rotate_server_keys(req: "_Handler", _groups: tuple) -> dict:
                 psk=cpsk_str,
                 server_endpoint=server_endpoint,
                 mtu=_detect_mtu(),
+                allowed_ips=cdata.get("allowed_ips", "0.0.0.0/0"),
             )
 
             try:
@@ -5312,7 +5381,7 @@ def _h_client_tunnel_up(req: "_Handler", groups: tuple) -> dict:
         passphrase = _session["passphrase"]
 
     from wireseal.client.config_store import get_config_revealed
-    from wireseal.client.tunnel import tunnel_up
+    from wireseal.client.tunnel import apply_dns_override, tunnel_up
     from wireseal.security.audit import AuditLog
 
     with vault.open(passphrase) as state:
@@ -5337,14 +5406,29 @@ def _h_client_tunnel_up(req: "_Handler", groups: tuple) -> dict:
     except Exception:
         pass
 
+    # Load client settings for kill switch + DNS override
+    ks_enabled = False
+    dns_override = ""
     try:
-        result = tunnel_up(config["config_text"], name)
+        settings = _get_client_settings(_state)
+        ks_enabled = bool(settings.get("kill_switch"))
+        dns_override = settings.get("dns_override", "")
+    except Exception:
+        pass
+
+    # Apply DNS override to config before tunnel up
+    config_text = config["config_text"]
+    if dns_override:
+        config_text = apply_dns_override(config_text, dns_override)
+
+    try:
+        result = tunnel_up(config_text, name, enable_kill_switch=ks_enabled)
     except RuntimeError as exc:
         raise _ApiError(str(exc), 500)
 
     audit.log(
         "client-tunnel-up",
-        {"profile": name},
+        {"profile": name, "kill_switch": ks_enabled},
         actor=_session.get("admin_id", "owner"),
     )
     return result
@@ -5379,6 +5463,148 @@ def _h_client_tunnel_status(req: "_Handler", _groups: tuple) -> dict:
     from wireseal.client.tunnel import tunnel_status
 
     return tunnel_status()
+
+
+# ---------------------------------------------------------------------------
+# Client settings — stored in vault under "client_settings" key
+# ---------------------------------------------------------------------------
+
+_CLIENT_SETTINGS_DEFAULTS: dict = {
+    "auto_connect_profile": None,
+    "auto_lock_minutes": 15,
+    "kill_switch": False,
+    "dns_override": "",
+    "ssh_saved_hosts": [],
+}
+
+
+def _get_client_settings(state: Any) -> dict:
+    """Read client_settings from vault state, with defaults for missing keys."""
+    stored = state.data.get("client_settings", {})
+    return {**_CLIENT_SETTINGS_DEFAULTS, **stored}
+
+
+def _h_client_settings_get(req: "_Handler", _groups: tuple) -> dict:
+    """GET /api/client/settings — Return current client settings."""
+    _require_unlocked()
+    _require_client_mode()
+
+    with _lock:
+        vault = _session["vault"]
+        passphrase = _session["passphrase"]
+
+    with vault.open(passphrase) as state:
+        return _get_client_settings(state)
+
+
+def _h_client_settings_put(req: "_Handler", _groups: tuple) -> dict:
+    """PUT /api/client/settings — Update client settings (partial merge).
+
+    Body: any subset of client_settings fields.
+    Validates each field type strictly before persisting.
+    """
+    _require_unlocked()
+    _require_client_mode()
+
+    body = req._json()
+
+    with _lock:
+        vault = _session["vault"]
+        passphrase = _session["passphrase"]
+        _actor_id = _session.get("admin_id", "owner")
+
+    # Validate each field if present
+    if "auto_connect_profile" in body:
+        val = body["auto_connect_profile"]
+        if val is not None and not isinstance(val, str):
+            raise _ApiError("auto_connect_profile must be a string or null", 400)
+        if isinstance(val, str) and not re.fullmatch(r"[a-zA-Z0-9\-]{1,32}", val):
+            raise _ApiError("auto_connect_profile must be a valid profile name", 400)
+
+    if "auto_lock_minutes" in body:
+        try:
+            val = int(body["auto_lock_minutes"])
+        except (TypeError, ValueError):
+            raise _ApiError("auto_lock_minutes must be an integer", 400)
+        if val < 1 or val > 1440:
+            raise _ApiError("auto_lock_minutes must be between 1 and 1440", 400)
+        body["auto_lock_minutes"] = val
+
+    if "kill_switch" in body:
+        if not isinstance(body["kill_switch"], bool):
+            raise _ApiError("kill_switch must be a boolean", 400)
+
+    if "dns_override" in body:
+        val = str(body["dns_override"]).strip()
+        if val:
+            # Validate each DNS entry is a valid IP
+            import ipaddress as _ipa
+            for entry in val.split(","):
+                entry = entry.strip()
+                try:
+                    _ipa.ip_address(entry)
+                except ValueError:
+                    raise _ApiError(f"Invalid DNS address: {entry}", 400)
+        body["dns_override"] = val
+
+    if "ssh_saved_hosts" in body:
+        hosts = body["ssh_saved_hosts"]
+        if not isinstance(hosts, list):
+            raise _ApiError("ssh_saved_hosts must be a list", 400)
+        if len(hosts) > 50:
+            raise _ApiError("Maximum 50 saved SSH hosts", 400)
+        validated: list[dict] = []
+        for h in hosts:
+            if not isinstance(h, dict):
+                raise _ApiError("Each SSH host must be an object", 400)
+            host_val = str(h.get("host", "")).strip()
+            port_val = int(h.get("port", 22))
+            user_val = str(h.get("username", "")).strip()
+            label_val = str(h.get("label", "")).strip()
+            if not host_val:
+                raise _ApiError("SSH host address is required", 400)
+            if port_val < 1 or port_val > 65535:
+                raise _ApiError("SSH port must be 1-65535", 400)
+            if not user_val:
+                raise _ApiError("SSH username is required", 400)
+            # SEC: no shell metacharacters in host/username
+            if not re.fullmatch(r"[a-zA-Z0-9.\-:]+", host_val):
+                raise _ApiError(f"Invalid SSH host: {host_val}", 400)
+            if not re.fullmatch(r"[a-zA-Z0-9._\-]+", user_val):
+                raise _ApiError(f"Invalid SSH username: {user_val}", 400)
+            validated.append({
+                "host": host_val,
+                "port": port_val,
+                "username": user_val,
+                "label": label_val[:64],
+            })
+        body["ssh_saved_hosts"] = validated
+
+    # Only allow known keys
+    allowed_keys = set(_CLIENT_SETTINGS_DEFAULTS.keys())
+    update = {k: v for k, v in body.items() if k in allowed_keys}
+    if not update:
+        raise _ApiError("No valid settings fields provided", 400)
+
+    with vault.open(passphrase) as state:
+        current = state.data.get("client_settings", {})
+        current.update(update)
+        state.data["client_settings"] = current
+        vault.save(state, passphrase)
+
+    from wireseal.security.audit import AuditLog
+    AuditLog(_AUDIT_PATH).log(
+        "client-settings-updated",
+        {"fields": list(update.keys())},
+        actor=_actor_id,
+    )
+
+    # If auto_lock_minutes changed, update the runtime timeout
+    if "auto_lock_minutes" in update:
+        global _SESSION_TIMEOUT
+        _SESSION_TIMEOUT = update["auto_lock_minutes"] * 60
+
+    return {**_CLIENT_SETTINGS_DEFAULTS, **current}
 
 
 # ---------------------------------------------------------------------------
@@ -5640,6 +5866,9 @@ _ROUTES: list[tuple[str, re.Pattern, Any]] = [
     ("POST",   re.compile(r"^/api/client/tunnel/up/([^/]+)$"),          _h_client_tunnel_up),
     ("POST",   re.compile(r"^/api/client/tunnel/down$"),                _h_client_tunnel_down),
     ("GET",    re.compile(r"^/api/client/tunnel/status$"),              _h_client_tunnel_status),
+    # Client settings
+    ("GET",    re.compile(r"^/api/client/settings$"),                   _h_client_settings_get),
+    ("PUT",    re.compile(r"^/api/client/settings$"),                   _h_client_settings_put),
     # SSH bridge
     ("GET",    re.compile(r"^/api/ssh/targets$"),                       _h_ssh_targets_get),
     ("POST",   re.compile(r"^/api/ssh/targets$"),                       _h_ssh_targets_set),

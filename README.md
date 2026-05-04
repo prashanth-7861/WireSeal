@@ -73,6 +73,21 @@ passphrase, no cryptographic material is exposed.
 - **Admin management API & Dashboard** — add/remove admins, change passphrases, view
   roles; full Admin, TOTP, DNS, and Backup pages in the dashboard
 
+### Client Mode & Kill Switch (v0.8)
+- **Kill switch** — blocks all traffic when the WireGuard tunnel drops unexpectedly;
+  platform-native per OS (netsh advfirewall on Windows, iptables on Linux, pf on macOS);
+  auto-disengages on intentional disconnect
+- **Tunnel mode selection** — choose per-client routing at provisioning time:
+  `split-vpn` (VPN peers only), `split-lan` (VPN + server LAN), or `full` (all traffic through VPN)
+- **LAN subnet auto-detection** — server detects its own LAN subnet on init; used to compute
+  `AllowedIPs` for `split-lan` clients without manual configuration
+- **Client Settings page** — configure auto-connect profile, auto-lock timeout, kill switch,
+  and per-session DNS override from the dashboard
+- **DNS override** — replace DNS servers in any client config at connect time without
+  re-provisioning the peer
+- **Auto-connect on unlock** — client mode connects to a configured profile automatically
+  after passphrase unlock (honours kill switch and DNS override settings)
+
 ### Production Hardening
 - **API rate limiting** — sliding-window throttle on unlock endpoints (5 attempts per
   5-minute window); returns 429 when exceeded

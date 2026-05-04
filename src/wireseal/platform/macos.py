@@ -555,6 +555,27 @@ class MacOSAdapter(AbstractPlatformAdapter):
         raise SetupError("Cannot detect outbound network interface")
 
     # ------------------------------------------------------------------
+    # 13. LAN subnet detection
+    # ------------------------------------------------------------------
+
+    def detect_lan_subnet(self) -> str:
+        iface = self.detect_outbound_interface()
+        result = self._run(["ifconfig", iface], check=True)
+        output = result.stdout.decode("utf-8", errors="replace")
+        import re as _re
+        import ipaddress
+        m = _re.search(
+            r"inet\s+(\d+\.\d+\.\d+\.\d+)\s+netmask\s+(0x[0-9a-fA-F]+)", output
+        )
+        if not m:
+            raise SetupError(f"Cannot detect LAN subnet on interface {iface}")
+        ip_str = m.group(1)
+        mask_int = int(m.group(2), 16)
+        prefix = bin(mask_int).count("1")
+        net = ipaddress.IPv4Interface(f"{ip_str}/{prefix}").network
+        return str(net)
+
+    # ------------------------------------------------------------------
     # Network services (SSH, hardening, security status)
     # ------------------------------------------------------------------
 

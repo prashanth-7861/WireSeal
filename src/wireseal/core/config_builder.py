@@ -122,6 +122,7 @@ class ConfigBuilder:
         psk: str,
         server_endpoint: str,
         mtu: int = 1420,
+        allowed_ips: str = "0.0.0.0/0",
     ) -> str:
         """Render a WireGuard client config file.
 
@@ -136,6 +137,7 @@ class ConfigBuilder:
             psk:                44-char base64 pre-shared key.
             server_endpoint:    Server endpoint (host:port).
             mtu:                MTU for the client interface (default 1420).
+            allowed_ips:        AllowedIPs for the peer (default "0.0.0.0/0").
 
         Returns:
             Rendered config file content as a string.
@@ -143,7 +145,10 @@ class ConfigBuilder:
         Raises:
             ValueError: If any field fails validation (no rendering performed).
         """
-        from wireseal.security.validator import validate_client_config
+        from wireseal.security.validator import (
+            validate_allowed_ips,
+            validate_client_config,
+        )
 
         # CONFIG-02: validate BEFORE rendering -- invalid input never produces output
         validate_client_config({
@@ -154,6 +159,7 @@ class ConfigBuilder:
             "server_public_key": server_public_key,
             "endpoint": server_endpoint,
         })
+        validate_allowed_ips(allowed_ips)
 
         template = self.env.get_template("client.conf.j2")
         return template.render(
@@ -164,6 +170,7 @@ class ConfigBuilder:
             psk=psk,
             server_endpoint=server_endpoint,
             mtu=mtu,
+            allowed_ips=allowed_ips,
         )
 
     def write_config(

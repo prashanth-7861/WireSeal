@@ -7,14 +7,18 @@ colliding with the server's ``wg0`` interface.
 
 from __future__ import annotations
 
+import logging
 import os
 import shutil
 import subprocess
 import sys
-import tempfile
 import threading
 from pathlib import Path
 from typing import Any
+
+from wireseal.client import kill_switch
+
+log = logging.getLogger(__name__)
 
 CLIENT_INTERFACE = "wg-client"
 
@@ -107,12 +111,78 @@ def _remove_config(config_path: Path) -> None:
         pass
 
 
-def tunnel_up(config_text: str, profile_name: str) -> dict[str, str]:
+def _extract_endpoint(config_text: str) -> str | None:
+    """Extract Endpoint = ip:port from WireGuard config text."""
+    for line in config_text.splitlines():
+        stripped = line.strip()
+        if stripped.lower().startswith("endpoint"):
+            _, _, val = stripped.partition("=")
+            val = val.strip()
+            if val:
+                return val
+    return None
+
+
+def apply_dns_override(config_text: str, dns_servers: str) -> str:
+    """Replace or inject DNS = line in [Interface] section.
+
+    Args:
+        config_text: Raw WireGuard .conf content.
+        dns_servers: Comma-separated DNS IPs (e.g. "1.1.1.1, 8.8.8.8").
+
+    Returns:
+        Modified config text with DNS line replaced/added.
+    """
+    if not dns_servers or not dns_servers.strip():
+        return config_text
+
+    lines = config_text.splitlines()
+    result: list[str] = []
+    in_interface = False
+    dns_written = False
+
+    for line in lines:
+        stripped = line.strip().lower()
+
+        if stripped == "[interface]":
+            in_interface = True
+            result.append(line)
+            continue
+        elif stripped.startswith("[") and stripped.endswith("]"):
+            # Entering new section — if still in Interface and DNS not written, add it
+            if in_interface and not dns_written:
+                result.append(f"DNS = {dns_servers.strip()}")
+                dns_written = True
+            in_interface = False
+            result.append(line)
+            continue
+
+        if in_interface and stripped.startswith("dns"):
+            # Replace existing DNS line
+            result.append(f"DNS = {dns_servers.strip()}")
+            dns_written = True
+            continue
+
+        result.append(line)
+
+    # If config has only [Interface] with no following section
+    if in_interface and not dns_written:
+        result.append(f"DNS = {dns_servers.strip()}")
+
+    return "\n".join(result)
+
+
+def tunnel_up(
+    config_text: str,
+    profile_name: str,
+    enable_kill_switch: bool = False,
+) -> dict[str, str]:
     """Bring up the WireGuard client tunnel.
 
     Args:
         config_text: Raw WireGuard .conf content.
         profile_name: Name of the profile being connected.
+        enable_kill_switch: Engage kill switch after tunnel comes up.
 
     Returns:
         Status dict with interface name and profile.
@@ -180,11 +250,27 @@ def tunnel_up(config_text: str, profile_name: str) -> dict[str, str]:
 
             _state["connected"] = True
             _state["active_profile"] = profile_name
-            return {
+
+            # Engage kill switch if requested
+            ks_status = None
+            if enable_kill_switch:
+                endpoint = _extract_endpoint(config_text)
+                if endpoint:
+                    try:
+                        kill_switch.engage(endpoint, CLIENT_INTERFACE)
+                        ks_status = "active"
+                    except (RuntimeError, ValueError) as exc:
+                        log.warning("Kill switch engage failed: %s", exc)
+                        ks_status = "failed"
+
+            result: dict[str, Any] = {
                 "interface": CLIENT_INTERFACE,
                 "profile": profile_name,
                 "status": "connected",
             }
+            if ks_status:
+                result["kill_switch"] = ks_status
+            return result
 
         except subprocess.CalledProcessError as exc:
             _remove_config(config_path)
@@ -267,11 +353,24 @@ def tunnel_down() -> dict[str, str]:
             _state["active_profile"] = None
             _state["config_path"] = None
 
-        return {
+        # Disengage kill switch on intentional disconnect
+        ks_status = None
+        if kill_switch.is_active():
+            try:
+                kill_switch.disengage()
+                ks_status = "disengaged"
+            except (RuntimeError, OSError) as exc:
+                log.warning("Kill switch disengage failed: %s", exc)
+                ks_status = "disengage-failed"
+
+        result: dict[str, Any] = {
             "interface": CLIENT_INTERFACE,
             "profile": profile_name,
             "status": "disconnected",
         }
+        if ks_status:
+            result["kill_switch"] = ks_status
+        return result
 
 
 def _parse_wg_show(output: str) -> dict[str, Any]:
@@ -390,12 +489,14 @@ def tunnel_status() -> dict[str, Any]:
                 "connected": False,
                 "profile": None,
                 "interface": CLIENT_INTERFACE,
+                "kill_switch": kill_switch.is_active(),
             }
 
         result: dict[str, Any] = {
             "connected": True,
             "profile": _state["active_profile"],
             "interface": CLIENT_INTERFACE,
+            "kill_switch": kill_switch.is_active(),
             "wg_output": raw,
         }
 

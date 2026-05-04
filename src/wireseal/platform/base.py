@@ -237,6 +237,24 @@ class AbstractPlatformAdapter(ABC):
         raise NotImplementedError
 
     # ------------------------------------------------------------------
+    # 13. LAN subnet detection
+    # ------------------------------------------------------------------
+
+    def detect_lan_subnet(self) -> str:
+        """Return the CIDR of the LAN subnet on the outbound interface.
+
+        Uses the outbound interface to find its IPv4 address and prefix,
+        then computes the network CIDR (e.g., ``"192.168.1.0/24"``).
+
+        Returns:
+            Network CIDR string.
+
+        Raises:
+            SetupError: If the subnet cannot be determined.
+        """
+        raise NotImplementedError
+
+    # ------------------------------------------------------------------
     # Concrete helper (inherited by all subclasses)
     # ------------------------------------------------------------------
 

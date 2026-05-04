@@ -3,7 +3,7 @@ import {
   Plus, Monitor, Trash2, QrCode, X, AlertTriangle, CheckCircle, RefreshCw,
   Download,
 } from "lucide-react";
-import { api, type Client, type Status } from "../api";
+import { api, type Client, type Status, type TunnelMode } from "../api";
 import { ClientTtlBadge } from "../components/ClientTtlBadge";
 
 const QR_TTL = 60; // seconds before QR auto-dismisses
@@ -28,6 +28,7 @@ export function Clients() {
   // Add dialog
   const [showAddDialog, setShowAddDialog] = useState(false);
   const [newName, setNewName] = useState("");
+  const [tunnelMode, setTunnelMode] = useState<TunnelMode>("split-vpn");
   const [adding, setAdding] = useState(false);
   const [addError, setAddError] = useState("");
 
@@ -112,9 +113,10 @@ export function Clients() {
     setAddError("");
     setAdding(true);
     try {
-      const client = await api.addClient(newName.trim());
+      const client = await api.addClient(newName.trim(), undefined, tunnelMode);
       setClients((prev) => [...prev, client]);
       setNewName("");
+      setTunnelMode("split-vpn");
       setShowAddDialog(false);
       setSuccess(`Client "${client.name}" added — scan the QR code to connect`);
       setTimeout(() => setSuccess(""), 5000);
@@ -447,6 +449,40 @@ export function Clients() {
                 </p>
               </div>
 
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-2">Tunnel Mode</label>
+                <div className="space-y-2">
+                  {([
+                    ["split-vpn", "VPN Only", "Access VPN peers only — internet stays local (recommended)"],
+                    ["split-lan", "VPN + Server LAN", "Exposes ALL devices on server's network to this client — use only for trusted devices"],
+                    ["full", "Full Tunnel", "Route all traffic through VPN — may break internet if server NAT misconfigured"],
+                  ] as const).map(([value, label, desc]) => (
+                    <label
+                      key={value}
+                      className={`flex items-start gap-3 p-3 rounded-lg border cursor-pointer transition-colors ${
+                        tunnelMode === value
+                          ? "border-blue-500 bg-blue-50"
+                          : "border-gray-200 hover:border-gray-300"
+                      }`}
+                    >
+                      <input
+                        type="radio"
+                        name="tunnel_mode"
+                        value={value}
+                        checked={tunnelMode === value}
+                        onChange={() => setTunnelMode(value)}
+                        className="mt-0.5"
+                        disabled={adding}
+                      />
+                      <div>
+                        <span className="text-sm font-medium text-gray-900">{label}</span>
+                        <p className="text-xs text-gray-500 mt-0.5">{desc}</p>
+                      </div>
+                    </label>
+                  ))}
+                </div>
+              </div>
+
               {addError && (
                 <div className="flex items-center gap-2 text-red-600 text-sm bg-red-50 p-3 rounded-lg">
                   <AlertTriangle className="w-4 h-4 flex-shrink-0" />
@@ -457,7 +493,7 @@ export function Clients() {
               <div className="flex gap-3 pt-1">
                 <button
                   type="button"
-                  onClick={() => { setShowAddDialog(false); setAddError(""); setNewName(""); }}
+                  onClick={() => { setShowAddDialog(false); setAddError(""); setNewName(""); setTunnelMode("split-vpn"); }}
                   className="flex-1 px-4 py-2.5 border border-gray-300 rounded-lg hover:bg-gray-50 transition-colors"
                   disabled={adding}
                 >

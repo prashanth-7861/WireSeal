@@ -1020,6 +1020,43 @@ class WindowsAdapter(AbstractPlatformAdapter):
         return interface
 
     # ------------------------------------------------------------------
+    # 13. LAN subnet detection
+    # ------------------------------------------------------------------
+
+    def detect_lan_subnet(self) -> str:
+        iface = self.detect_outbound_interface()
+        # SEC: Validate interface alias to prevent PowerShell injection.
+        # Windows interface aliases allow alphanumeric, spaces, hyphens,
+        # underscores, and parentheses (e.g., "Wi-Fi", "Ethernet 2",
+        # "Local Area Connection (LAN)"). Reject anything else.
+        if not re.fullmatch(r"[a-zA-Z0-9 \-_().]+", iface):
+            raise SetupError(
+                f"Interface alias contains disallowed characters: {iface!r}"
+            )
+        # Use -EncodedCommand with base64-encoded UTF-16LE to avoid any
+        # shell metacharacter interpretation of the interface name.
+        import base64
+        ps_script = (
+            f"$a = Get-NetIPAddress -InterfaceAlias '{iface}' "
+            "-AddressFamily IPv4 | Select-Object -First 1; "
+            "$a.IPAddress; $a.PrefixLength"
+        )
+        encoded = base64.b64encode(
+            ps_script.encode("utf-16-le")
+        ).decode("ascii")
+        result = subprocess.run(
+            ["powershell", "-NoProfile", "-EncodedCommand", encoded],
+            capture_output=True, text=True, shell=False, check=True,
+            timeout=15, creationflags=_NO_WIN,
+        )
+        lines = [l.strip() for l in result.stdout.strip().splitlines() if l.strip()]
+        if len(lines) < 2:
+            raise SetupError(f"Cannot detect LAN subnet on interface {iface}")
+        import ipaddress
+        net = ipaddress.IPv4Interface(f"{lines[0]}/{lines[1]}").network
+        return str(net)
+
+    # ------------------------------------------------------------------
     # API server background-service lifecycle (Task Scheduler).
     #
     # Why Task Scheduler instead of `sc.exe create`: a true Windows service

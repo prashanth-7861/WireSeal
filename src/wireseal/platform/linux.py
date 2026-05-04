@@ -1136,6 +1136,25 @@ class LinuxAdapter(AbstractPlatformAdapter):
         return match.group(1)
 
     # ------------------------------------------------------------------
+    # 13. LAN subnet detection
+    # ------------------------------------------------------------------
+
+    def detect_lan_subnet(self) -> str:
+        iface = self.detect_outbound_interface()
+        result = subprocess.run(
+            ["ip", "-o", "-f", "inet", "addr", "show", iface],
+            shell=False, check=True, capture_output=True, text=True, timeout=10,
+        )
+        match = re.search(r"inet\s+(\d+\.\d+\.\d+\.\d+/\d+)", result.stdout)
+        if not match:
+            raise SetupError(
+                f"Cannot detect LAN subnet on interface {iface}"
+            )
+        import ipaddress
+        net = ipaddress.IPv4Interface(match.group(1)).network
+        return str(net)
+
+    # ------------------------------------------------------------------
     # API server background-service lifecycle (systemd unit).
     #
     # Distinct from `enable_tunnel_service()` which manages WireGuard's
