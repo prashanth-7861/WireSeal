@@ -1439,7 +1439,7 @@ def _h_unlock(req: "_Handler", _groups: tuple) -> dict:
         # controls the WireGuard server via Dashboard Start/Stop buttons.
         # Client mode: honour auto_connect_profile setting if configured.
         auto_profile = None
-        if _MODE == "client":
+        if cache.get("mode") == "client":
             try:
                 client_settings = _get_client_settings(
                     type("_S", (), {"data": cache})()

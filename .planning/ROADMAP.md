@@ -149,7 +149,7 @@ Plans:
 ## Progress
 
 **Execution Order:**
-Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 5 -> 6 -> 7
+Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 5 -> 6 -> 7 -> 8
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
@@ -160,3 +160,23 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 5 -> 6 -> 7
 | 5. Tests and Packaging | 3/3 | Complete    | 2026-03-21 |
 | 6. Dashboard Accuracy and Display Quality | 3/3 | Complete    | 2026-04-02 |
 | 7. ZTNA Foundation | 7/7 | Complete | 2026-04-06 |
+| 8. Real-Time Dashboard & File Manager | 0/3 | Planned | |
+
+### Phase 8: Real-Time Dashboard & File Manager
+**Goal**: Replace all dashboard polling with SSE push so state reflects live WireGuard changes instantly. Add cloud-style file browser for upload/download through the dashboard.
+**Depends on**: Phase 7
+**Requirements**: RT-01 through RT-06, FM-01 through FM-08
+**Success Criteria** (what must be TRUE):
+  1. Dashboard peer status updates within 1 s of wg state change — no setInterval polling
+  2. Clients page reflects add/remove/TTL change instantly via SSE push
+  3. Client mode tunnel connect/disconnect reflected in real-time
+  4. Vault lock event propagates to all open dashboard tabs via BroadcastChannel
+  5. File listing, upload (with progress), download, mkdir, rename, delete work end-to-end
+  6. Path traversal (`../../etc/passwd`) → 403 + audit log entry; no file access
+  7. 100 MB upload streams without loading into server RAM; progress bar works
+**Plans**: 3 plans
+
+Plans:
+- [ ] 08-01-PLAN.md — SSE broker, /api/events endpoint, broadcast hooks, useServerEvents React hook, replace Dashboard/Clients/Connect polling
+- [ ] 08-02-PLAN.md — File manager API: browse, download (streaming), upload (multipart streaming), mkdir, delete, rename; path traversal guard; vault config
+- [ ] 08-03-PLAN.md — Dashboard Files page: breadcrumbs, sortable list, drag-drop upload with progress, rename inline, Settings config section, nav link

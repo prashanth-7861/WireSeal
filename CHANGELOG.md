@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.8.1] — 2026-05-04
+
+### Fixed
+
+- **Client mode passphrase unlock** — `_MODE` undefined variable (NameError)
+  caused unlock to fail when `auto_connect_profile` is set. Now correctly reads
+  mode from vault cache (`cache.get("mode")`).
+- **Client mode PIN setup** — PIN management was only available in server mode
+  sidebar. `ClientLayout` now fetches PIN status on mount and exposes "Set PIN"
+  / "Remove" buttons with the full PIN setup dialog.
+
+---
+
 ## [0.8.0] — 2026-05-04
 
 ### Added — Kill Switch (Windows / Linux / macOS)
