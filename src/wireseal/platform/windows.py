@@ -1093,7 +1093,7 @@ class WindowsAdapter(AbstractPlatformAdapter):
 
     def install_api_service(
         self, bind: str = "127.0.0.1", port: int = 8080,
-        autostart: bool = True,
+        autostart: bool = True, vault_dir: str | None = None,
     ) -> None:
         """Register a Scheduled Task that runs `wireseal serve` at boot.
 
@@ -1103,7 +1103,8 @@ class WindowsAdapter(AbstractPlatformAdapter):
         launcher = self._find_wireseal_launcher()
         # /SC ONSTART = at boot. /RU SYSTEM = root-equiv. /RL HIGHEST = wg-quick.
         # The whole /TR value is one argv element — schtasks parses it.
-        tr_cmd = f"{launcher} serve --bind {bind} --port {port}"
+        vault_flag = f" --vault-dir \"{vault_dir}\"" if vault_dir else ""
+        tr_cmd = f"{launcher} serve --bind {bind} --port {port}{vault_flag}"
         cmd = [
             "schtasks.exe", "/Create", "/F",
             "/TN", self._API_TASK_NAME,

@@ -918,18 +918,19 @@ class MacOSAdapter(AbstractPlatformAdapter):
 
     def install_api_service(
         self, bind: str = "127.0.0.1", port: int = 8080,
-        autostart: bool = True,
+        autostart: bool = True, vault_dir: str | None = None,
     ) -> None:
         """Write a LaunchDaemon plist for the WireSeal dashboard.
 
         Captures `launchctl bootstrap` failure and surfaces it via SetupError.
         """
         launcher = self._find_wireseal_launcher()
+        serve_args = ["serve", "--bind", bind, "--port", str(port)]
+        if vault_dir:
+            serve_args += ["--vault-dir", vault_dir]
         plist_dict = {
             "Label": self._API_SERVICE_LABEL,
-            "ProgramArguments": launcher + [
-                "serve", "--bind", bind, "--port", str(port),
-            ],
+            "ProgramArguments": launcher + serve_args,
             "RunAtLoad": bool(autostart),
             "KeepAlive": True,
             "StandardErrorPath": "/var/log/wireseal-api.err",

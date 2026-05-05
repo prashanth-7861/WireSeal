@@ -1212,7 +1212,7 @@ class LinuxAdapter(AbstractPlatformAdapter):
 
     def install_api_service(
         self, bind: str = "127.0.0.1", port: int = 8080,
-        autostart: bool = True,
+        autostart: bool = True, vault_dir: str | None = None,
     ) -> None:
         """Write `/etc/systemd/system/wireseal.service` and (optionally)
         enable it at boot.
@@ -1232,6 +1232,7 @@ class LinuxAdapter(AbstractPlatformAdapter):
         """
         self._migrate_legacy_unit()
         wireseal_bin = self._find_wireseal_launcher()
+        vault_flag = f" --vault-dir {vault_dir}" if vault_dir else ""
         unit = (
             "[Unit]\n"
             "Description=WireSeal dashboard / API server\n"
@@ -1240,7 +1241,7 @@ class LinuxAdapter(AbstractPlatformAdapter):
             "\n"
             "[Service]\n"
             "Type=simple\n"
-            f"ExecStart={wireseal_bin} serve --bind {bind} --port {port}\n"
+            f"ExecStart={wireseal_bin} serve --bind {bind} --port {port}{vault_flag}\n"
             "Restart=on-failure\n"
             "RestartSec=5\n"
             # Run as root — vault decryption + wg-quick + nft all need it.

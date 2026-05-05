@@ -2510,7 +2510,9 @@ def _spawn_background(host: str, port: int) -> None:
               help="Run server in the background (detached process, implies --no-gui)")
 @click.option("--stop", is_flag=True, default=False,
               help="Stop a background server started with --background")
-def serve(host: str, port: int, no_gui: bool, background: bool, stop: bool) -> None:
+@click.option("--vault-dir", "vault_dir", default=None,
+              help="Override vault directory path (used by background service)")
+def serve(host: str, port: int, no_gui: bool, background: bool, stop: bool, vault_dir: str | None) -> None:
     """Start the WireSeal web dashboard and REST API server.
 
     By default opens a native desktop window (pywebview).
@@ -2539,8 +2541,11 @@ def serve(host: str, port: int, no_gui: bool, background: bool, stop: bool) -> N
         _spawn_background(host, port)
         return
 
-    from wireseal.api import serve as _serve
-    _serve(host=host, port=port, gui=not no_gui)
+    from wireseal import api as _api
+    if vault_dir:
+        import pathlib
+        _api.override_vault_dir(pathlib.Path(vault_dir))
+    _api.serve(host=host, port=port, gui=not no_gui)
 
 
 @cli.command("backup")

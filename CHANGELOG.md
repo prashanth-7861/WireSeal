@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.8.2] — 2026-05-04
+
+### Fixed
+
+- **Client mode SSH terminal** — "ssh target not allowed" error when connecting
+  to any host in client mode. The server-mode SSH allowlist check is now skipped
+  in client mode; the active-tunnel guard is the security control there.
+- **Service handlers** — all five service API endpoints (`status`, `install`,
+  `uninstall`, `start`, `stop`) now correctly reject requests in client mode
+  via `_require_server_mode()`.
+- **Service install `vault_dir`** — `install_api_service` on Linux, macOS, and
+  Windows now accepts and forwards `--vault-dir` to the spawned `serve` command
+  so non-default vault paths survive reboots.
+- **`--vault-dir` flag** — `wireseal serve` accepts `--vault-dir` to override
+  the vault path at startup; used by the service installer.
+
+---
+
 ## [0.8.1] — 2026-05-04
 
 ### Fixed

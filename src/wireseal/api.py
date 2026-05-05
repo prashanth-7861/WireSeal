@@ -127,6 +127,14 @@ _VAULT_DIR  = Path.home() / ".wireseal"
 _VAULT_PATH = _VAULT_DIR / "vault.enc"
 _AUDIT_PATH = _VAULT_DIR / "audit.log"
 _PIN_PATH   = _VAULT_DIR / "pin.enc"
+
+def override_vault_dir(path: Path) -> None:
+    """Override vault directory at startup (used by --vault-dir service flag)."""
+    global _VAULT_DIR, _VAULT_PATH, _AUDIT_PATH, _PIN_PATH
+    _VAULT_DIR  = path
+    _VAULT_PATH = _VAULT_DIR / "vault.enc"
+    _AUDIT_PATH = _VAULT_DIR / "audit.log"
+    _PIN_PATH   = _VAULT_DIR / "pin.enc"
 _WG_IFACE   = "wg0"
 
 # SEC-FIX-1: SSH target allowlist — prevents admins from proxying to arbitrary
@@ -3152,12 +3160,14 @@ def _service_adapter_or_die():
 
 
 def _h_service_status(req: "_Handler", _groups: tuple) -> dict:
+    _require_server_mode()
     _require_unlocked()
     adapter = _service_adapter_or_die()
     return {"ok": True, **adapter.api_service_status()}
 
 
 def _h_service_install(req: "_Handler", _groups: tuple) -> dict:
+    _require_server_mode()
     _require_unlocked()
     adapter = _service_adapter_or_die()
     body = req._json()
@@ -3168,7 +3178,7 @@ def _h_service_install(req: "_Handler", _groups: tuple) -> dict:
         raise _ApiError("port must be an integer.", 400)
     autostart = bool(body.get("autostart", True))
     try:
-        adapter.install_api_service(bind=bind, port=port, autostart=autostart)
+        adapter.install_api_service(bind=bind, port=port, autostart=autostart, vault_dir=str(_VAULT_DIR))
     except Exception as exc:
         raise _ApiError(f"Service install failed: {exc}", 500)
     from wireseal.security.audit import AuditLog
@@ -3184,6 +3194,7 @@ def _h_service_install(req: "_Handler", _groups: tuple) -> dict:
 
 
 def _h_service_uninstall(req: "_Handler", _groups: tuple) -> dict:
+    _require_server_mode()
     _require_unlocked()
     adapter = _service_adapter_or_die()
     try:
@@ -3202,6 +3213,7 @@ def _h_service_uninstall(req: "_Handler", _groups: tuple) -> dict:
 
 
 def _h_service_start(req: "_Handler", _groups: tuple) -> dict:
+    _require_server_mode()
     _require_unlocked()
     adapter = _service_adapter_or_die()
     try:
@@ -3212,6 +3224,7 @@ def _h_service_start(req: "_Handler", _groups: tuple) -> dict:
 
 
 def _h_service_stop(req: "_Handler", _groups: tuple) -> dict:
+    _require_server_mode()
     _require_unlocked()
     adapter = _service_adapter_or_die()
     try:
@@ -5722,9 +5735,13 @@ def _h_ssh_token(req: "_Handler", _groups: tuple) -> dict:
     if not profile_name:
         raise _ApiError("profile_name is required", 400)
 
-    # SEC-FIX-1: verify (host, port) against the allowlist before issuing a
-    # token. Raises _ApiError(403) and emits an audit event if not permitted.
-    _ssh_check_target_allowed(host, port)
+    # SEC-FIX-1: verify (host, port) against the allowlist — server mode only.
+    # In client mode the active-tunnel check below is the security gate; the
+    # allowlist file is not configured on client installs so checking it would
+    # deny every connection.
+    _cache = _session.get("cache") or {}
+    if _cache.get("mode") != "client":
+        _ssh_check_target_allowed(host, port)
 
     # Enforce that a client tunnel is active — SSH must go through the VPN.
     from wireseal.client.tunnel import tunnel_status as _tunnel_status
