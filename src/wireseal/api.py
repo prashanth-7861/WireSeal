@@ -5787,6 +5787,45 @@ def _h_ssh_token(req: "_Handler", _groups: tuple) -> dict:
     }
 
 
+def _h_ssh_accept_host_key(req: "_Handler", _groups: tuple) -> dict:
+    """POST /api/ssh/accept-host-key — Trust a new SSH host key (TOFU).
+
+    Body: {host, port, key_export}
+    where key_export is the '<type> <base64>' string sent in the tofu WS message.
+    Appends the key to ssh_known_hosts so the next connection succeeds.
+    """
+    _require_unlocked()
+    body = req._json()
+    host = str(body.get("host", "")).strip()
+    port_raw = body.get("port", 22)
+    key_export = str(body.get("key_export", "")).strip()
+    try:
+        port = int(port_raw)
+    except (TypeError, ValueError):
+        raise _ApiError("port must be an integer", 400)
+    if not host:
+        raise _ApiError("host is required", 400)
+    if not key_export:
+        raise _ApiError("key_export is required", 400)
+
+    from wireseal.ssh.ws_bridge import append_known_host, _get_known_hosts_path
+    log_dir = _VAULT_DIR / "ssh-sessions"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    known_hosts_path = _get_known_hosts_path(log_dir)
+    append_known_host(known_hosts_path, host, port, key_export)
+
+    from wireseal.security.audit import AuditLog
+    try:
+        AuditLog(_AUDIT_PATH).log(
+            "ssh-host-accepted",
+            {"host": host, "port": port},
+            actor=_session.get("admin_id", "owner"),
+        )
+    except Exception:
+        pass
+    return {"ok": True}
+
+
 def _h_ssh_sessions(req: "_Handler", _groups: tuple) -> dict:
     """GET /api/ssh/sessions — List active SSH sessions."""
     _require_unlocked()
@@ -5890,6 +5929,7 @@ _ROUTES: list[tuple[str, re.Pattern, Any]] = [
     ("GET",    re.compile(r"^/api/ssh/targets$"),                       _h_ssh_targets_get),
     ("POST",   re.compile(r"^/api/ssh/targets$"),                       _h_ssh_targets_set),
     ("POST",   re.compile(r"^/api/ssh/token$"),                         _h_ssh_token),
+    ("POST",   re.compile(r"^/api/ssh/accept-host-key$"),               _h_ssh_accept_host_key),
     ("GET",    re.compile(r"^/api/ssh/sessions$"),                      _h_ssh_sessions),
 ]
 

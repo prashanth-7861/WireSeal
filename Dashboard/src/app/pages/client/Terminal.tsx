@@ -43,6 +43,13 @@ export function Terminal() {
   const [connecting, setConnecting] = useState(false);
   const [connected, setConnected] = useState(false);
   const [error, setError] = useState("");
+  const [tofuPrompt, setTofuPrompt] = useState<{
+    fingerprint: string;
+    key_export: string;
+    host: string;
+    port: number;
+  } | null>(null);
+  const [tofuAccepting, setTofuAccepting] = useState(false);
 
   // Load tunnel status on mount
   useEffect(() => {
@@ -134,6 +141,28 @@ export function Terminal() {
     setConnecting(false);
   }, []);
 
+  const handleAcceptHostKey = useCallback(async () => {
+    if (!tofuPrompt) return;
+    setTofuAccepting(true);
+    try {
+      await api.sshAcceptHostKey({
+        host: tofuPrompt.host,
+        port: tofuPrompt.port,
+        key_export: tofuPrompt.key_export,
+      });
+      setTofuPrompt(null);
+      termRef.current?.writeln(`\x1b[32m✓ Host key accepted — reconnecting...\x1b[0m`);
+      // Small delay so user sees the confirmation before connect clears it
+      setTimeout(() => handleConnect(), 300);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : "Failed to accept host key";
+      setError(msg);
+    } finally {
+      setTofuAccepting(false);
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tofuPrompt]);
+
   const handleConnect = async () => {
     setError("");
     const host = connectForm.host.trim();
@@ -195,7 +224,7 @@ export function Terminal() {
 
       ws.onmessage = (evt: MessageEvent) => {
         if (typeof evt.data !== "string") return;
-        let msg: { type: string; data?: string; message?: string; session_id?: string };
+        let msg: { type: string; data?: string; message?: string; session_id?: string; fingerprint?: string; key_export?: string; host?: string; port?: number };
         try {
           msg = JSON.parse(evt.data);
         } catch {
@@ -216,6 +245,17 @@ export function Terminal() {
               const text = decoderRef.current.decode(bytes, { stream: true });
               term.write(text);
             }
+            break;
+          case "tofu":
+            term?.writeln(`\x1b[33m⚠ Unknown host key — verify before connecting\x1b[0m`);
+            setConnecting(false);
+            setTofuPrompt({
+              fingerprint: msg.fingerprint ?? "<unknown>",
+              key_export: msg.key_export ?? "",
+              host: msg.host ?? connectForm.host,
+              port: msg.port ?? (parseInt(connectForm.port, 10) || 22),
+            });
+            disconnect();
             break;
           case "error":
             term?.writeln(`\x1b[31m✗ ${msg.message ?? "Unknown error"}\x1b[0m`);
@@ -280,6 +320,45 @@ export function Terminal() {
             No WireGuard tunnel active. SSH can only run over the VPN — connect a profile on the{" "}
             <strong>Connect</strong> page first.
           </p>
+        </div>
+      )}
+
+      {/* TOFU host-key verification prompt */}
+      {tofuPrompt && (
+        <div className="mb-4 bg-yellow-50 border border-yellow-300 rounded-lg p-4">
+          <div className="flex items-start gap-2 mb-3">
+            <AlertTriangle className="w-4 h-4 text-yellow-600 mt-0.5 flex-shrink-0" />
+            <div>
+              <p className="text-sm font-semibold text-yellow-900">Unknown SSH host key</p>
+              <p className="text-xs text-yellow-800 mt-0.5">
+                The server at <strong>{tofuPrompt.host}:{tofuPrompt.port}</strong> presented a key that has not been verified.
+              </p>
+            </div>
+          </div>
+          <div className="bg-yellow-100 rounded px-3 py-2 mb-3 font-mono text-xs text-yellow-900 break-all">
+            {tofuPrompt.fingerprint}
+          </div>
+          <p className="text-xs text-yellow-700 mb-3">
+            Only accept if you recognise this fingerprint. Accepting an unknown key risks connecting to a malicious host.
+          </p>
+          <div className="flex gap-2">
+            <button
+              onClick={handleAcceptHostKey}
+              disabled={tofuAccepting || !tofuPrompt.key_export}
+              className="px-4 py-1.5 bg-emerald-600 text-white text-sm rounded-lg hover:bg-emerald-700 disabled:opacity-50 transition-colors font-medium"
+            >
+              {tofuAccepting ? "Accepting..." : "Accept & Connect"}
+            </button>
+            <button
+              onClick={() => setTofuPrompt(null)}
+              className="px-4 py-1.5 bg-white border border-gray-300 text-gray-700 text-sm rounded-lg hover:bg-gray-50 transition-colors"
+            >
+              Reject
+            </button>
+          </div>
+          {!tofuPrompt.key_export && (
+            <p className="text-xs text-red-600 mt-2">Key export unavailable — cannot accept automatically. Add the fingerprint manually.</p>
+          )}
         </div>
       )}
 

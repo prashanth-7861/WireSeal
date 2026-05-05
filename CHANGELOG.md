@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.8.3] — 2026-05-04
+
+### Fixed
+
+- **Client SSH terminal — host key verification (TOFU)** — first connection to
+  an unknown host now shows a fingerprint prompt with Accept/Reject buttons
+  instead of a dead-end error. Accepting writes the key to `ssh_known_hosts`
+  and auto-retries the connection. New API endpoint
+  `POST /api/ssh/accept-host-key` persists the key server-side.
+
+---
+
 ## [0.8.2] — 2026-05-04
 
 ### Fixed

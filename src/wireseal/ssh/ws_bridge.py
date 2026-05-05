@@ -181,6 +181,21 @@ def _extract_host_fingerprint(exc: Exception) -> str:
     return "<unknown fingerprint>"
 
 
+def _extract_host_key_export(exc: Exception) -> str:
+    """Return '<key_type> <base64>' export string from a HostKeyNotVerifiable exc.
+
+    Returns empty string on failure so callers can check truthiness.
+    """
+    server_key = getattr(exc, "server_host_key", None)
+    if server_key is None:
+        return ""
+    try:
+        export_bytes: bytes = server_key.export_public_key()
+        return export_bytes.decode("utf-8").strip()
+    except Exception:
+        return ""
+
+
 def append_known_host(known_hosts_path: Path, host: str, port: int, key_b64: str) -> None:
     """Append a verified host key to the known_hosts file.
 
@@ -283,20 +298,20 @@ async def _handle_session(
                     )
         except asyncssh.HostKeyNotVerifiable as exc:
             # SEC-022: TOFU — the host key is not in ssh_known_hosts yet.
-            # Emit an audit event with the fingerprint and notify the client.
-            # An administrator must call accept_ssh_host_key() via the API
-            # before the next connection attempt will succeed.
+            # Send fingerprint + raw key export so the client can prompt the
+            # user and call POST /api/ssh/accept-host-key to persist the key.
             fp = _extract_host_fingerprint(exc)
+            key_export = _extract_host_key_export(exc)
             recorder.record_meta(
                 "ssh-tofu-pending",
                 f"host={ticket.host}:{ticket.port} fingerprint={fp}",
             )
             await _send_json(ws, {
-                "type": "error",
-                "message": (
-                    f"SSH host key not verified. Fingerprint: {fp}. "
-                    "An administrator must accept this host key before connecting."
-                ),
+                "type": "tofu",
+                "fingerprint": fp,
+                "key_export": key_export,
+                "host": ticket.host,
+                "port": ticket.port,
             })
     except asyncssh.PermissionDenied:
         await _send_json(ws, {"type": "error", "message": "SSH permission denied (bad password or user)"})

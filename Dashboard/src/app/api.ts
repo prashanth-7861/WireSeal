@@ -607,6 +607,9 @@ export const api = {
       "POST", "/ssh/token", params
     ),
 
+  sshAcceptHostKey: (params: { host: string; port: number; key_export: string }) =>
+    _fetch<{ ok: boolean }>("POST", "/ssh/accept-host-key", params),
+
   sshSessions: () =>
     _fetch<{ sessions: SshSessionInfo[] }>("GET", "/ssh/sessions"),
 
