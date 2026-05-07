@@ -169,31 +169,44 @@ def _get_known_hosts_path(log_dir: Path) -> Path:
     return path
 
 
-def _extract_host_fingerprint(exc: Exception) -> str:
-    """Best-effort extraction of the host key fingerprint from an asyncssh exception."""
-    # asyncssh stores the server host key on the exception as `server_host_key`.
-    server_key = getattr(exc, "server_host_key", None)
-    if server_key is not None:
-        try:
-            return server_key.get_fingerprint()
-        except Exception:
-            pass
-    return "<unknown fingerprint>"
+class _TofuCapturingClient(asyncssh.SSHClient):
+    """SSHClient subclass that captures an unknown server host key.
 
-
-def _extract_host_key_export(exc: Exception) -> str:
-    """Return '<key_type> <base64>' export string from a HostKeyNotVerifiable exc.
-
-    Returns empty string on failure so callers can check truthiness.
+    asyncssh calls ``validate_host_public_key`` when the server's key is not
+    found in known_hosts.  We store the key so the caller can present its
+    fingerprint and export string to the user for TOFU acceptance, then
+    return ``False`` so the connection is still rejected until explicitly
+    trusted.
     """
-    server_key = getattr(exc, "server_host_key", None)
-    if server_key is None:
-        return ""
-    try:
-        export_bytes: bytes = server_key.export_public_key()
-        return export_bytes.decode("utf-8").strip()
-    except Exception:
-        return ""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._captured_key: object = None
+
+    def validate_host_public_key(  # type: ignore[override]
+        self, host: str, addr: str, port: int, key: object
+    ) -> bool:
+        self._captured_key = key
+        return False
+
+    def fingerprint(self) -> str:
+        """Return SHA-256 fingerprint of the captured key, or '<unknown>'."""
+        if self._captured_key is None:
+            return "<unknown fingerprint>"
+        try:
+            return self._captured_key.get_fingerprint()  # type: ignore[attr-defined]
+        except Exception:
+            return "<unknown fingerprint>"
+
+    def key_export(self) -> str:
+        """Return '<type> <base64>' OpenSSH public key string, or ''."""
+        if self._captured_key is None:
+            return ""
+        try:
+            raw: bytes = self._captured_key.export_public_key()  # type: ignore[attr-defined]
+            return raw.decode("utf-8").strip()
+        except Exception:
+            return ""
 
 
 def append_known_host(known_hosts_path: Path, host: str, port: int, key_b64: str) -> None:
@@ -264,6 +277,7 @@ async def _handle_session(
             _password_str = None
     try:
         _known_hosts_path = _get_known_hosts_path(log_dir)
+        tofu_client = _TofuCapturingClient()
         try:
             async with asyncssh.connect(
                 host=ticket.host,
@@ -272,6 +286,7 @@ async def _handle_session(
                 password=_password_str,
                 known_hosts=str(_known_hosts_path),
                 keepalive_interval=30,
+                client_factory=lambda: tofu_client,
             ) as conn:
                 # Spawn an interactive shell (no command = login shell)
                 async with conn.create_process(
@@ -296,12 +311,11 @@ async def _handle_session(
                         _forward_stdout(ws, chan, recorder),
                         _forward_stderr(ws, chan, recorder),
                     )
-        except asyncssh.HostKeyNotVerifiable as exc:
+        except asyncssh.HostKeyNotVerifiable:
             # SEC-022: TOFU — the host key is not in ssh_known_hosts yet.
-            # Send fingerprint + raw key export so the client can prompt the
-            # user and call POST /api/ssh/accept-host-key to persist the key.
-            fp = _extract_host_fingerprint(exc)
-            key_export = _extract_host_key_export(exc)
+            # tofu_client captured the key via validate_host_public_key.
+            fp = tofu_client.fingerprint()
+            key_export = tofu_client.key_export()
             recorder.record_meta(
                 "ssh-tofu-pending",
                 f"host={ticket.host}:{ticket.port} fingerprint={fp}",

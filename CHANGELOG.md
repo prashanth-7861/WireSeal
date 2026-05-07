@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.8.4] — 2026-05-07
+
+### Fixed
+
+- **SSH TOFU host key capture** — replaced broken `getattr(exc, "server_host_key")`
+  approach (asyncssh `HostKeyNotVerifiable` has no such attribute) with a proper
+  `_TofuCapturingClient` SSHClient subclass that captures the key via
+  `validate_host_public_key`. Fingerprint and key export now resolve correctly
+  instead of showing `<unknown fingerprint>`.
+
+---
+
 ## [0.8.3] — 2026-05-04
 
 ### Fixed
