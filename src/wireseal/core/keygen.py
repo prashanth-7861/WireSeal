@@ -34,8 +34,9 @@ def generate_keypair() -> tuple[SecretBytes, bytes]:
     raw_private = bytearray(private_key.private_bytes_raw())
     raw_public = private_key.public_key().public_bytes_raw()  # plain bytes, not secret
 
-    # Base64-encode both keys (standard base64, not url-safe -- matches wg format)
-    private_b64 = base64.b64encode(bytes(raw_private))
+    # Base64-encode both keys (standard base64, not url-safe -- matches wg format).
+    # CORE-12: encode directly from bytearray to avoid intermediate bytes() copy.
+    private_b64 = base64.b64encode(raw_private)
     public_b64 = base64.b64encode(raw_public)
 
     # KEYGEN-04: wipe intermediate raw private key bytes immediately after encoding

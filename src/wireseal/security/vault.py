@@ -62,6 +62,19 @@ from .keyslot import (
 )
 from .secret_types import SecretBytes
 from .secrets_wipe import wipe_bytes
+from ._argon2_params import (
+    ARGON2_MEMORY_COST_KIB,
+    ARGON2_MEMORY_COST_MAX_KIB,
+    ARGON2_MEMORY_COST_MIN_KIB,
+    ARGON2_PARALLELISM,
+    ARGON2_PARALLELISM_MAX,
+    ARGON2_PARALLELISM_MIN,
+    ARGON2_HASH_LEN,
+    ARGON2_SALT_LEN,
+    ARGON2_TIME_COST,
+    ARGON2_TIME_COST_MAX,
+    ARGON2_TIME_COST_MIN,
+)
 
 # ---------------------------------------------------------------------------
 # Module-level constants
@@ -72,26 +85,13 @@ MAGIC = b"WGAV"  # WireGuard Automate Vault
 FORMAT_VERSION = 2  # v1: AES-256-GCM; v2: ChaCha20-Poly1305 + AES-256-GCM-SIV + HKDF
 FORMAT_VERSION_3 = 3  # v3: v2 payload + LUKS-style keyslots
 
-# CRITICAL: memory_cost is in KiB. 256 MiB = 262144 KiB. Passing 256 = catastrophically weak.
-ARGON2_MEMORY_COST_KIB = 262144  # 256 MiB
-ARGON2_TIME_COST = 13            # Calibrated: ≥500ms minimum (512ms measured, time_cost=13)
-ARGON2_PARALLELISM = 4
-ARGON2_HASH_LEN = 32   # Argon2id master key length (HKDF input)
-ARGON2_SALT_LEN = 32   # v2: 256-bit salt (was 16 bytes in v1)
 
-# SEC-019: Sanity bounds for Argon2 params read from vault headers. A crafted
-# vault file could otherwise claim e.g. memory_cost=2**31 and DoS the process
-# by allocating absurd amounts of RAM before any authentication happens, or
-# claim memory_cost=8 to weaken a legitimate vault after tampering. We reject
-# both directions defensively — the live build's defaults are always within
-# these bounds, but older vaults (lower time_cost) must still open, so the
-# minimums are intentionally permissive.
-ARGON2_MEMORY_COST_MIN_KIB = 65536       # 64 MiB — below this is insecure
-ARGON2_MEMORY_COST_MAX_KIB = 2 * 1024 * 1024  # 2 GiB — above this is DoS
-ARGON2_TIME_COST_MIN = 2
-ARGON2_TIME_COST_MAX = 64
-ARGON2_PARALLELISM_MIN = 1
-ARGON2_PARALLELISM_MAX = 16
+def _deep_clear(d: dict) -> None:
+    """Recursively clear all nested dicts to scrub secrets from heap."""
+    for v in d.values():
+        if isinstance(v, dict):
+            _deep_clear(v)
+    d.clear()
 
 
 def _validate_argon2_params(memory_cost: int, time_cost: int, parallelism: int) -> None:
@@ -267,6 +267,8 @@ def _derive_master_key(passphrase: bytearray, salt: bytes, *,
             hash_len=ARGON2_HASH_LEN,
             type=Type.ID,
         )
+    # NOTE: bytes(passphrase) creates an immutable copy that argon2-cffi
+    # processes internally. This is a known limitation of the library API.
     return bytearray(raw)
 
 
@@ -307,7 +309,7 @@ def _ensure_vault_dir(dir_path: Path) -> None:
     Windows: best-effort icacls to restrict to SYSTEM + Administrators.
              Full Windows ACL support is deferred to Phase 2.
     """
-    dir_path.mkdir(parents=True, exist_ok=True)
+    dir_path.mkdir(parents=True, exist_ok=True, mode=0o700)
 
     if sys.platform != "win32":
         os.chmod(dir_path, 0o700)
@@ -355,9 +357,13 @@ def _encrypt_payload(plaintext_dict: dict[str, Any], master_key: bytearray,
     """
     key_chacha, key_aes = _derive_subkeys(master_key, salt)
     try:
-        plaintext_json = json.dumps(plaintext_dict, separators=(",", ":")).encode("utf-8")
-        layer1 = ChaCha20Poly1305(bytes(key_chacha)).encrypt(nonce1, plaintext_json, header)
-        layer2 = AESGCMSIV(bytes(key_aes)).encrypt(nonce2, layer1, header)
+        plaintext_bytes = json.dumps(plaintext_dict, separators=(",", ":")).encode("utf-8")
+        plaintext_ba = bytearray(plaintext_bytes)
+        try:
+            layer1 = ChaCha20Poly1305(bytes(key_chacha)).encrypt(nonce1, bytes(plaintext_ba), header)
+            layer2 = AESGCMSIV(bytes(key_aes)).encrypt(nonce2, layer1, header)
+        finally:
+            wipe_bytes(plaintext_ba)
     finally:
         wipe_bytes(key_chacha)
         wipe_bytes(key_aes)
@@ -554,6 +560,9 @@ def _decrypt_vault(blob: bytes, passphrase: bytearray) -> tuple[dict[str, Any], 
     except VaultUnlockError:
         wipe_bytes(master_key)
         raise
+    except Exception:
+        wipe_bytes(master_key)
+        raise
 
     return data, master_key
 
@@ -677,7 +686,10 @@ class VaultState:
         self._data["integrity"] = dict(data.get("integrity", {}))
         # v2 schema fields -- preserved as-is (no secret wrapping needed)
         if "admins" in data:
-            self._data["admins"] = data["admins"]
+            self._data["admins"] = {
+                name: self._wrap_secrets(dict(admin))
+                for name, admin in data["admins"].items()
+            }
         if "dns_mappings" in data:
             self._data["dns_mappings"] = data["dns_mappings"]
         if "backup_config" in data:
@@ -705,6 +717,9 @@ class VaultState:
         catches backup destination credentials (``webdav_pass``) and any
         future password-bearing fields so they sit in mlocked memory and
         are wiped on vault close rather than lingering in a plain ``str``.
+
+        SEC-CC-01: TOTP base32 secrets (``_secret_b32``) and backup codes
+        (``backup_codes``) are also wrapped in SecretBytes.
         """
         result = {}
         for k, v in d.items():
@@ -713,8 +728,11 @@ class VaultState:
                 or k == "psk"
                 or k.endswith("_pass")
                 or k.endswith("_password")
+                or k.endswith("_secret_b32")
             ):
                 result[k] = SecretBytes(bytearray(v.encode("utf-8")))
+            elif k == "backup_codes" and isinstance(v, list):
+                result[k] = [SecretBytes(bytearray(c.encode("utf-8"))) for c in v]
             else:
                 result[k] = v
         return result
@@ -724,7 +742,12 @@ class VaultState:
         """Convert SecretBytes back to strings for JSON serialization."""
         result = {}
         for k, v in d.items():
-            if isinstance(v, SecretBytes):
+            if isinstance(v, list):
+                if v and all(isinstance(item, SecretBytes) for item in v):
+                    result[k] = [bytes(item.expose_secret()).decode("utf-8") for item in v]
+                else:
+                    result[k] = v
+            elif isinstance(v, SecretBytes):
                 result[k] = bytes(v.expose_secret()).decode("utf-8")
             else:
                 result[k] = v
@@ -771,7 +794,10 @@ class VaultState:
             d["mode"] = self._data["mode"]
         # Include v2 schema fields when present
         if "admins" in self._data:
-            d["admins"] = self._data["admins"]
+            d["admins"] = {
+                name: self._unwrap_secrets(admin)
+                for name, admin in self._data["admins"].items()
+            }
         if "dns_mappings" in self._data:
             d["dns_mappings"] = self._data["dns_mappings"]
         if "backup_config" in self._data:
@@ -799,7 +825,18 @@ class VaultState:
         for v in self._data.get("backup_config", {}).values():
             if isinstance(v, SecretBytes):
                 v.wipe()
+        # SEC-CC-01: wipe SecretBytes in admins (totp_secret_b32, backup_codes)
+        for admin in self._data.get("admins", {}).values():
+            if isinstance(admin, dict):
+                for v in admin.values():
+                    if isinstance(v, SecretBytes):
+                        v.wipe()
+                    elif isinstance(v, list):
+                        for item in v:
+                            if isinstance(item, SecretBytes):
+                                item.wipe()
         self._wiped = True
+        self._data.clear()
 
     # Context manager: wipe in finally so secrets never linger
     def __enter__(self) -> "VaultState":
@@ -966,44 +1003,44 @@ class Vault:
         else:
             raw = bytearray(passphrase)
 
-        blob = self._path.read_bytes()
+        try:
+            blob = self._path.read_bytes()
 
-        if len(blob) < 5:
-            raise VaultTamperedError("Vault file is too small to be valid")
+            if len(blob) < 5:
+                raise VaultTamperedError("Vault file is too small to be valid")
 
-        if blob[:4] != MAGIC:
-            raise VaultTamperedError("Vault file has invalid magic bytes")
+            if blob[:4] != MAGIC:
+                raise VaultTamperedError("Vault file has invalid magic bytes")
 
-        version = blob[4]
+            version = blob[4]
 
-        self._wipe_session()  # clear any previous session
+            self._wipe_session()  # clear any previous session
 
-        if version == FORMAT_VERSION_3:
-            data, master_key, store = _decrypt_vault_v3(blob, admin_id, raw)
-            # Apply roles from the decrypted JSON payload to the keyslot store.
-            # The binary keyslot format does not encode role; roles live in data["admins"].
-            admins_cfg: dict = data.get("admins", {})
-            for slot in store.keyslots:
-                slot_role = admins_cfg.get(slot.admin_id, {}).get("role", "admin")
-                slot.role = slot_role
-            self._session_master_key = master_key
-            self._session_store = store
-            self._session_format = FORMAT_VERSION_3
-        elif version == FORMAT_VERSION:
-            data, master_key = _decrypt_vault(blob, raw)
-            self._session_master_key = master_key
-            self._session_passphrase = bytearray(raw)
-            self._session_format = FORMAT_VERSION
-        else:
-            # Let the existing error-path in _decrypt_vault handle v1 and unknowns
-            _decrypt_vault(blob, raw)
-            raise VaultTamperedError(
-                f"Unsupported vault FORMAT_VERSION {version}"
-            )
+            if version == FORMAT_VERSION_3:
+                data, master_key, store = _decrypt_vault_v3(blob, admin_id, raw)
+                admins_cfg: dict = data.get("admins", {})
+                for slot in store.keyslots:
+                    slot_role = admins_cfg.get(slot.admin_id, {}).get("role", "admin")
+                    slot.role = slot_role
+                self._session_master_key = master_key
+                self._session_store = store
+                self._session_format = FORMAT_VERSION_3
+            elif version == FORMAT_VERSION:
+                data, master_key = _decrypt_vault(blob, raw)
+                self._session_master_key = master_key
+                self._session_passphrase = bytearray(raw)
+                self._session_format = FORMAT_VERSION
+            else:
+                _decrypt_vault(blob, raw)
+                raise VaultTamperedError(
+                    f"Unsupported vault FORMAT_VERSION {version}"
+                )
 
-        state = VaultState(data, vault=self)
-        self._session_state = state
-        return state
+            state = VaultState(data, vault=self)
+            self._session_state = state
+            return state
+        finally:
+            wipe_bytes(raw)
 
     def save(self, state: VaultState, passphrase: SecretBytes | bytearray) -> None:
         """Re-encrypt and atomically write updated vault state (FORMAT_VERSION 2).
@@ -1019,9 +1056,15 @@ class Vault:
         else:
             raw = bytearray(passphrase)
 
-        plaintext = state.to_dict()
-        blob = _encrypt_vault(plaintext, raw)
-        atomic_write(self._path, blob, mode=0o600)
+        try:
+            plaintext = state.to_dict()
+            try:
+                blob = _encrypt_vault(plaintext, raw)
+                atomic_write(self._path, blob, mode=0o600)
+            finally:
+                plaintext.clear()
+        finally:
+            wipe_bytes(raw)
 
     def _save_v3(self, state: VaultState) -> None:
         """Re-encrypt and atomically write vault state as FORMAT_VERSION 3.
@@ -1228,17 +1271,21 @@ class Vault:
         else:
             new_raw = bytearray(new_passphrase)
 
-        if len(new_raw) < 12:
-            raise ValueError("Passphrase must be at least 12 characters")
-
-        blob = self._path.read_bytes()
-        data, master_key = _decrypt_vault(blob, old_raw)
-        wipe_bytes(master_key)
         try:
-            new_blob = _encrypt_vault(data, new_raw)
-            atomic_write(self._path, new_blob, mode=0o600)
+            if len(new_raw) < 12:
+                raise ValueError("Passphrase must be at least 12 characters")
+
+            blob = self._path.read_bytes()
+            data, master_key = _decrypt_vault(blob, old_raw)
+            wipe_bytes(master_key)
+            try:
+                new_blob = _encrypt_vault(data, new_raw)
+                atomic_write(self._path, new_blob, mode=0o600)
+            finally:
+                _deep_clear(data)
         finally:
-            data.clear()
+            wipe_bytes(old_raw)
+            wipe_bytes(new_raw)
 
     # ------------------------------------------------------------------
     # Integrity verification (VAULT-08)
@@ -1258,14 +1305,17 @@ class Vault:
         else:
             raw = bytearray(passphrase)
 
-        blob = self._path.read_bytes()
         try:
-            data, master_key = _decrypt_vault(blob, raw)
-            wipe_bytes(master_key)
-            VaultState(data).wipe()
-            return True
-        except VaultUnlockError:
-            return False
+            blob = self._path.read_bytes()
+            try:
+                data, master_key = _decrypt_vault(blob, raw)
+                wipe_bytes(master_key)
+                VaultState(data).wipe()
+                return True
+            except VaultUnlockError:
+                return False
+        finally:
+            wipe_bytes(raw)
 
     # ------------------------------------------------------------------
     # Hint (VAULT-06)

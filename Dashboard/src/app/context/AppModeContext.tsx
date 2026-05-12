@@ -15,7 +15,7 @@ const STORAGE_KEY = "wireseal_mode";
 export function AppModeProvider({ children }: { children: ReactNode }) {
   const [mode, setModeState] = useState<AppMode | null>(() => {
     try {
-      const saved = localStorage.getItem(STORAGE_KEY);
+      const saved = sessionStorage.getItem(STORAGE_KEY);
       if (saved === "server" || saved === "client") return saved;
     } catch { /* ignore */ }
     return null;
@@ -23,12 +23,12 @@ export function AppModeProvider({ children }: { children: ReactNode }) {
 
   const setMode = useCallback((m: AppMode) => {
     setModeState(m);
-    try { localStorage.setItem(STORAGE_KEY, m); } catch { /* ignore */ }
+    try { sessionStorage.setItem(STORAGE_KEY, m); } catch { /* ignore */ }
   }, []);
 
   const clearMode = useCallback(() => {
     setModeState(null);
-    try { localStorage.removeItem(STORAGE_KEY); } catch { /* ignore */ }
+    try { sessionStorage.removeItem(STORAGE_KEY); } catch { /* ignore */ }
   }, []);
 
   return (

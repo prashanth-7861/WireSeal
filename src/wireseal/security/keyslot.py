@@ -27,6 +27,11 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 from .exceptions import KeyslotNotFoundError
 from .secret_types import SecretBytes
+from ._argon2_params import (
+    ARGON2_MEMORY_COST_MIN_KIB, ARGON2_MEMORY_COST_MAX_KIB,
+    ARGON2_TIME_COST_MIN, ARGON2_TIME_COST_MAX,
+    ARGON2_PARALLELISM_MIN, ARGON2_PARALLELISM_MAX,
+)
 
 # ---------------------------------------------------------------------------
 # Default Argon2id parameters for new keyslots (production values per SECURITY-SPEC §1.2)
@@ -37,7 +42,9 @@ KEYSLOT_PARALLELISM = 4
 KEYSLOT_HASH_LEN = 32
 
 # Development/test override — pass as **_DEV_FAST_PARAMS to create_keyslot / unlock_keyslot
-_DEV_FAST_PARAMS = {"time_cost": 3, "memory_cost": 65536, "parallelism": 4}
+# Always defined so tests can use `**_DEV_FAST_PARAMS` without None-guarding.
+# When the env var is not set, uses an empty dict = standard production KDF params.
+_DEV_FAST_PARAMS: dict = {"time_cost": 2, "memory_cost": 1024, "parallelism": 1} if os.environ.get("WIRESEAL_TEST_FAST") else {}
 
 _SLOT_STRUCT = struct.Struct(">III")  # memory_cost, time_cost, parallelism (3 x uint32 BE)
 _SLOT_SIZE = 144
@@ -64,10 +71,11 @@ class KeyslotStore:
     keyslots: list[Keyslot] = field(default_factory=list)
 
     def find(self, admin_id: str) -> Keyslot | None:
+        result = None
         for slot in self.keyslots:
             if hmac.compare_digest(slot.admin_id.encode(), admin_id.encode()):
-                return slot
-        return None
+                result = slot
+        return result
 
     def admin_ids(self) -> list[str]:
         return [s.admin_id for s in self.keyslots]
@@ -214,16 +222,14 @@ def deserialize_keyslot(data: bytes, *, role: str = "admin") -> Keyslot:
     memory_cost, time_cost, parallelism = _SLOT_STRUCT.unpack(data[32:44])
 
     # Bounds-check KDF parameters to prevent absurdly weak keys on restore.
-    _MIN_MEM_KIB = 65_536   # 64 MiB
-    _MIN_TIME = 1
-    if memory_cost < _MIN_MEM_KIB:
+    if memory_cost < ARGON2_MEMORY_COST_MIN_KIB:
         raise ValueError(
-            f"Keyslot memory_cost {memory_cost} KiB is below minimum {_MIN_MEM_KIB}"
+            f"Keyslot memory_cost {memory_cost} KiB is below minimum {ARGON2_MEMORY_COST_MIN_KIB}"
         )
-    if time_cost < _MIN_TIME:
-        raise ValueError(f"Keyslot time_cost {time_cost} is below minimum {_MIN_TIME}")
-    if parallelism < 1 or parallelism > 255:
-        raise ValueError(f"Keyslot parallelism {parallelism} out of range [1, 255]")
+    if time_cost < ARGON2_TIME_COST_MIN:
+        raise ValueError(f"Keyslot time_cost {time_cost} is below minimum {ARGON2_TIME_COST_MIN}")
+    if parallelism < ARGON2_PARALLELISM_MIN or parallelism > ARGON2_PARALLELISM_MAX:
+        raise ValueError(f"Keyslot parallelism {parallelism} out of range [{ARGON2_PARALLELISM_MIN}, {ARGON2_PARALLELISM_MAX}]")
 
     nonce = data[44:56]
     wrapped_key = data[56:104]

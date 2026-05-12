@@ -192,7 +192,7 @@ function LayoutInner() {
   // ── Listen for 401 events from any page's API calls ───────────────────────
   useEffect(() => {
     const handler = () => {
-      try { localStorage.removeItem("vault_users"); } catch { /* ignore */ }
+      try { sessionStorage.removeItem("vault_users"); } catch { /* ignore */ }
       setVaultState("locked");
       setInitResult(null);
       setAdminActive(false);
@@ -414,7 +414,7 @@ function LayoutInner() {
 
   const handleLock = async () => {
     try { await api.lock(); } catch { /* ignore */ }
-    try { localStorage.removeItem("vault_users"); } catch { /* ignore */ }
+    try { sessionStorage.removeItem("vault_users"); } catch { /* ignore */ }
     setAdminActive(false);
     setVaultState("locked");
     setInitResult(null);
@@ -452,7 +452,7 @@ function LayoutInner() {
       // Belt + braces: also drop any other dashboard-cached state that
       // could survive a Fresh-Start and confuse the next vault.
       try {
-        localStorage.removeItem("vault_users");
+        sessionStorage.removeItem("vault_users");
       } catch {
         /* ignore */
       }

@@ -20,14 +20,14 @@ export function Users() {
   });
 
   useEffect(() => {
-    const saved = localStorage.getItem("vault_users");
+    const saved = sessionStorage.getItem("vault_users");
     if (saved) {
       setUsers(JSON.parse(saved));
     }
   }, []);
 
   useEffect(() => {
-    localStorage.setItem("vault_users", JSON.stringify(users));
+    sessionStorage.setItem("vault_users", JSON.stringify(users));
   }, [users]);
 
   const handleAddUser = (e: React.FormEvent) => {

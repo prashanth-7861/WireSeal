@@ -13,6 +13,16 @@ export const VAULT_LOCKED_EVENT = "wireseal:vault-locked";
 // Cleared on lock. Used by UI guards (e.g. Admins.tsx self-removal).
 let _currentAdminId: string | null = null;
 
+// DASH-02: Generate a CSRF token once per page load.
+function _getCsrfToken(): string {
+  let token = sessionStorage.getItem("csrf_token");
+  if (!token) {
+    token = crypto.randomUUID();
+    sessionStorage.setItem("csrf_token", token);
+  }
+  return token;
+}
+
 async function _fetch<T>(
   method: string,
   path: string,
@@ -22,7 +32,10 @@ async function _fetch<T>(
   try {
     res = await fetch(`${BASE}${path}`, {
       method,
-      headers: body !== undefined ? { "Content-Type": "application/json" } : {},
+      headers: {
+        ...(body !== undefined ? { "Content-Type": "application/json" } : {}),
+        "X-CSRF-Token": _getCsrfToken(),
+      },
       body: body !== undefined ? JSON.stringify(body) : undefined,
     });
   } catch {

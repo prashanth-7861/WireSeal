@@ -276,6 +276,10 @@ def validate_server_config(config: dict[str, Any]) -> None:
     if config.get("private_key"):
         validate_wg_key(config["private_key"], "server_private_key")
 
+    # CORE-10: validate public_key when non-empty (empty is allowed at render time)
+    if config.get("public_key"):
+        validate_wg_key(config["public_key"], "server_public_key")
+
     # Server port
     validate_port(config["port"], "server_port")
 

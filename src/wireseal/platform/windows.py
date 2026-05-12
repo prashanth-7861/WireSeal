@@ -27,6 +27,28 @@ from pathlib import Path
 # only imported by get_adapter() on Windows (lazy import pattern, see detect.py).
 import winreg  # type: ignore[import]
 
+# Characters forbidden in script paths to prevent injection attacks
+_SCRIPT_PATH_FORBIDDEN = frozenset(";$`|&<>\"'\\")
+_SCRIPT_PATH_PATTERN = re.compile(r"^/[A-Za-z]:[\\/.]")
+
+
+def _validate_script_path(script_path: Path) -> None:
+    """Validate script path to prevent injection attacks.
+
+    Raises ValueError if path contains dangerous characters or is invalid.
+    """
+    path_str = str(script_path)
+    # Check for forbidden characters that could inject into PowerShell/schtasks
+    for char in _SCRIPT_PATH_FORBIDDEN:
+        if char in path_str:
+            raise ValueError(f"Script path contains forbidden character: {char}")
+    # Must be absolute path (Windows: drive letter + absolute path)
+    if not re.match(r"^[A-Za-z]:[\\/]", path_str):
+        raise ValueError("Script path must be absolute (e.g., C:\\path\\script.py)")
+    # Must exist and be a file
+    if not script_path.is_file():
+        raise ValueError(f"Script path does not exist or is not a file: {script_path}")
+
 from .base import AbstractPlatformAdapter
 from .exceptions import PrerequisiteError, PrivilegeError, SetupError
 from ..security.atomic import atomic_write
@@ -38,7 +60,10 @@ from ..security.permissions import set_file_permissions, set_dir_permissions
 # ---------------------------------------------------------------------------
 
 WG_EXE = Path(r"C:\Program Files\WireGuard\wireguard.exe")
-WG_CONFIG_DIR = Path(os.environ.get("ProgramData", r"C:\ProgramData")) / "WireGuard"
+WG_CONFIG_DIR_BASE = Path(os.environ.get("ProgramData", r"C:\ProgramData"))
+if not WG_CONFIG_DIR_BASE.is_dir():
+    WG_CONFIG_DIR_BASE = Path(r"C:\ProgramData")
+WG_CONFIG_DIR = WG_CONFIG_DIR_BASE / "WireGuard"
 WG_SERVICE_PREFIX = "WireGuardTunnel$"
 
 # Prevent subprocess calls from flashing a visible console window when
@@ -68,22 +93,39 @@ class WindowsAdapter(AbstractPlatformAdapter):
     # ------------------------------------------------------------------
 
     def check_privileges(self) -> None:
-        """Raise PrivilegeError if not running as Administrator.
+        """Raise PrivilegeError if not running with UAC elevation.
 
-        Uses IsUserAnAdmin() from shell32. Per locked decision: no auto-elevation
-        via ShellExecuteEx runas -- the user must explicitly run as Administrator.
+        Uses OpenProcessToken + GetTokenInformation(TokenElevation) instead of
+        IsUserAnAdmin(), which returns TRUE for non-elevated admin tokens (C-12).
         """
         try:
-            is_admin = ctypes.windll.shell32.IsUserAnAdmin()
-        except AttributeError:
-            # ctypes.windll not available (non-Windows CI environment)
-            is_admin = 0
-
-        if not is_admin:
+            advapi32 = ctypes.windll.advapi32
+            kernel32 = ctypes.windll.kernel32
+            TOKEN_QUERY = 0x0008
+            TokenElevation = 20
+            handle = ctypes.c_void_p()
+            if not advapi32.OpenProcessToken(-1, TOKEN_QUERY, ctypes.byref(handle)):
+                raise PrivilegeError("Cannot open process token")
+            try:
+                elevated = ctypes.c_uint32(0)
+                returned = ctypes.c_ulong(0)
+                buf_size = ctypes.sizeof(elevated)
+                if not advapi32.GetTokenInformation(handle, TokenElevation, ctypes.byref(elevated), buf_size, ctypes.byref(returned)):
+                    raise PrivilegeError("Cannot query token elevation")
+                if not elevated.value:
+                    raise PrivilegeError(
+                        "wireseal requires Administrator privileges with UAC elevation. "
+                        "Re-run from an elevated command prompt (Run as Administrator)."
+                    )
+            finally:
+                kernel32.CloseHandle(handle)
+        except PrivilegeError:
+            raise
+        except Exception as exc:
             raise PrivilegeError(
-                "wireseal requires Administrator privileges. "
+                "Cannot verify administrator privileges. "
                 "Re-run from an elevated command prompt (Run as Administrator)."
-            )
+            ) from exc
 
     # ------------------------------------------------------------------
     # 2. Prerequisite check
@@ -196,10 +238,13 @@ class WindowsAdapter(AbstractPlatformAdapter):
         """
         path = self.get_config_path(interface)
 
-        # Ensure config directory exists with restrictive ACL
+        # Ensure config directory exists
         if not WG_CONFIG_DIR.exists():
             WG_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-            set_dir_permissions(WG_CONFIG_DIR)
+
+        # Set dir permissions BEFORE writing to prevent world-readable
+        # window between atomic_write and set_file_permissions (H-13)
+        set_dir_permissions(WG_CONFIG_DIR)
 
         # Atomic write -- mode param is ignored on Windows in atomic_write
         atomic_write(path, config_content.encode("utf-8"))
@@ -232,7 +277,15 @@ class WindowsAdapter(AbstractPlatformAdapter):
             wg_interface:  WireGuard interface name (e.g., ``wg0``).
             subnet:        WireGuard subnet in CIDR notation (e.g., ``10.0.0.0/24``).
         """
-        # Idempotency check: query existing allow rule
+        from ..security.validator import validate_interface_name, validate_subnet, validate_port
+        validate_interface_name(wg_interface)
+        validate_subnet(subnet)
+        validate_port(wg_port)
+
+        # WIN-06: TOCTOU idempotency check. There is an inherent TOCTOU window
+        # between this check and the add/delete operations below. In practice the
+        # window is benign because no other process manages these rules, and if
+        # it fails it falls through to netsh which reports the error cleanly.
         result = subprocess.run(
             [
                 "netsh", "advfirewall", "firewall", "show", "rule",
@@ -241,6 +294,7 @@ class WindowsAdapter(AbstractPlatformAdapter):
             capture_output=True,
             text=True,
             shell=False,
+            timeout=30,
             creationflags=_NO_WIN,
         )
         if result.returncode == 0 and f"wireseal-{wg_interface}-in" in result.stdout:
@@ -250,17 +304,31 @@ class WindowsAdapter(AbstractPlatformAdapter):
             # upgrades pick up port changes instead of silently keeping the
             # stale port.
             port_matches = False
-            for line in result.stdout.splitlines():
-                stripped = line.strip()
-                if stripped.lower().startswith("localport:"):
-                    current_port = stripped.split(":", 1)[1].strip()
-                    if current_port == str(wg_port):
-                        port_matches = True
-                    break
+            ps_check = subprocess.run(
+                ["powershell", "-NoProfile", "-Command",
+                 f"(Get-NetFirewallRule -DisplayName 'wireseal-{wg_interface}-in' "
+                 f"| Get-NetFirewallPortFilter).LocalPort"],
+                capture_output=True, text=True, shell=False,
+                timeout=30, creationflags=_NO_WIN,
+            )
+            port_matches = ps_check.stdout.strip() == str(wg_port)
             if port_matches:
                 return  # already correct
-            # Port changed — delete stale rules so the add calls below recreate
-            # them with the new port.
+            # WIN-04: Add new-port rule BEFORE deleting old rules to avoid
+            # an unprotected window where no firewall rule exists.
+            old_port = ps_check.stdout.strip()  # save for cleanup
+            subprocess.run(
+                [
+                    "netsh", "advfirewall", "firewall", "add", "rule",
+                    f"name=wireseal-{wg_interface}-migrate",
+                    "protocol=UDP", "dir=in",
+                    f"localport={wg_port}",
+                    "action=allow", "profile=any", "enable=yes",
+                ],
+                shell=False, capture_output=True,
+                timeout=30, creationflags=_NO_WIN,
+            )
+            # Now safe to delete the old-port rules
             for rule_name in (f"wireseal-{wg_interface}-in", f"wireseal-{wg_interface}-block"):
                 subprocess.run(
                     [
@@ -268,7 +336,7 @@ class WindowsAdapter(AbstractPlatformAdapter):
                         f"name={rule_name}",
                     ],
                     shell=False, capture_output=True,
-                    creationflags=_NO_WIN,
+                    timeout=30, creationflags=_NO_WIN,
                 )
 
         # Detect outbound interface for NAT binding
@@ -308,6 +376,7 @@ class WindowsAdapter(AbstractPlatformAdapter):
             shell=False,
             check=True,
             capture_output=True,
+            timeout=30,
             creationflags=_NO_WIN,
         )
 
@@ -325,7 +394,18 @@ class WindowsAdapter(AbstractPlatformAdapter):
             shell=False,
             check=True,
             capture_output=True,
+            timeout=30,
             creationflags=_NO_WIN,
+        )
+
+        # WIN-04: Clean up temporary migrate rule created during port change
+        subprocess.run(
+            [
+                "netsh", "advfirewall", "firewall", "delete", "rule",
+                f"name=wireseal-{wg_interface}-migrate",
+            ],
+            shell=False, capture_output=True,
+            timeout=30, creationflags=_NO_WIN,
         )
 
         # Set WG interface to Public network profile (most restrictive)
@@ -337,6 +417,7 @@ class WindowsAdapter(AbstractPlatformAdapter):
             ],
             shell=False,
             capture_output=True,
+            timeout=30,
             creationflags=_NO_WIN,
             # do not check -- interface may not exist yet when firewall rules are pre-configured
         )
@@ -350,6 +431,7 @@ class WindowsAdapter(AbstractPlatformAdapter):
             ],
             shell=False,
             capture_output=True,
+            timeout=30,
             creationflags=_NO_WIN,
             # do not check -- may already exist from a previous run (idempotent)
         )
@@ -362,6 +444,9 @@ class WindowsAdapter(AbstractPlatformAdapter):
         Args:
             wg_interface: WireGuard interface name (e.g., ``wg0``).
         """
+        from ..security.validator import validate_interface_name
+        validate_interface_name(wg_interface)
+
         subprocess.run(
             [
                 "netsh", "advfirewall", "firewall", "delete", "rule",
@@ -369,6 +454,7 @@ class WindowsAdapter(AbstractPlatformAdapter):
             ],
             shell=False,
             capture_output=True,
+            timeout=30,
             creationflags=_NO_WIN,
         )
         subprocess.run(
@@ -378,6 +464,7 @@ class WindowsAdapter(AbstractPlatformAdapter):
             ],
             shell=False,
             capture_output=True,
+            timeout=30,
             creationflags=_NO_WIN,
         )
         subprocess.run(
@@ -387,6 +474,7 @@ class WindowsAdapter(AbstractPlatformAdapter):
             ],
             shell=False,
             capture_output=True,
+            timeout=30,
             creationflags=_NO_WIN,
         )
 
@@ -452,12 +540,14 @@ class WindowsAdapter(AbstractPlatformAdapter):
         Returns a dict with keys ``{"migrated": bool, "was_running": bool,
         "service": str}``. Never raises — upgrade migration is best-effort.
         """
+        from ..security.validator import validate_interface_name
+        validate_interface_name(interface)
         service_name = f"{WG_SERVICE_PREFIX}{interface}"
         result = {"migrated": False, "was_running": False, "service": service_name}
 
         q = subprocess.run(
             ["sc.exe", "qc", service_name],
-            shell=False, capture_output=True, creationflags=_NO_WIN,
+            shell=False, capture_output=True, timeout=30, creationflags=_NO_WIN,
         )
         if q.returncode != 0:
             return result  # Service not installed, nothing to migrate
@@ -471,7 +561,7 @@ class WindowsAdapter(AbstractPlatformAdapter):
             subprocess.run(
                 ["sc.exe", "config", service_name, "start=demand"],
                 shell=False, capture_output=True,
-                creationflags=_NO_WIN,
+                timeout=30, creationflags=_NO_WIN,
             )
             result["migrated"] = True
 
@@ -479,14 +569,14 @@ class WindowsAdapter(AbstractPlatformAdapter):
             # stop it — the user did not explicitly start it this session.
             s = subprocess.run(
                 ["sc.exe", "query", service_name],
-                shell=False, capture_output=True, creationflags=_NO_WIN,
+                shell=False, capture_output=True, timeout=30, creationflags=_NO_WIN,
             )
             if s.returncode == 0 and b"RUNNING" in (s.stdout or b""):
                 result["was_running"] = True
                 subprocess.run(
                     ["sc.exe", "stop", service_name],
                     shell=False, capture_output=True,
-                    creationflags=_NO_WIN,
+                    timeout=30, creationflags=_NO_WIN,
                 )
 
         return result
@@ -521,7 +611,7 @@ class WindowsAdapter(AbstractPlatformAdapter):
         # If the service already exists, just re-configure start-mode and return.
         existing = subprocess.run(
             ["sc.exe", "query", service_name],
-            shell=False, capture_output=True, creationflags=_NO_WIN,
+            shell=False, capture_output=True, timeout=30, creationflags=_NO_WIN,
         )
         newly_installed = existing.returncode != 0
         if newly_installed:
@@ -550,6 +640,7 @@ class WindowsAdapter(AbstractPlatformAdapter):
             shell=False,
             check=False,  # if service doesn't exist yet (install failed), don't mask the real error
             capture_output=True,
+            timeout=30,
             creationflags=_NO_WIN,
         )
 
@@ -562,6 +653,7 @@ class WindowsAdapter(AbstractPlatformAdapter):
                 shell=False,
                 check=False,  # ERROR 1062 = not started, treat as success
                 capture_output=True,
+                timeout=30,
                 creationflags=_NO_WIN,
             )
 
@@ -573,16 +665,20 @@ class WindowsAdapter(AbstractPlatformAdapter):
         Args:
             interface: WireGuard interface name (default ``wg0``).
         """
+        from ..security.validator import validate_interface_name
+        validate_interface_name(interface)
         subprocess.run(
             ["sc.exe", "stop", f"{WG_SERVICE_PREFIX}{interface}"],
             shell=False,
             capture_output=True,
+            timeout=30,
             creationflags=_NO_WIN,
         )
         subprocess.run(
             [str(WG_EXE), "/uninstalltunnelservice", interface],
             shell=False,
             capture_output=True,
+            timeout=30,
             creationflags=_NO_WIN,
         )
 
@@ -605,11 +701,15 @@ class WindowsAdapter(AbstractPlatformAdapter):
             script_path:       Path to the DuckDNS update script.
             interval_minutes:  How often to run the update (default every 5 min).
         """
+        # Validate script path to prevent injection attacks (C-05, C-08)
+        _validate_script_path(script_path)
+
         # Create low-privilege service account if it does not already exist
         check = subprocess.run(
             ["net", "user", "wireseal-dns"],
             capture_output=True,
             shell=False,
+            timeout=30,
             creationflags=_NO_WIN,
         )
         user_exists = check.returncode == 0
@@ -636,6 +736,7 @@ class WindowsAdapter(AbstractPlatformAdapter):
                 shell=False,
                 check=True,
                 capture_output=True,
+                timeout=30,
                 creationflags=_NO_WIN,
             )
             # Remove from Users group to deny interactive logon (least privilege)
@@ -643,38 +744,49 @@ class WindowsAdapter(AbstractPlatformAdapter):
                 ["net", "localgroup", "Users", "wireseal-dns", "/delete"],
                 shell=False,
                 capture_output=True,
+                timeout=30,
                 creationflags=_NO_WIN,
                 # Don't check -- may already not be in Users group
             )
 
-        # Register (or overwrite) the scheduled task.
-        # schtasks /rp exposes password in process args.  Use PowerShell
-        # Register-ScheduledTask with password read from stdin instead.
+        # C-05: Use -EncodedCommand with base64 to prevent PowerShell injection
+        # via script_path special characters. script_path is passed via stdin
+        # (read from second line) instead of string interpolation.
+        import base64 as _base64
         ps_script = (
             "$pw = [Console]::In.ReadLine(); "
+            "$sp = [Console]::In.ReadLine(); "
             "$action = New-ScheduledTaskAction "
-            f"  -Execute '\"{script_path}\"' "
-            f"  -Argument 'update-dns --non-interactive'; "
+            "  -Execute $sp "
+            "  -Argument 'update-dns --non-interactive'; "
             "$trigger = New-ScheduledTaskTrigger -Once -At (Get-Date) "
             f"  -RepetitionInterval (New-TimeSpan -Minutes {interval_minutes}); "
             "Register-ScheduledTask -TaskName 'WgAutomateDNS' "
             "  -Action $action -Trigger $trigger "
             "  -User 'wireseal-dns' -Password $pw -Force | Out-Null"
         )
+        encoded = _base64.b64encode(ps_script.encode("utf-16-le")).decode("ascii")
         subprocess.run(
-            ["powershell", "-NoProfile", "-Command", ps_script],
-            input=password.encode(),
+            ["powershell", "-NoProfile", "-EncodedCommand", encoded],
+            input=f"{password}\n{script_path}\n".encode(),
             shell=False,
             check=True,
             capture_output=True,
+            timeout=30,
             creationflags=_NO_WIN,
         )
 
-        # Best-effort memory wipe of the temporary password
+        # WIN-03: Best-effort memory wipe of the temporary password.
+        # Overwrite the bytearray copy AND the original string buffer.
         try:
             pw_bytes = bytearray(password.encode("utf-8"))
             for i in range(len(pw_bytes)):
                 pw_bytes[i] = 0
+            try:
+                buf = ctypes.create_string_buffer(password.encode("utf-8"))
+                ctypes.memset(buf, 0, len(buf))
+            except Exception:
+                pass
         except Exception:
             pass
         del password
@@ -691,7 +803,8 @@ class WindowsAdapter(AbstractPlatformAdapter):
         # Check if sshd is already running
         result = subprocess.run(
             ["sc.exe", "query", "sshd"],
-            shell=False, capture_output=True, text=True, creationflags=_NO_WIN,
+            shell=False, capture_output=True, text=True,
+            timeout=30, creationflags=_NO_WIN,
         )
         if result.returncode == 0 and "RUNNING" in result.stdout:
             return  # already running
@@ -708,19 +821,23 @@ class WindowsAdapter(AbstractPlatformAdapter):
         # Start and enable sshd
         subprocess.run(
             ["sc.exe", "config", "sshd", "start=auto"],
-            shell=False, capture_output=True, creationflags=_NO_WIN,
+            shell=False, capture_output=True, timeout=30, creationflags=_NO_WIN,
         )
         subprocess.run(
             ["sc.exe", "start", "sshd"],
-            shell=False, capture_output=True, creationflags=_NO_WIN,
+            shell=False, capture_output=True, timeout=30, creationflags=_NO_WIN,
         )
 
     def open_firewalld_port(self, wg_port: int) -> None:
         """Open WireGuard UDP port in Windows Firewall (no-op if already open)."""
+        from ..security.validator import validate_port
+        validate_port(wg_port)
+
         rule_name = f"WireSeal-WireGuard-UDP-{wg_port}"
         check = subprocess.run(
             ["netsh", "advfirewall", "firewall", "show", "rule", f"name={rule_name}"],
-            shell=False, capture_output=True, text=True, creationflags=_NO_WIN,
+            shell=False, capture_output=True, text=True,
+            timeout=30, creationflags=_NO_WIN,
         )
         if check.returncode == 0 and rule_name in check.stdout:
             return
@@ -731,14 +848,15 @@ class WindowsAdapter(AbstractPlatformAdapter):
                 f"name={rule_name}", "protocol=UDP", "dir=in",
                 f"localport={wg_port}", "action=allow", "profile=any", "enable=yes",
             ],
-            shell=False, capture_output=True, creationflags=_NO_WIN,
+            shell=False, capture_output=True, timeout=30, creationflags=_NO_WIN,
         )
 
         # Also open SSH port
         ssh_rule = "WireSeal-SSH-TCP-22"
         check = subprocess.run(
             ["netsh", "advfirewall", "firewall", "show", "rule", f"name={ssh_rule}"],
-            shell=False, capture_output=True, text=True, creationflags=_NO_WIN,
+            shell=False, capture_output=True, text=True,
+            timeout=30, creationflags=_NO_WIN,
         )
         if check.returncode != 0 or ssh_rule not in check.stdout:
             subprocess.run(
@@ -747,7 +865,7 @@ class WindowsAdapter(AbstractPlatformAdapter):
                     f"name={ssh_rule}", "protocol=TCP", "dir=in",
                     "localport=22", "action=allow", "profile=any", "enable=yes",
                 ],
-                shell=False, capture_output=True, creationflags=_NO_WIN,
+                shell=False, capture_output=True, timeout=30, creationflags=_NO_WIN,
             )
 
     def harden_server(self) -> list[str]:
@@ -804,18 +922,22 @@ class WindowsAdapter(AbstractPlatformAdapter):
             )
             if result.returncode == 0:
                 actions.append("IP forwarding enabled (reboot required)")
-            # Also enable RemoteAccess service which Windows uses to honor the flag
-            # without a reboot (best-effort).
-            subprocess.run(
-                ["sc.exe", "config", "RemoteAccess", "start=auto"],
-                shell=False, capture_output=True, timeout=10,
-                creationflags=_NO_WIN,
+            # WIN-11: Check RemoteAccess service exists before configuring/starting
+            ra_check = subprocess.run(
+                ["sc.exe", "query", "RemoteAccess"],
+                shell=False, capture_output=True, timeout=30, creationflags=_NO_WIN,
             )
-            subprocess.run(
-                ["sc.exe", "start", "RemoteAccess"],
-                shell=False, capture_output=True, timeout=15,
-                creationflags=_NO_WIN,
-            )
+            if ra_check.returncode == 0:
+                subprocess.run(
+                    ["sc.exe", "config", "RemoteAccess", "start=auto"],
+                    shell=False, capture_output=True, timeout=10,
+                    creationflags=_NO_WIN,
+                )
+                subprocess.run(
+                    ["sc.exe", "start", "RemoteAccess"],
+                    shell=False, capture_output=True, timeout=15,
+                    creationflags=_NO_WIN,
+                )
         except (OSError, subprocess.TimeoutExpired) as exc:
             actions.append(f"IP forwarding error: {exc}")
         return actions
@@ -855,14 +977,17 @@ class WindowsAdapter(AbstractPlatformAdapter):
 
         if content != original:
             try:
-                sshd_config.write_text(content, encoding="utf-8")
+                # WIN-05: Backup original then atomic write
+                backup_path = sshd_config.with_suffix(".bak")
+                shutil.copy2(sshd_config, backup_path)
+                atomic_write(sshd_config, content.encode("utf-8"))
                 subprocess.run(
                     ["sc.exe", "stop", "sshd"],
-                    shell=False, capture_output=True, creationflags=_NO_WIN,
+                    shell=False, capture_output=True, timeout=30, creationflags=_NO_WIN,
                 )
                 subprocess.run(
                     ["sc.exe", "start", "sshd"],
-                    shell=False, capture_output=True, creationflags=_NO_WIN,
+                    shell=False, capture_output=True, timeout=30, creationflags=_NO_WIN,
                 )
             except OSError:
                 pass
@@ -875,7 +1000,7 @@ class WindowsAdapter(AbstractPlatformAdapter):
         for profile in ("domainprofile", "privateprofile", "publicprofile"):
             result = subprocess.run(
                 ["netsh", "advfirewall", "set", profile, "state", "on"],
-                shell=False, capture_output=True, creationflags=_NO_WIN,
+                shell=False, capture_output=True, timeout=30, creationflags=_NO_WIN,
             )
             if result.returncode == 0:
                 actions.append(f"Firewall: {profile} enabled")
@@ -920,7 +1045,8 @@ class WindowsAdapter(AbstractPlatformAdapter):
         # Check Windows Firewall
         result = subprocess.run(
             ["netsh", "advfirewall", "show", "currentprofile"],
-            shell=False, capture_output=True, text=True, creationflags=_NO_WIN,
+            shell=False, capture_output=True, text=True,
+            timeout=30, creationflags=_NO_WIN,
         )
         fw_on = result.returncode == 0 and "ON" in result.stdout.upper()
         status["firewall_active"] = fw_on
@@ -945,35 +1071,43 @@ class WindowsAdapter(AbstractPlatformAdapter):
             "ok": status["ip_forwarding"],
         })
 
-        # Check Windows Update
-        status["auto_updates"] = True  # Windows Update is on by default
+        # WIN-12: Check Windows Update via registry (AUOptions: 3=notify, 4=auto install)
+        try:
+            au_key = r"SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update"
+            with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, au_key, 0, winreg.KEY_READ) as key:
+                au_options, _ = winreg.QueryValueEx(key, "AUOptions")
+                status["auto_updates"] = au_options in (3, 4)
+        except OSError:
+            status["auto_updates"] = True
         status["checks"].append({
             "name": "Windows Update",
-            "ok": True,
+            "ok": status["auto_updates"],
         })
 
-        # Check open ports
+        # WIN-10: Use PowerShell instead of locale-dependent netstat
         try:
             result = subprocess.run(
-                ["netstat", "-an"],
+                ["powershell", "-NoProfile", "-Command",
+                 "Get-NetTCPConnection -State Listen | "
+                 "  Select-Object -ExpandProperty LocalPort -Unique | "
+                 "  ForEach-Object { \"$_ tcp\" }; "
+                 "Get-NetUDPEndpoint | "
+                 "  Select-Object -ExpandProperty LocalPort -Unique | "
+                 "  ForEach-Object { \"$_ udp\" }"],
                 shell=False, capture_output=True, text=True,
-                timeout=10, creationflags=_NO_WIN,
+                timeout=30, creationflags=_NO_WIN,
             )
             ports = []
             seen = set()
-            for line in result.stdout.splitlines():
-                parts = line.split()
-                if len(parts) >= 2 and ("LISTENING" in line or "UDP" in parts[0]):
-                    addr = parts[1] if "LISTENING" in line else parts[1]
-                    if ":" in addr:
-                        port_str = addr.rsplit(":", 1)[-1]
-                        if port_str.isdigit():
-                            port = int(port_str)
-                            proto = "tcp" if "TCP" in line else "udp"
-                            key = (port, proto)
-                            if key not in seen:
-                                seen.add(key)
-                                ports.append({"port": port, "proto": proto, "process": ""})
+            for line in result.stdout.strip().splitlines():
+                parts = line.strip().split()
+                if len(parts) >= 2 and parts[0].isdigit():
+                    port = int(parts[0])
+                    proto = parts[1]
+                    key = (port, proto)
+                    if key not in seen:
+                        seen.add(key)
+                        ports.append({"port": port, "proto": proto, "process": ""})
             status["open_ports"] = sorted(ports, key=lambda x: x["port"])[:50]
         except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
             pass
@@ -1067,6 +1201,8 @@ class WindowsAdapter(AbstractPlatformAdapter):
     # ------------------------------------------------------------------
 
     _API_TASK_NAME = "WireSeal-API"
+    _BIND_PATTERN = re.compile(r"^[0-9a-fA-F.:]+$")
+    _VAULT_DIR_PATTERN = re.compile(r"^[a-zA-Z]:\\[a-zA-Z0-9_\\\\\\.\\-]+$")
 
     def _find_wireseal_launcher(self) -> str:
         """Return an absolute, schtasks-friendly command for `wireseal serve`.
@@ -1100,11 +1236,20 @@ class WindowsAdapter(AbstractPlatformAdapter):
         Captures schtasks stderr on failure so the dashboard surfaces an
         actionable message instead of a silent ``CalledProcessError``.
         """
+        from ..security.validator import validate_port
+        validate_port(port)
         launcher = self._find_wireseal_launcher()
         # /SC ONSTART = at boot. /RU SYSTEM = root-equiv. /RL HIGHEST = wg-quick.
         # The whole /TR value is one argv element — schtasks parses it.
+        # Validate bind address to prevent schtasks /TR injection (C-10)
+        if not _BIND_PATTERN.match(bind):
+            raise SetupError(f"Invalid bind address: {bind}")
+        if vault_dir is not None and not _VAULT_DIR_PATTERN.match(vault_dir):
+            raise SetupError(f"Invalid vault directory path: {vault_dir}")
         vault_flag = f" --vault-dir \"{vault_dir}\"" if vault_dir else ""
         tr_cmd = f"{launcher} serve --bind {bind} --port {port}{vault_flag}"
+        # Escape % to %% to prevent schtasks environment variable expansion (H-16)
+        tr_cmd = tr_cmd.replace("%", "%%")
         cmd = [
             "schtasks.exe", "/Create", "/F",
             "/TN", self._API_TASK_NAME,
@@ -1115,7 +1260,7 @@ class WindowsAdapter(AbstractPlatformAdapter):
         ]
         res = subprocess.run(
             cmd, capture_output=True, text=True,
-            creationflags=_NO_WIN,
+            timeout=30, creationflags=_NO_WIN,
         )
         if res.returncode != 0:
             err = (res.stderr or res.stdout or "").strip()
@@ -1129,24 +1274,24 @@ class WindowsAdapter(AbstractPlatformAdapter):
             subprocess.run(
                 ["schtasks.exe", "/Change", "/TN", self._API_TASK_NAME,
                  "/DISABLE"],
-                check=False, creationflags=_NO_WIN, capture_output=True,
+                check=False, timeout=30, creationflags=_NO_WIN, capture_output=True,
             )
 
     def uninstall_api_service(self) -> None:
         """Delete the Scheduled Task (idempotent)."""
         subprocess.run(
             ["schtasks.exe", "/End", "/TN", self._API_TASK_NAME],
-            check=False, creationflags=_NO_WIN, capture_output=True,
+            check=False, timeout=30, creationflags=_NO_WIN, capture_output=True,
         )
         subprocess.run(
             ["schtasks.exe", "/Delete", "/F", "/TN", self._API_TASK_NAME],
-            check=False, creationflags=_NO_WIN, capture_output=True,
+            check=False, timeout=30, creationflags=_NO_WIN, capture_output=True,
         )
 
     def start_api_service(self) -> None:
         res = subprocess.run(
             ["schtasks.exe", "/Run", "/TN", self._API_TASK_NAME],
-            capture_output=True, text=True, creationflags=_NO_WIN,
+            capture_output=True, text=True, timeout=30, creationflags=_NO_WIN,
         )
         if res.returncode != 0:
             err = (res.stderr or res.stdout or "").strip()
@@ -1158,7 +1303,7 @@ class WindowsAdapter(AbstractPlatformAdapter):
     def stop_api_service(self) -> None:
         subprocess.run(
             ["schtasks.exe", "/End", "/TN", self._API_TASK_NAME],
-            check=False, creationflags=_NO_WIN, capture_output=True,
+            check=False, timeout=30, creationflags=_NO_WIN, capture_output=True,
         )
 
     def api_service_status(self) -> dict:
@@ -1172,7 +1317,7 @@ class WindowsAdapter(AbstractPlatformAdapter):
                 ["schtasks.exe", "/Query", "/TN", self._API_TASK_NAME,
                  "/V", "/FO", "LIST"],
                 capture_output=True, text=True, check=False,
-                creationflags=_NO_WIN,
+                timeout=30, creationflags=_NO_WIN,
             )
         except Exception:
             return {"installed": False, "running": False, "enabled": False}

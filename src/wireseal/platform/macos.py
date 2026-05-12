@@ -26,6 +26,24 @@ import subprocess
 import sys
 from pathlib import Path
 
+# Characters forbidden in script paths to prevent launchd injection
+_SCRIPT_PATH_FORBIDDEN = frozenset(";&|$`\n\r#" + "'" + '"')
+
+
+def _validate_script_path(script_path: Path) -> None:
+    """Validate script path to prevent injection.
+
+    Raises ValueError if path contains dangerous characters or is invalid.
+    """
+    path_str = str(script_path)
+    for char in _SCRIPT_PATH_FORBIDDEN:
+        if char in path_str:
+            raise ValueError(f"Script path contains forbidden character: {repr(char)}")
+    if not path_str.startswith("/"):
+        raise ValueError("Script path must be absolute")
+    if not script_path.is_file():
+        raise ValueError(f"Script path does not exist or is not a file: {script_path}")
+
 from .base import AbstractPlatformAdapter
 from .exceptions import PrivilegeError, PrerequisiteError, SetupError
 from ..security.atomic import atomic_write
@@ -51,12 +69,12 @@ class MacOSAdapter(AbstractPlatformAdapter):
     # ------------------------------------------------------------------
 
     def _get_brew_prefix(self) -> str:
-        """Return the Homebrew prefix, caching the result after the first call.
+        """Return the Homebrew prefix, validating cached path still exists.
 
         Raises:
             PrerequisiteError: If Homebrew is not installed.
         """
-        if self._brew_prefix is not None:
+        if self._brew_prefix is not None and Path(self._brew_prefix).exists():
             return self._brew_prefix
 
         try:
@@ -103,6 +121,29 @@ class MacOSAdapter(AbstractPlatformAdapter):
         """Set file permissions using chmod."""
         self._run(["chmod", mode, str(path)])
 
+    @staticmethod
+    def _rotate_log(log_path: Path, max_bytes: int = 10 * 1024 * 1024) -> None:
+        """Rotate log file if it exceeds max_bytes.
+
+        Rotates to <path>.1, then <path>.2, ... <path>.5, dropping oldest.
+        No-op if the file does not exist or is smaller than max_bytes.
+        """
+        if not log_path.exists():
+            return
+        try:
+            if log_path.stat().st_size <= max_bytes:
+                return
+            for i in range(4, 0, -1):
+                older = Path(f"{log_path}.{i}")
+                newer = Path(f"{log_path}.{i - 1}")
+                if older.exists():
+                    older.unlink()
+                if newer.exists():
+                    newer.rename(older)
+            log_path.rename(Path(f"{log_path}.1"))
+        except OSError:
+            pass
+
     # ------------------------------------------------------------------
     # 1. Privilege check
     # ------------------------------------------------------------------
@@ -119,6 +160,9 @@ class MacOSAdapter(AbstractPlatformAdapter):
             )
         sudo_user = os.environ.get("SUDO_USER")
         if sudo_user:
+            _SUDO_USER_RE = re.compile(r"^[a-zA-Z0-9_][a-zA-Z0-9_-]*$")
+            if not _SUDO_USER_RE.match(sudo_user):
+                raise SetupError(f"Invalid SUDO_USER: {sudo_user!r}")
             print(
                 f"Warning: running as root via sudo (original user: {sudo_user}). "
                 f"The vault will be created under /Users/{sudo_user}/.wireseal/ "
@@ -191,6 +235,10 @@ class MacOSAdapter(AbstractPlatformAdapter):
                 "Install manually: brew install wireguard-tools (as your regular user), "
                 "then re-run wireseal."
             )
+        if not re.fullmatch(r"[a-zA-Z0-9_][a-zA-Z0-9_-]*", sudo_user):
+            raise ValueError(
+                f"SUDO_USER contains invalid characters: {sudo_user!r}"
+            )
 
         self._run(
             ["sudo", "-u", sudo_user, "brew", "install", "wireguard-tools"],
@@ -239,6 +287,11 @@ class MacOSAdapter(AbstractPlatformAdapter):
             wg_interface:  WireGuard interface name (e.g., ``wg0``).
             subnet:        WireGuard subnet in CIDR notation (e.g., ``10.0.0.0/24``).
         """
+        from ..security.validator import validate_interface_name, validate_subnet, validate_port
+        validate_interface_name(wg_interface)
+        validate_subnet(subnet)
+        validate_port(wg_port)
+
         outbound = self.detect_outbound_interface()
 
         rules = (
@@ -318,6 +371,9 @@ class MacOSAdapter(AbstractPlatformAdapter):
             wg_interface: WireGuard interface name (unused on macOS -- anchor
                           is keyed by name, not interface).
         """
+        from ..security.validator import validate_interface_name
+        validate_interface_name(wg_interface)
+
         # Flush all rules from the anchor
         subprocess.run(
             ["pfctl", "-a", self._PF_ANCHOR, "-F", "all"],
@@ -325,18 +381,10 @@ class MacOSAdapter(AbstractPlatformAdapter):
             capture_output=True,
         )
 
-        # Release pf token if one was saved
+        # Remove pf token if one was saved
         token_path = self._PF_TOKEN_PATH
         if token_path.exists():
             try:
-                token = token_path.read_text().strip()
-                if token and token != self._PF_ANCHOR:
-                    # Only call pfctl -X if the token is a numeric pf reference
-                    subprocess.run(
-                        ["pfctl", "-X", token],
-                        shell=False,
-                        capture_output=True,
-                    )
                 token_path.unlink(missing_ok=True)
             except OSError:
                 pass
@@ -352,6 +400,17 @@ class MacOSAdapter(AbstractPlatformAdapter):
         A companion launchd plist at boot time ensures forwarding survives
         reboots without relying on sysctl.conf.
         """
+        sip_check = subprocess.run(
+            ["csrutil", "status"],
+            capture_output=True, text=True, timeout=10,
+        )
+        if "enabled" in sip_check.stdout.lower():
+            print(
+                "[wireseal] Warning: SIP is enabled. "
+                "IP forwarding may require disabling SIP.",
+                file=sys.stderr,
+            )
+
         # Apply immediately
         self._run(["/usr/sbin/sysctl", "-w", "net.inet.ip.forwarding=1"])
 
@@ -393,6 +452,8 @@ class MacOSAdapter(AbstractPlatformAdapter):
         Args:
             interface: WireGuard interface name (default ``wg0``).
         """
+        self._rotate_log(Path("/var/log/wireseal.err"))
+
         brew_prefix = self._get_brew_prefix()
         wg_quick = str(Path(brew_prefix) / "bin" / "wg-quick")
         config_path = self.get_config_path(interface)
@@ -471,7 +532,12 @@ class MacOSAdapter(AbstractPlatformAdapter):
             script_path:      Path to the DuckDNS update script.
             interval_minutes: Update interval in minutes (default 5).
         """
+        # Validate script path to prevent injection
+        _validate_script_path(script_path)
+
         self._ensure_wg_automate_user()
+
+        self._rotate_log(Path("/var/log/wireseal-dns.err"))
 
         plist_data = {
             "Label": "com.wireseal.dns",
@@ -603,6 +669,9 @@ class MacOSAdapter(AbstractPlatformAdapter):
         On macOS, the pf anchor already handles WireGuard.
         This ensures SSH (port 22) is also allowed.
         """
+        from ..security.validator import validate_port
+        validate_port(wg_port)
+
         # macOS application firewall (socketfilterfw) — allow sshd
         subprocess.run(
             ["/usr/libexec/ApplicationFirewall/socketfilterfw", "--setglobalstate", "on"],
@@ -663,7 +732,9 @@ class MacOSAdapter(AbstractPlatformAdapter):
 
         if content != original:
             try:
-                sshd_config.write_text(content, encoding="utf-8")
+                backup = sshd_config.with_suffix(".bak.wireseal")
+                shutil.copy2(sshd_config, backup)
+                atomic_write(sshd_config, content.encode("utf-8"), mode=0o600)
                 # Restart SSH on macOS
                 subprocess.run(
                     ["launchctl", "stop", "com.openssh.sshd"],
@@ -796,10 +867,10 @@ class MacOSAdapter(AbstractPlatformAdapter):
             "fix": None if auto_up else "Enable in System Settings > Software Update",
         })
 
-        # Check open ports
+        # Check open ports (TCP and UDP)
         try:
             result = subprocess.run(
-                ["lsof", "-iTCP", "-sTCP:LISTEN", "-n", "-P"],
+                ["lsof", "-i", "-n", "-P"],
                 shell=False, capture_output=True, text=True, timeout=10,
             )
             ports = []
@@ -809,14 +880,15 @@ class MacOSAdapter(AbstractPlatformAdapter):
                 if len(parts) >= 9:
                     addr = parts[8]
                     if ":" in addr:
+                        proto = "udp" if "UDP" in parts[-1] else "tcp"
                         port_str = addr.rsplit(":", 1)[-1]
                         if port_str.isdigit():
                             port = int(port_str)
                             process = parts[0]
-                            key = (port, "tcp")
+                            key = (port, proto)
                             if key not in seen:
                                 seen.add(key)
-                                ports.append({"port": port, "proto": "tcp", "process": process})
+                                ports.append({"port": port, "proto": proto, "process": process})
             status["open_ports"] = sorted(ports, key=lambda x: x["port"])[:50]
         except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError):
             pass
@@ -860,7 +932,7 @@ class MacOSAdapter(AbstractPlatformAdapter):
             self._run(cmd)
 
     def _find_available_uid(self, low: int, high: int) -> int:
-        """Find an unused UID in the range [low, high] via dscl.
+        """Find an unused UID in the range [low, high] via single dscl call.
 
         Args:
             low:  Lowest UID to try.
@@ -872,13 +944,17 @@ class MacOSAdapter(AbstractPlatformAdapter):
         Raises:
             SetupError: If no UID is available in the given range.
         """
+        result = subprocess.run(
+            ["dscl", ".", "-list", "/Users", "UniqueID"],
+            shell=False, capture_output=True, text=True, timeout=30,
+        )
+        used: set[int] = set()
+        for line in result.stdout.splitlines():
+            parts = line.strip().split()
+            if len(parts) >= 2 and parts[1].isdigit():
+                used.add(int(parts[1]))
         for uid in range(low, high + 1):
-            result = subprocess.run(
-                ["dscl", ".", "-search", "/Users", "UniqueID", str(uid)],
-                capture_output=True,
-                shell=False,
-            )
-            if result.returncode != 0 or not result.stdout.strip():
+            if uid not in used:
                 return uid
 
         raise SetupError(
@@ -924,6 +1000,9 @@ class MacOSAdapter(AbstractPlatformAdapter):
 
         Captures `launchctl bootstrap` failure and surfaces it via SetupError.
         """
+        self._rotate_log(Path("/var/log/wireseal-api.err"))
+        self._rotate_log(Path("/var/log/wireseal-api.log"))
+
         launcher = self._find_wireseal_launcher()
         serve_args = ["serve", "--bind", bind, "--port", str(port)]
         if vault_dir:

@@ -211,12 +211,12 @@ Section "WireSeal (required)" SecMain
   ; ── Add $INSTDIR\bin to PATH (for `wireseal` CLI usage from terminal) ──
   ; Also scrub a stale $INSTDIR entry from a pre-fix install, in case the
   ; old installer added $INSTDIR directly (which now contains only the GUI).
+  ; Uses -EncodedCommand with a parameterised script to avoid string interpolation
+  ; injection (M-25): $INSTDIR is passed as a positional argument, not embedded.
   ExecWait '$WINDIR\System32\WindowsPowerShell\v1.0\powershell.exe \
-    -NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -Command \
-    "$p = [Environment]::GetEnvironmentVariable(\"PATH\", \"Machine\"); \
-     $parts = @($p -split \";\" | Where-Object { $_ -and $_ -ne \"$INSTDIR\" }); \
-     if ($parts -notcontains \"$INSTDIR\bin\") { $parts += \"$INSTDIR\bin\" }; \
-     [Environment]::SetEnvironmentVariable(\"PATH\", ($parts -join \";\"), \"Machine\")"'
+    -NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass \
+    -EncodedCommand cABhAHIAYQBtACgAWwBzAHQAcgBpAG4AZwBdACQAZAApACQAcAA9AFsARQBuAHYAaQByAG8AbgBtAGUAbgB0AF0AOgA6AEcAZQB0AEUAbgB2AGkAcgBvAG4AbQBlAG4AdABWAGEAcgBpAGEAYgBsAGUAKAAiAFAAQQBUAEgAIgAsACIATQBhAGMAaABpAG4AZQAiACkAOwAkAHAAYQByAHQAcwA9AEAAKAAkAHAALQBzAHAAbABpAHQAIgA7ACIAfABXAGgAZQByAGUALQBPAGIAagBlAGMAdAB7ACQAXwAtAGEAbgBkACQAXwAtAG4AZQAkAGQAfQApADsAaQBmACgAJABwAGEAcgB0AHMALQBuAG8AdABjAG8AbgB0AGEAaQBuAHMAKAAkAGQAKwAiAFwAXABiAGkAbgAiACkAKQB7ACQAcABhAHIAdABzACsAPQAoACQAZAArACIAXABcAGIAaQBuACIAKQB9ADsAWwBFAG4AdgBpAHIAbwBuAG0AZQBuAHQAXQA6ADoAUwBlAHQARQBuAHYAaQByAG8AbgBtAGUAbgB0AFYAYQByAGkAYQBiAGwAZQAoACIAUABBAFQASAAiACwAKAAkAHAAYQByAHQAcwAtAGoAbwBpAG4AIgA7ACIAKQAsACIATQBhAGMAaABpAG4AZQAiACkA \
+    -d "$INSTDIR"'
   SendMessage ${HWND_BROADCAST} ${WM_WININICHANGE} 0 "STR:Environment" /TIMEOUT=5000
 
   ; ── Add/Remove Programs entry ──
@@ -263,11 +263,11 @@ Section "Uninstall"
 
   ; Remove $INSTDIR and $INSTDIR\bin from system PATH (both entries are
   ; stripped so pre-fix installs that added $INSTDIR directly are cleaned up).
+  ; Uses -EncodedCommand to avoid injection (M-25).
   ExecWait '$WINDIR\System32\WindowsPowerShell\v1.0\powershell.exe \
-    -NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -Command \
-    "[Environment]::SetEnvironmentVariable(\"PATH\", \
-      (([Environment]::GetEnvironmentVariable(\"PATH\", \"Machine\") -split \";\") | \
-       Where-Object { $_ -and $_ -ne \"$INSTDIR\" -and $_ -ne \"$INSTDIR\bin\" }) -join \";\", \"Machine\")"'
+    -NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass \
+    -EncodedCommand cABhAHIAYQBtACgAWwBzAHQAcgBpAG4AZwBdACQAZAApAFsARQBuAHYAaQByAG8AbgBtAGUAbgB0AF0AOgA6AFMAZQB0AEUAbgB2AGkAcgBvAG4AbQBlAG4AdABWAGEAcgBpAGEAYgBsAGUAKAAiAFAAQQBUAEgAIgAsACgAKABbAEUAbgB2AGkAcgBvAG4AbQBlAG4AdABdADoAOgBHAGUAdABFAG4AdgBpAHIAbwBuAG0AZQBuAHQAVgBhAHIAaQBhAGIAbABlACgAIgBQAEEAVABIACIALAAiAE0AYQBjAGgAaQBuAGUAIgApAC0AcwBwAGwAaQB0ACIAOwAiACkAfABXAGgAZQByAGUALQBPAGIAagBlAGMAdAB7ACQAXwAtAGEAbgBkACQAXwAtAG4AZQAkAGQALQBhAG4AZAAkAF8ALQBuAGUAKAAkAGQAKwAiAFwAXABiAGkAbgAiACkAfQApAC0AagBvAGkAbgAiADsAIgApACwAIgBNAGEAYwBoAGkAbgBlACIAKQA= \
+    -d "$INSTDIR"'
   SendMessage ${HWND_BROADCAST} ${WM_WININICHANGE} 0 "STR:Environment" /TIMEOUT=5000
 
   ; Remove registry entries

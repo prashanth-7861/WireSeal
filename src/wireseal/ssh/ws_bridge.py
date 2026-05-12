@@ -67,6 +67,9 @@ async def _recv_loop(
     chan: asyncssh.SSHClientProcess,
 ) -> None:
     """Forward messages from the WebSocket to the SSH channel."""
+    # SSH-04: per-session rate limiter (max 100 KB/s on stdin)
+    _rate_budget = 102400.0  # 100 KB
+    _rate_last = asyncio.get_event_loop().time()
     try:
         async for raw in ws:
             if isinstance(raw, bytes):
@@ -80,10 +83,20 @@ async def _recv_loop(
             if mtype == "input":
                 data = msg.get("data", "")
                 if isinstance(data, str):
+                    now = asyncio.get_event_loop().time()
+                    elapsed = now - _rate_last
+                    _rate_last = now
+                    _rate_budget = min(102400.0, _rate_budget + elapsed * 102400.0)
+                    _rate_budget -= len(data.encode("utf-8"))
+                    if _rate_budget < 0:
+                        continue  # drop input, rate limit exceeded
                     chan.stdin.write(data)
             elif mtype == "resize":
                 cols = int(msg.get("cols", 80))
                 rows = int(msg.get("rows", 24))
+                # SSH-05: validate terminal resize dimensions
+                cols = max(40, min(cols, 400))
+                rows = max(10, min(rows, 200))
                 try:
                     chan.change_terminal_size(cols, rows)
                 except Exception:  # noqa: BLE001

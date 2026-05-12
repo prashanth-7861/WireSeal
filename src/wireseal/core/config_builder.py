@@ -18,7 +18,8 @@ import hashlib
 from pathlib import Path
 
 from filelock import FileLock
-from jinja2 import Environment, FileSystemLoader, StrictUndefined
+from jinja2.sandbox import SandboxedEnvironment
+from jinja2 import FileSystemLoader, StrictUndefined
 
 from wireseal.security.atomic import atomic_write
 
@@ -52,7 +53,7 @@ class ConfigBuilder:
         # CONFIG-01: StrictUndefined causes immediate TemplateError on missing vars.
         # autoescape=False is REQUIRED for plain text WireGuard configs: autoescape=True
         # would HTML-escape base64 '=' to '&#61;', corrupting cryptographic keys.
-        self.env = Environment(
+        self.env = SandboxedEnvironment(
             loader=FileSystemLoader(str(template_dir)),
             undefined=StrictUndefined,
             autoescape=False,  # CORRECT: plain text, not HTML
@@ -198,8 +199,13 @@ class ConfigBuilder:
 
         if lock_path is not None:
             # CONFIG-05: FileLock not SoftFileLock -- hard lock, no silent fallback
-            with FileLock(lock_path, timeout=30):
-                atomic_write(path, encoded, mode=0o600)
+            try:
+                with FileLock(lock_path, timeout=30):
+                    atomic_write(path, encoded, mode=0o600)
+            except TimeoutError:
+                raise RuntimeError(
+                    f"CORE-11: Could not acquire FileLock at {lock_path} within 30s"
+                ) from None
         else:
             atomic_write(path, encoded, mode=0o600)
 

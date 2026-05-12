@@ -361,8 +361,8 @@ export function Settings() {
       // this the user can't switch roles via Fresh-Start — localStorage
       // would still hold the previous mode and skip the picker.
       try {
-        localStorage.removeItem("wireseal_mode");
-        localStorage.removeItem("vault_users");
+        sessionStorage.removeItem("wireseal_mode");
+        sessionStorage.removeItem("vault_users");
       } catch {
         /* ignore */
       }

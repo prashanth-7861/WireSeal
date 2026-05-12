@@ -37,10 +37,8 @@ class SecretBytes:
 
     def __init__(self, data: bytearray | bytes) -> None:
         # SEC-04: never hold key material in an immutable type
-        if isinstance(data, bytes):
-            self._data: bytearray = bytearray(data)
-        else:
-            self._data = data
+        # SEC-H-10: ALWAYS copy so caller can't mutate after "wipe"
+        self._data: bytearray = bytearray(data)
         self._wiped = False
         self._mlock()
         # SEC-06: Exclude secret buffer from core dumps (Linux MADV_DONTDUMP)
@@ -132,6 +130,12 @@ class SecretBytes:
 
     def __reduce_ex__(self, protocol: int) -> None:
         raise TypeError("SecretBytes cannot be pickled")
+
+    def __copy__(self) -> "SecretBytes":
+        raise TypeError("SecretBytes cannot be copied")
+
+    def __deepcopy__(self, memo: dict) -> "SecretBytes":
+        raise TypeError("SecretBytes cannot be deep-copied")
 
     # ------------------------------------------------------------------
     # Utility

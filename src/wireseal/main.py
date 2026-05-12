@@ -730,8 +730,21 @@ def _extract_secret_str(value: object) -> str:
 
 @cli.command("add-client")
 @click.argument("name")
-def add_client(name: str) -> None:
-    """Add a new WireGuard client and generate its config."""
+@click.option("--access-level", default="standard", show_default=True,
+              type=click.Choice(["admin", "standard", "guest"]),
+              help="Access level for the client")
+@click.option("--ttl", default=None, type=int,
+              help="Time-to-live in seconds (e.g., 86400 for 1 day)")
+@click.option("--expires-at", default=None,
+              help="Expiry date/time in ISO 8601 format (e.g., 2026-07-01T00:00:00Z)")
+def add_client(name: str, access_level: str, ttl: int | None, expires_at: str | None) -> None:
+    """Add a new WireGuard client and generate its config.
+
+    Access control options:
+      --access-level  admin | standard | guest  (default: standard)
+      --ttl          time-to-live in seconds
+      --expires-at   ISO 8601 expiry timestamp
+    """
     # Step 1: Validate name — alphanumeric + hyphens, max 32 chars (CONFIG-06)
     if not re.fullmatch(r'^[a-zA-Z0-9-]{1,32}$', name):
         raise click.BadParameter(
@@ -847,7 +860,14 @@ def add_client(name: str) -> None:
                 "psk": psk_str,
                 "ip": allocated_ip,
                 "config_hash": config_hash,
+                "access_level": access_level,
+                "status": "active",
+                "permanent": ttl is None and expires_at is None,
             }
+            if ttl is not None:
+                state.clients[name]["ttl_seconds"] = ttl
+            if expires_at is not None:
+                state.clients[name]["ttl_expires_at"] = expires_at
             state.ip_pool["allocated"] = pool.get_allocated()
             state.integrity[f"client-{name}"] = config_hash
             vault.save(state, passphrase)
@@ -1093,6 +1113,7 @@ def list_clients() -> None:
                 clients_snapshot[cname] = {
                     "public_key": _extract_secret_str(cdata["public_key"]),
                     "ip": cdata["ip"],
+                    "access_level": cdata.get("access_level", "standard"),
                 }
 
         if not clients_snapshot:
@@ -1129,13 +1150,24 @@ def list_clients() -> None:
                 click.echo("WARNING: WireGuard not running or no active peers.")
 
             # Step 4: Print table — CLIENT-03: no private keys or PSKs
-            click.echo(f"\n{'Name':20}  {'IP':15}  {'Last Handshake'}")
-            click.echo("-" * 65)
-            for cname, cinfo in clients_snapshot.items():
-                pubkey = cinfo["public_key"]
-                ip = cinfo["ip"]
-                handshake = handshake_by_pubkey.get(pubkey, "never")
-                click.echo(f"{cname:20}  {ip:15}  {handshake}")
+            has_access = any("access_level" in c for c in state.clients.values())
+            if has_access:
+                click.echo(f"\n{'Name':20}  {'IP':15}  {'Access':10}  {'Last Handshake'}")
+                click.echo("-" * 77)
+                for cname, cinfo in clients_snapshot.items():
+                    pubkey = cinfo["public_key"]
+                    ip = cinfo["ip"]
+                    access = cinfo.get("access_level", "standard")
+                    handshake = handshake_by_pubkey.get(pubkey, "never")
+                    click.echo(f"{cname:20}  {ip:15}  {access:10}  {handshake}")
+            else:
+                click.echo(f"\n{'Name':20}  {'IP':15}  {'Last Handshake'}")
+                click.echo("-" * 65)
+                for cname, cinfo in clients_snapshot.items():
+                    pubkey = cinfo["public_key"]
+                    ip = cinfo["ip"]
+                    handshake = handshake_by_pubkey.get(pubkey, "never")
+                    click.echo(f"{cname:20}  {ip:15}  {handshake}")
 
         # Step 6: Audit log
         audit = AuditLog(DEFAULT_AUDIT_LOG_PATH)
@@ -1917,6 +1949,7 @@ def restore_vault(src: str) -> None:
     from wireseal.security.secret_types import SecretBytes
     from wireseal.security.secrets_wipe import wipe_string
     from wireseal.security.audit import AuditLog
+    from wireseal.security.exceptions import VaultUnlockError
 
     vault_path = DEFAULT_VAULT_DIR / "vault.enc"
     audit_path = DEFAULT_VAULT_DIR / "audit.log"
@@ -1925,14 +1958,24 @@ def restore_vault(src: str) -> None:
     passphrase_str: str = click.prompt("Passphrase for the backup vault", hide_input=True)
     passphrase = SecretBytes(bytearray(passphrase_str.encode()))
     try:
-        # Verify the backup decrypts
-        vault = Vault(src_path)
+        # Read backup file once — prevents TOCTOU between verify and write
+        backup_bytes = src_path.read_bytes()
+
+        # Verify from in-memory bytes using a temp file
+        import tempfile
+        with tempfile.NamedTemporaryFile(suffix='.enc', delete=False) as tmp:
+            tmp.write(backup_bytes)
+            tmp_path = Path(tmp.name)
         try:
-            with vault.open(passphrase) as _st:
-                pass
-        except Exception:
-            click.echo("Incorrect passphrase — cannot decrypt the backup.")
-            raise SystemExit(1)
+            vault = Vault(tmp_path)
+            try:
+                with vault.open(passphrase):
+                    pass
+            except VaultUnlockError:
+                click.echo("Incorrect passphrase — cannot decrypt the backup.")
+                raise SystemExit(1)
+        finally:
+            tmp_path.unlink(missing_ok=True)
 
         if vault_path.exists():
             if not click.confirm("Existing vault will be overwritten. Continue?"):
@@ -1940,7 +1983,7 @@ def restore_vault(src: str) -> None:
                 return
 
         DEFAULT_VAULT_DIR.mkdir(parents=True, exist_ok=True)
-        atomic_write(vault_path, src_path.read_bytes(), mode=0o600)
+        atomic_write(vault_path, backup_bytes, mode=0o600)
 
         AuditLog(audit_path).log("restore-vault", {"src": str(src_path)})
         click.echo(f"Vault restored from: {src_path}")

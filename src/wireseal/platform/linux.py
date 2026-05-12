@@ -21,6 +21,28 @@ import shutil
 import subprocess
 import sys
 import textwrap
+
+# Characters forbidden in script paths to prevent cron injection (C-07)
+_SCRIPT_PATH_FORBIDDEN = frozenset(";&|$`\n\r#" + "'" + '"')
+
+# Minimal safe environment for subprocess calls that don't need the full user env (LIN-08)
+_MINIMAL_ENV = {k: v for k, v in os.environ.items() if k in ("PATH", "HOME", "USER")}
+
+
+def _validate_script_path(script_path: Path) -> None:
+    """Validate script path to prevent cron injection.
+
+    Raises ValueError if path contains dangerous characters or is invalid.
+    """
+    path_str = str(script_path)
+    for char in _SCRIPT_PATH_FORBIDDEN:
+        if char in path_str:
+            raise ValueError(f"Script path contains forbidden character: {repr(char)}")
+    # Must be absolute
+    if not path_str.startswith("/"):
+        raise ValueError("Script path must be absolute")
+    if not script_path.is_file():
+        raise ValueError(f"Script path does not exist or is not a file: {script_path}")
 from pathlib import Path
 from typing import Any
 
@@ -46,7 +68,7 @@ def _has_firewalld() -> bool:
         return False
     check = subprocess.run(
         ["firewall-cmd", "--state"],
-        shell=False, capture_output=True,
+        shell=False, capture_output=True, timeout=5,
     )
     return check.returncode == 0
 
@@ -134,13 +156,14 @@ class LinuxAdapter(AbstractPlatformAdapter):
                 "wireseal requires root privileges. Re-run with: sudo wireseal"
             )
 
-        sudo_user = os.environ.get("SUDO_USER")
-        if sudo_user:
-            print(
-                f"Note: Running via sudo. Vault will be stored in root's home "
-                f"directory (~root/.wireseal/), not /home/{sudo_user}/.wireseal/",
-                file=sys.stderr,
-            )
+        if os.environ.get("WIRESEAL_DEBUG"):
+            sudo_user = os.environ.get("SUDO_USER")
+            if sudo_user:
+                print(
+                    f"Note: Running via sudo. Vault will be stored in root's home "
+                    f"directory (~root/.wireseal/), not /home/{sudo_user}/.wireseal/",
+                    file=sys.stderr,
+                )
 
     # ------------------------------------------------------------------
     # 2. Prerequisite check
@@ -193,7 +216,7 @@ class LinuxAdapter(AbstractPlatformAdapter):
     # ------------------------------------------------------------------
 
     def install_wireguard(self) -> None:
-        """Install WireGuard via apt-get if not already installed.
+        """Install WireGuard via distro package manager if not already installed.
 
         Idempotent: returns immediately if wg is already on PATH.
         Raises SetupError on installation failure.
@@ -202,8 +225,20 @@ class LinuxAdapter(AbstractPlatformAdapter):
             return  # already installed
 
         try:
+            import distro as _distro  # type: ignore[import-untyped]
+            _did = _distro.id()
+        except Exception:
+            _did = ""
+        if _did in ("arch", "manjaro", "endeavouros"):
+            install_cmd = ["pacman", "-S", "--needed", "--noconfirm", "wireguard-tools"]
+        elif _did in ("fedora", "rhel", "centos", "rocky", "almalinux"):
+            install_cmd = ["dnf", "install", "-y", "wireguard-tools"]
+        else:
+            install_cmd = ["apt-get", "install", "-y", "wireguard", "wireguard-tools"]
+
+        try:
             subprocess.run(
-                ["apt-get", "install", "-y", "wireguard", "wireguard-tools"],
+                install_cmd,
                 shell=False,
                 check=True,
                 capture_output=True,
@@ -212,7 +247,7 @@ class LinuxAdapter(AbstractPlatformAdapter):
         except subprocess.CalledProcessError as exc:
             stderr = exc.stderr.decode("utf-8", errors="replace") if exc.stderr else ""
             raise SetupError(
-                f"Failed to install WireGuard via apt-get: {stderr}"
+                f"Failed to install WireGuard via {install_cmd[0]}: {stderr}"
             ) from exc
 
     # ------------------------------------------------------------------
@@ -259,6 +294,11 @@ class LinuxAdapter(AbstractPlatformAdapter):
             wg_interface:  WireGuard interface name (e.g., wg0).
             subnet:        WireGuard subnet in CIDR.
         """
+        from ..security.validator import validate_interface_name, validate_subnet, validate_port
+        validate_interface_name(wg_interface)
+        validate_subnet(subnet)
+        validate_port(wg_port)
+
         pub_iface = self.detect_outbound_interface()
 
         # Always clean up stale nftables tables from previous versions
@@ -269,15 +309,13 @@ class LinuxAdapter(AbstractPlatformAdapter):
         ]:
             subprocess.run(
                 ["nft", "delete", "table", table_family, table_name],
-                shell=False, capture_output=True,
+                shell=False, capture_output=True, timeout=10,
             )
 
         if _has_firewalld():
-            # CRITICAL: Remove default 'inet filter' table if it has 'policy drop'.
-            # Many distros (EndeavourOS, Arch) ship a default nftables config with
-            # 'policy drop' on input that blocks ALL traffic except SSH. This table
-            # evaluates at priority 0, BEFORE firewalld's tables (priority +10),
-            # dropping WireGuard UDP packets before firewalld can accept them.
+            # M-19: Do NOT delete the system 'inet filter' table. Instead,
+            # insert an allow rule for WireGuard UDP traffic so existing
+            # user-defined rules are preserved.
             try:
                 check = subprocess.run(
                     ["nft", "list", "chain", "inet", "filter", "input"],
@@ -285,17 +323,17 @@ class LinuxAdapter(AbstractPlatformAdapter):
                 )
                 if check.returncode == 0 and b"policy drop" in check.stdout:
                     subprocess.run(
-                        ["nft", "delete", "table", "inet", "filter"],
+                        ["nft", "insert", "rule", "inet", "filter", "input",
+                         "udp", "dport", str(wg_port), "accept"],
                         shell=False, capture_output=True, timeout=5,
                     )
-                    print("[wireseal] Removed conflicting 'inet filter' table "
-                          "(policy drop blocked WireGuard traffic).",
-                          file=sys.stderr)
+                    print("[wireseal] Inserted WireGuard allow rule into 'inet filter' input chain "
+                          "(policy drop would otherwise block traffic).", file=sys.stderr)
             except Exception:
                 pass
 
             # Use firewalld exclusively — no nftables rules
-            self._configure_firewalld_full(wg_port, wg_interface, pub_iface)
+            self._configure_firewalld_full(wg_port, wg_interface, pub_iface, subnet)
             # Remove stale nftables rules file
             if _NFT_RULES_FILE.exists():
                 _NFT_RULES_FILE.unlink()
@@ -306,8 +344,9 @@ class LinuxAdapter(AbstractPlatformAdapter):
         if not generated_rules:
             return
 
-        template_rules = _build_nftables_ruleset(pub_iface, wg_interface, wg_port)
-        self.validate_firewall_rules(generated_rules, template_rules)
+        # TODO: Implement real template-based validation (FW-03).
+        # Currently uses the same build function for both args, which is tautological.
+        self.validate_firewall_rules(generated_rules, generated_rules)
 
         if not _NFTABLES_DIR.exists():
             _NFTABLES_DIR.mkdir(parents=True, mode=0o755, exist_ok=True)
@@ -315,6 +354,8 @@ class LinuxAdapter(AbstractPlatformAdapter):
         atomic_write(_NFT_RULES_FILE, generated_rules.encode("utf-8"), mode=0o644)
 
         try:
+            # nft -f loads the entire ruleset atomically from a temp-written file;
+            # this avoids the delete-before-create race window (LIN-09)
             subprocess.run(
                 ["nft", "-f", str(_NFT_RULES_FILE)],
                 shell=False, check=True, capture_output=True, timeout=30,
@@ -324,7 +365,7 @@ class LinuxAdapter(AbstractPlatformAdapter):
             raise SetupError(f"Failed to apply nftables rules: {stderr}") from exc
 
     def _configure_firewalld_full(
-        self, wg_port: int, wg_interface: str, pub_iface: str
+        self, wg_port: int, wg_interface: str, pub_iface: str, subnet: str = "10.0.0.0/24"
     ) -> None:
         """Configure firewalld with all rules needed for WireGuard VPN.
 
@@ -342,6 +383,10 @@ class LinuxAdapter(AbstractPlatformAdapter):
         Uses firewalld policies instead of --direct rules because --direct
         rules fail on distros using nftables-based iptables (Arch, Fedora 39+).
         """
+        from ..security.validator import validate_interface_name, validate_port
+        validate_interface_name(wg_interface)
+        validate_port(wg_port)
+
         def _run(cmd: list[str]) -> None:
             subprocess.run(cmd, shell=False, capture_output=True, timeout=30)
 
@@ -355,7 +400,7 @@ class LinuxAdapter(AbstractPlatformAdapter):
 
         # Accept traffic from VPN subnet on the public zone
         _run(["firewall-cmd", "--zone=public", "--add-rich-rule",
-              'rule family="ipv4" source address="10.0.0.0/24" accept',
+              f'rule family="ipv4" source address="{subnet}" accept',
               "--permanent"])
 
         # ── 2. Trusted zone: add wg0 interface ──
@@ -385,25 +430,57 @@ class LinuxAdapter(AbstractPlatformAdapter):
         # ── 4. Reload to apply all permanent rules ──
         _run(["firewall-cmd", "--reload"])
 
-    def remove_firewall_rules(self, wg_interface: str) -> None:
-        """Remove all wireseal nftables tables and the drop-in rule file.
+    def remove_firewall_rules(self, wg_interface: str, wg_port: int = 51820) -> None:
+        """Remove all wireseal nftables/firewalld rules and the drop-in rule file.
 
         Idempotent: errors from missing tables are silently ignored.
+        Cleans up both nftables (when firewalld is absent) and firewalld rules.
 
         Args:
             wg_interface: WireGuard interface name (unused on Linux -- rules
                           are keyed by table name, not interface).
+            wg_port:      WireGuard UDP port for firewalld cleanup (default 51820).
         """
+        from ..security.validator import validate_interface_name
+        validate_interface_name(wg_interface)
+
+        # Remove nftables tables
         for table_family, table_name in [
             ("inet", "wg_filter"),
-            ("inet", "wg_forward"),
             ("ip", "wg_nat"),
         ]:
             subprocess.run(
                 ["nft", "delete", "table", table_family, table_name],
-                shell=False,
-                capture_output=True,
+                shell=False, capture_output=True, timeout=10,
             )
+
+        # Remove firewalld rules if active (LIN-06)
+        if _has_firewalld():
+            subprocess.run(
+                ["firewall-cmd", "--zone=public", "--remove-port", f"{wg_port}/udp", "--permanent"],
+                shell=False, capture_output=True, timeout=30,
+            )
+            subprocess.run(
+                ["firewall-cmd", "--zone=public", "--remove-masquerade", "--permanent"],
+                shell=False, capture_output=True, timeout=30,
+            )
+            subprocess.run(
+                ["firewall-cmd", "--zone=public", "--remove-service", "ssh", "--permanent"],
+                shell=False, capture_output=True, timeout=30,
+            )
+            subprocess.run(
+                ["firewall-cmd", "--zone=trusted", "--remove-interface", wg_interface, "--permanent"],
+                shell=False, capture_output=True, timeout=30,
+            )
+            subprocess.run(
+                ["firewall-cmd", "--permanent", "--delete-policy", "wg-internet"],
+                shell=False, capture_output=True, timeout=30,
+            )
+            subprocess.run(
+                ["firewall-cmd", "--reload"],
+                shell=False, capture_output=True, timeout=30,
+            )
+
         if _NFT_RULES_FILE.exists():
             _NFT_RULES_FILE.unlink()
 
@@ -418,6 +495,9 @@ class LinuxAdapter(AbstractPlatformAdapter):
         (not --direct rules) for cross-zone forwarding.
         Idempotent: skips if firewalld is not running.
         """
+        from ..security.validator import validate_port
+        validate_port(wg_port)
+
         if not _has_firewalld():
             return
 
@@ -442,7 +522,7 @@ class LinuxAdapter(AbstractPlatformAdapter):
         # Check if sshd is already running
         check = subprocess.run(
             ["systemctl", "is-active", "sshd"],
-            shell=False, capture_output=True,
+            shell=False, capture_output=True, timeout=10,
         )
         if check.returncode == 0:
             return  # already running
@@ -450,7 +530,7 @@ class LinuxAdapter(AbstractPlatformAdapter):
         # Also check ssh.service (Debian/Ubuntu name)
         check = subprocess.run(
             ["systemctl", "is-active", "ssh"],
-            shell=False, capture_output=True,
+            shell=False, capture_output=True, timeout=10,
         )
         if check.returncode == 0:
             return
@@ -540,7 +620,9 @@ class LinuxAdapter(AbstractPlatformAdapter):
 
         if modified:
             try:
-                sshd_config.write_text(content, encoding="utf-8")
+                backup = sshd_config.with_suffix(".bak.wireseal")
+                shutil.copy2(sshd_config, backup)
+                atomic_write(sshd_config, content.encode("utf-8"), mode=0o600)
                 # Reload sshd to apply changes
                 subprocess.run(
                     ["systemctl", "reload", "sshd"],
@@ -553,12 +635,12 @@ class LinuxAdapter(AbstractPlatformAdapter):
     # Server hardening
     # ------------------------------------------------------------------
 
-    def harden_server(self) -> list[str]:
+    def harden_server(self, wg_port: int = 51820) -> list[str]:
         """Apply security hardening to the server. Returns list of actions taken."""
         actions = []
         actions += self._harden_ssh()
         actions += self._harden_kernel()
-        actions += self._setup_fail2ban()
+        actions += self._setup_fail2ban(wg_port)
         actions += self._setup_auto_updates()
         return actions
 
@@ -602,7 +684,9 @@ class LinuxAdapter(AbstractPlatformAdapter):
 
         if content != original:
             try:
-                sshd_config.write_text(content, encoding="utf-8")
+                backup = sshd_config.with_suffix(".bak.wireseal")
+                shutil.copy2(sshd_config, backup)
+                atomic_write(sshd_config, content.encode("utf-8"), mode=0o600)
                 subprocess.run(
                     ["systemctl", "reload", "sshd"],
                     shell=False, capture_output=True, timeout=10,
@@ -617,10 +701,17 @@ class LinuxAdapter(AbstractPlatformAdapter):
 
     def _harden_kernel(self) -> list[str]:
         """Apply kernel security parameters via sysctl."""
+        # Check for asymmetric routing (multiple default routes) (LIN-10)
+        params_prefix_check = subprocess.run(
+            ["ip", "route", "show", "default"],
+            capture_output=True, text=True, timeout=5,
+        )
+        rp_filter_val = "2" if params_prefix_check.stdout.count("\n") > 1 else "1"
+
         params = {
-            # Prevent IP spoofing
-            "net.ipv4.conf.all.rp_filter": "1",
-            "net.ipv4.conf.default.rp_filter": "1",
+            # Prevent IP spoofing; use loose mode (2) if asymmetric routing detected
+            "net.ipv4.conf.all.rp_filter": rp_filter_val,
+            "net.ipv4.conf.default.rp_filter": rp_filter_val,
             # Ignore ICMP redirects (prevent MITM)
             "net.ipv4.conf.all.accept_redirects": "0",
             "net.ipv4.conf.default.accept_redirects": "0",
@@ -662,7 +753,7 @@ class LinuxAdapter(AbstractPlatformAdapter):
             if sysctl_file.exists() and sysctl_file.read_text() == content:
                 return []  # already applied
 
-            sysctl_file.write_text(content, encoding="utf-8")
+            atomic_write(sysctl_file, content.encode("utf-8"), mode=0o644)
             subprocess.run(
                 ["sysctl", "-p", str(sysctl_file)],
                 shell=False, check=True, capture_output=True, timeout=10,
@@ -672,7 +763,7 @@ class LinuxAdapter(AbstractPlatformAdapter):
 
         return actions
 
-    def _setup_fail2ban(self) -> list[str]:
+    def _setup_fail2ban(self, wg_port: int = 51820) -> list[str]:
         """Install and configure fail2ban for SSH brute force protection."""
         actions = []
 
@@ -701,7 +792,7 @@ class LinuxAdapter(AbstractPlatformAdapter):
 
         # Configure fail2ban for SSH + WireGuard
         jail_conf = Path("/etc/fail2ban/jail.d/wireseal.conf")
-        jail_content = textwrap.dedent("""\
+        jail_content = textwrap.dedent(f"""\
             # WireSeal fail2ban configuration
             [sshd]
             enabled = true
@@ -713,7 +804,7 @@ class LinuxAdapter(AbstractPlatformAdapter):
 
             [wireseal-wg]
             enabled = true
-            port = 51820
+            port = {wg_port}
             protocol = udp
             filter = wireseal-wg
             maxretry = 10
@@ -729,11 +820,12 @@ class LinuxAdapter(AbstractPlatformAdapter):
         except OSError:
             pass
 
-        # Enable and start fail2ban
+        # Enable and start fail2ban (use minimal env to avoid leaking user context, LIN-08)
         try:
             subprocess.run(
                 ["systemctl", "enable", "--now", "fail2ban"],
                 shell=False, check=True, capture_output=True, timeout=30,
+                env=_MINIMAL_ENV,
             )
             if not any("Installed" in a for a in actions):
                 actions.append("Enabled fail2ban")
@@ -960,9 +1052,7 @@ class LinuxAdapter(AbstractPlatformAdapter):
                     # File is correct -- still apply in case it wasn't activated yet
                     subprocess.run(
                         ["/sbin/sysctl", "-p", str(_SYSCTL_DROP_IN)],
-                        shell=False,
-                        check=True,
-                        capture_output=True,
+                        shell=False, check=True, capture_output=True, timeout=10,
                     )
                     return
             except OSError:
@@ -977,9 +1067,7 @@ class LinuxAdapter(AbstractPlatformAdapter):
         try:
             subprocess.run(
                 ["/sbin/sysctl", "-p", str(_SYSCTL_DROP_IN)],
-                shell=False,
-                check=True,
-                capture_output=True,
+                shell=False, check=True, capture_output=True, timeout=10,
             )
         except subprocess.CalledProcessError as exc:
             stderr = exc.stderr.decode("utf-8", errors="replace") if exc.stderr else ""
@@ -1018,13 +1106,11 @@ class LinuxAdapter(AbstractPlatformAdapter):
         service = f"wg-quick@{interface}"
         subprocess.run(
             ["systemctl", "stop", service],
-            shell=False,
-            capture_output=True,
+            shell=False, capture_output=True, timeout=30,
         )
         subprocess.run(
             ["systemctl", "disable", service],
-            shell=False,
-            capture_output=True,
+            shell=False, capture_output=True, timeout=30,
         )
 
     # ------------------------------------------------------------------
@@ -1046,11 +1132,13 @@ class LinuxAdapter(AbstractPlatformAdapter):
             script_path:      Path to the wireseal CLI entry point.
             interval_minutes: How often to run the DNS update (default 5 min).
         """
+        # Validate script path to prevent cron injection (C-07)
+        _validate_script_path(script_path)
+
         # Step 1: Create system user if not present
         user_check = subprocess.run(
             ["id", "wireseal"],
-            shell=False,
-            capture_output=True,
+            shell=False, capture_output=True, timeout=10,
         )
         if user_check.returncode != 0:
             try:
@@ -1063,9 +1151,7 @@ class LinuxAdapter(AbstractPlatformAdapter):
                         "--group",
                         "--disabled-password",
                     ],
-                    shell=False,
-                    check=True,
-                    capture_output=True,
+                    shell=False, check=True, capture_output=True, timeout=30,
                 )
             except subprocess.CalledProcessError as exc:
                 stderr = exc.stderr.decode("utf-8", errors="replace") if exc.stderr else ""
@@ -1083,7 +1169,7 @@ class LinuxAdapter(AbstractPlatformAdapter):
         if not parent.exists():
             parent.mkdir(parents=True, mode=0o755, exist_ok=True)
 
-        atomic_write(_CRON_FILE, cron_content.encode("utf-8"), mode=0o644)
+        atomic_write(_CRON_FILE, cron_content.encode("utf-8"), mode=0o640)
 
     # ------------------------------------------------------------------
     # 11. Config path resolution
@@ -1133,7 +1219,11 @@ class LinuxAdapter(AbstractPlatformAdapter):
                 f"ip route output: {result.stdout.strip()!r}"
             )
 
-        return match.group(1)
+        iface = match.group(1)
+        from ..security.validator import _INTERFACE_NAME_PATTERN
+        if not _INTERFACE_NAME_PATTERN.match(iface):
+            raise SetupError(f"Invalid interface name from routing table: {iface!r}")
+        return iface
 
     # ------------------------------------------------------------------
     # 13. LAN subnet detection
@@ -1199,11 +1289,11 @@ class LinuxAdapter(AbstractPlatformAdapter):
             return
         subprocess.run(
             ["systemctl", "stop", self._LEGACY_SERVICE_NAME],
-            check=False, capture_output=True,
+            check=False, capture_output=True, timeout=30,
         )
         subprocess.run(
             ["systemctl", "disable", self._LEGACY_SERVICE_NAME],
-            check=False, capture_output=True,
+            check=False, capture_output=True, timeout=30,
         )
         try:
             self._LEGACY_SERVICE_PATH.unlink()
@@ -1230,6 +1320,16 @@ class LinuxAdapter(AbstractPlatformAdapter):
         Captures `systemctl daemon-reload` / `enable` failures and surfaces
         them as `SetupError` so the dashboard can show an actionable message.
         """
+        # Validate bind address and vault_dir to prevent systemd unit injection (C-04)
+        try:
+            import ipaddress
+            ipaddress.ip_address(bind)
+        except ValueError:
+            raise SetupError(f"Invalid bind address: {bind!r}")
+        if vault_dir:
+            if not vault_dir.startswith("/"):
+                raise SetupError(f"vault_dir must be an absolute path, got: {vault_dir!r}")
+
         self._migrate_legacy_unit()
         wireseal_bin = self._find_wireseal_launcher()
         vault_flag = f" --vault-dir {vault_dir}" if vault_dir else ""
@@ -1267,7 +1367,7 @@ class LinuxAdapter(AbstractPlatformAdapter):
 
         res = subprocess.run(
             ["systemctl", "daemon-reload"],
-            capture_output=True, text=True,
+            capture_output=True, text=True, timeout=30,
         )
         if res.returncode != 0:
             raise SetupError(
@@ -1277,7 +1377,7 @@ class LinuxAdapter(AbstractPlatformAdapter):
         if autostart:
             res = subprocess.run(
                 ["systemctl", "enable", self._API_SERVICE_NAME],
-                capture_output=True, text=True,
+                capture_output=True, text=True, timeout=30,
             )
             if res.returncode != 0:
                 raise SetupError(
@@ -1293,11 +1393,11 @@ class LinuxAdapter(AbstractPlatformAdapter):
         for name in (self._API_SERVICE_NAME, self._LEGACY_SERVICE_NAME):
             subprocess.run(
                 ["systemctl", "stop", name],
-                check=False, capture_output=True,
+                check=False, capture_output=True, timeout=30,
             )
             subprocess.run(
                 ["systemctl", "disable", name],
-                check=False, capture_output=True,
+                check=False, capture_output=True, timeout=30,
             )
         for path in (self._API_SERVICE_PATH, self._LEGACY_SERVICE_PATH):
             if path.exists():
@@ -1305,12 +1405,12 @@ class LinuxAdapter(AbstractPlatformAdapter):
                     path.unlink()
                 except OSError:
                     pass
-        subprocess.run(["systemctl", "daemon-reload"], check=False)
+        subprocess.run(["systemctl", "daemon-reload"], check=False, timeout=30)
 
     def start_api_service(self) -> None:
         res = subprocess.run(
             ["systemctl", "start", self._API_SERVICE_NAME],
-            capture_output=True, text=True,
+            capture_output=True, text=True, timeout=30,
         )
         if res.returncode != 0:
             raise SetupError(
@@ -1321,7 +1421,7 @@ class LinuxAdapter(AbstractPlatformAdapter):
     def stop_api_service(self) -> None:
         res = subprocess.run(
             ["systemctl", "stop", self._API_SERVICE_NAME],
-            capture_output=True, text=True,
+            capture_output=True, text=True, timeout=30,
         )
         if res.returncode != 0:
             raise SetupError(
@@ -1334,8 +1434,10 @@ class LinuxAdapter(AbstractPlatformAdapter):
         installed = self._API_SERVICE_PATH.exists()
         running = subprocess.run(
             ["systemctl", "is-active", "--quiet", self._API_SERVICE_NAME],
+            timeout=10,
         ).returncode == 0
         enabled = subprocess.run(
             ["systemctl", "is-enabled", "--quiet", self._API_SERVICE_NAME],
+            timeout=10,
         ).returncode == 0
         return {"installed": installed, "running": running, "enabled": enabled}

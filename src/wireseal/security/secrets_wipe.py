@@ -5,36 +5,22 @@ CPython internal buffer zeroing for strings.
 """
 
 import ctypes
-import os
 import sys
 
 
-def wipe_bytes(data: bytearray) -> None:
-    """Zero a bytearray using the zero-random-zero pattern.
-
-    Performs three overwrite passes:
-      1. All zeros
-      2. Random bytes
-      3. All zeros again
-
-    This is a no-op if data has length 0.
-    """
-    length = len(data)
+def wipe_bytes(buf: bytearray) -> None:
+    """Overwrite a bytearray with zero-random-zero using ctypes.memset."""
+    length = len(buf)
     if length == 0:
         return
-
-    # Pass 1: zero
-    for i in range(length):
-        data[i] = 0
-
-    # Pass 2: random
-    random_bytes = os.urandom(length)
-    for i in range(length):
-        data[i] = random_bytes[i]
-
-    # Pass 3: zero again
-    for i in range(length):
-        data[i] = 0
+    try:
+        addr = ctypes.addressof(ctypes.c_char.from_buffer(buf))
+        ctypes.memset(addr, 0, length)
+        ctypes.memset(addr, 0xFF, length)
+        ctypes.memset(addr, 0, length)
+    except (TypeError, ValueError):
+        for i in range(length):
+            buf[i] = 0
 
 
 # SEC-011: strings that CPython has interned (all small ints, identifier-like

@@ -113,6 +113,29 @@ _session: dict = {
     "admin_role": None,   # Role of the currently authenticated user
 }
 
+
+def _wipe_session_on_fork() -> None:
+    with _lock:
+        vault = _session.get("vault")
+        if vault is not None:
+            try:
+                if hasattr(vault, "_session_master_key"):
+                    vault._session_master_key = None
+            except Exception:
+                pass
+        if _session["passphrase"]:
+            try:
+                _session["passphrase"].wipe()
+            except Exception:
+                pass
+        _session.update(vault=None, passphrase=None, cache=None,
+                        admin_id=None, admin_role=None)
+
+
+if hasattr(os, "register_at_fork"):
+    os.register_at_fork(after_in_child=_wipe_session_on_fork)
+
+
 # Pending TOTP enrollment state keyed by admin_id.
 # Populated by _h_totp_enroll_begin, consumed by _h_totp_enroll_confirm.
 # Entries are {secret: bytes, used_codes: set[str]}.
@@ -167,9 +190,20 @@ _UNLOCK_MAX    = 5     # max failures per window
 _heartbeat_cooldown: dict[str, float] = {}
 _HEARTBEAT_MIN_INTERVAL = 30.0  # seconds between heartbeat resets per client
 
+# M-20: Rate limit client creation — max 50 per hour per admin session
+_CLIENT_CREATION_LIMIT = 50
+_CLIENT_CREATIONS: dict[str, list[float]] = {}  # admin_id -> [timestamps]
+
 # TOTP anti-replay: maps admin_id → set of recently-used 6-digit codes.
 # Guarded by _lock.  Cleared on lock to prevent unbounded growth.
 _totp_used_codes: dict[str, set[str]] = {}
+
+# TOTP session validity: maps admin_id → monotonic timestamp of last TOTP
+# verification.  While within _TOTP_SESSION_HOURS, sensitive actions skip
+# re-prompting for a TOTP code (TOTP-plan §8.2).  Guarded by _lock.
+# Cleared on vault lock.
+_TOTP_SESSION_HOURS: int = 1
+_totp_session_verified: dict[str, float] = {}
 
 # Maps peer public_key → last_handshake_seconds from previous _h_status call.
 # Used to detect new handshake events for the audit log (DASH-06).
@@ -436,6 +470,93 @@ def _clear_admin_failures(ip: str) -> None:
         _admin_attempts.pop(ip, None)
 
 
+# ---------------------------------------------------------------------------
+# TOTP-specific rate limiting (TOTP-plan §6.4, §9.2)
+# ---------------------------------------------------------------------------
+_TOTP_WINDOW: int = 60            # sliding window in seconds
+_TOTP_MAX_FAILS: int = 3          # max failures within window
+_TOTP_LOCKOUT_SECS: int = 30      # lockout after exceeding max
+_TOTP_SESSION_MAX: int = 10       # absolute max attempts per session
+_TOTP_BACKUP_WINDOW: int = 300    # backup code window (5 min)
+_TOTP_BACKUP_MAX: int = 3         # max backup attempts per window
+
+import threading as _threading
+_totp_rl_lock = _threading.Lock()
+# {admin_id: {"attempts": [timestamps], "lockout_until": float, "session_count": int}}
+_totp_attempts: dict[str, dict] = {}
+# {admin_id: [timestamps]}
+_totp_backup_attempts: dict[str, list[float]] = {}
+
+
+def _check_totp_rate_limit(admin_id: str) -> None:
+    """Raise 429 if TOTP rate limit exceeded for this admin."""
+    import time as _time
+    now = _time.time()
+    with _totp_rl_lock:
+        rec = _totp_attempts.get(admin_id, {})
+        # Check lockout
+        lockout_until = rec.get("lockout_until", 0)
+        if now < lockout_until:
+            raise _ApiError(
+                f"Too many failed TOTP attempts. Wait {int(lockout_until - now)}s.", 429
+            )
+        # Check session max
+        if rec.get("session_count", 0) >= _TOTP_SESSION_MAX:
+            raise _ApiError("Maximum TOTP attempts for this session exceeded.", 429)
+
+
+def _record_totp_failure(admin_id: str) -> None:
+    """Record a failed TOTP attempt and apply lockout if threshold hit."""
+    import time as _time
+    now = _time.time()
+    with _totp_rl_lock:
+        rec = _totp_attempts.setdefault(
+            admin_id, {"attempts": [], "lockout_until": 0, "session_count": 0}
+        )
+        rec["session_count"] = rec.get("session_count", 0) + 1
+        attempts = rec["attempts"]
+        attempts.append(now)
+        # Trim to window
+        cutoff = now - _TOTP_WINDOW
+        rec["attempts"] = [t for t in attempts if t > cutoff]
+        if len(rec["attempts"]) >= _TOTP_MAX_FAILS:
+            rec["lockout_until"] = now + _TOTP_LOCKOUT_SECS
+            from wireseal.security.audit import AuditLog
+            AuditLog(_AUDIT_PATH).log(
+                "totp-ratelimited", {"admin_id": admin_id}, actor="system"
+            )
+
+
+def _clear_totp_failures(admin_id: str) -> None:
+    with _totp_rl_lock:
+        _totp_attempts.pop(admin_id, None)
+
+
+def _check_totp_backup_rate_limit(admin_id: str) -> None:
+    """Raise 429 if backup code rate limit exceeded."""
+    import time as _time
+    now = _time.time()
+    with _totp_rl_lock:
+        attempts = _totp_backup_attempts.get(admin_id, [])
+        cutoff = now - _TOTP_BACKUP_WINDOW
+        recent = [t for t in attempts if t > cutoff]
+        if len(recent) >= _TOTP_BACKUP_MAX:
+            raise _ApiError(
+                "Too many backup code attempts. Wait 5 minutes.", 429
+            )
+
+
+def _record_totp_backup_failure(admin_id: str) -> None:
+    import time as _time
+    with _totp_rl_lock:
+        _totp_backup_attempts.setdefault(admin_id, []).append(_time.time())
+
+
+def _clear_totp_backup_failures(admin_id: str) -> None:
+    with _totp_rl_lock:
+        _totp_backup_attempts.pop(admin_id, None)
+
+
 def _verify_root_password(password: str) -> bool:
     """Return True if the given password proves admin authority.
 
@@ -608,6 +729,94 @@ def _require_client_mode() -> None:
             "Server and client roles are mutually exclusive on a single device.",
             409,
         )
+
+
+def _require_confirmation(body: dict) -> None:
+    """Verify TOTP or passphrase confirmation for sensitive actions.
+
+    Checks in order:
+    1. If admin has TOTP enrolled and body contains ``totp_code`` — verify it.
+    2. If body contains ``confirm_passphrase`` — verify against vault.
+    3. Otherwise raise 401.
+    """
+    _require_unlocked()
+    with _lock:
+        admin_id = _session.get("admin_id", "owner")
+        cache = _session.get("cache") or {}
+        vault = _session["vault"]
+        passphrase = _session["passphrase"]
+
+    admins = cache.get("admins", {})
+    admin = admins.get(admin_id, {})
+    totp_b32 = admin.get("totp_secret_b32")
+
+    totp_code = body.get("totp_code")
+    confirm_pass = body.get("confirm_passphrase")
+
+    # Path 0: TOTP session still valid — skip re-prompt (TOTP-plan §8.2)
+    if totp_b32 is not None:
+        import time as _time
+        with _lock:
+            verified_at = _totp_session_verified.get(admin_id)
+        if verified_at is not None:
+            elapsed_h = (_time.monotonic() - verified_at) / 3600
+            if elapsed_h < _TOTP_SESSION_HOURS:
+                return  # still within TOTP session window
+
+    # Path 1: TOTP verification (preferred when enrolled)
+    if totp_b32 is not None and totp_code:
+        _check_totp_rate_limit(admin_id)
+        from wireseal.security.totp import verify_totp, b32_to_secret
+        from wireseal.security.secret_types import SecretBytes
+        if isinstance(totp_b32, str):
+            secret = SecretBytes(bytearray(b32_to_secret(totp_b32)))
+        else:
+            secret = totp_b32
+        with _lock:
+            used_set = _totp_used_codes.setdefault(admin_id, set())
+            ok = verify_totp(secret, str(totp_code), used_codes=used_set)
+        if not ok:
+            from wireseal.security.audit import AuditLog
+            AuditLog(_AUDIT_PATH).log("totp-failed", {"admin_id": admin_id}, actor=admin_id)
+            _record_totp_failure(admin_id)
+            raise _ApiError("Invalid TOTP code.", 401)
+        import time as _time
+        with _lock:
+            _totp_session_verified[admin_id] = _time.monotonic()
+        return
+
+    # Path 2: Passphrase re-entry
+    if confirm_pass:
+        from wireseal.security.secret_types import SecretBytes
+        test_pass = SecretBytes(bytearray(confirm_pass.encode()))
+        try:
+            with vault.open(test_pass, admin_id=admin_id) as _st:
+                pass  # passphrase valid
+        except Exception:
+            test_pass.wipe()
+            raise _ApiError("Incorrect passphrase.", 401)
+        test_pass.wipe()
+        return
+
+    # Path 3: If TOTP enrolled but no code provided
+    if totp_b32 is not None:
+        raise _ApiError("totp_code required for this action.", 401)
+
+    raise _ApiError(
+        "Confirmation required. Provide totp_code or confirm_passphrase.", 401
+    )
+
+
+def _get_actor_access_level() -> str:
+    """Return the access level of the current admin (from vault cache)."""
+    with _lock:
+        admin_id = _session.get("admin_id", "owner")
+    if admin_id == "owner":
+        return "owner"
+    with _lock:
+        cache = _session.get("cache") or {}
+    admin = cache.get("admins", {}).get(admin_id, {})
+    return admin.get("role", "admin")
 
 
 # ---------------------------------------------------------------------------
@@ -810,6 +1019,12 @@ def _refresh_cache(state: Any) -> dict:
                 "permanent":      data.get("permanent", True),
                 "ttl_seconds":    data.get("ttl_seconds"),
                 "ttl_expires_at": data.get("ttl_expires_at"),
+                "access_level":   data.get("access_level", "standard"),
+                "status":         data.get("status", "active"),
+                "description":    data.get("description", ""),
+                "privileges":     data.get("privileges"),
+                "auto_revoke":    data.get("auto_revoke", True),
+                "created_at":     data.get("created_at"),
             }
             for name, data in state.clients.items()
         },
@@ -1150,10 +1365,12 @@ def _h_init_locked(req: "_Handler", _groups: tuple = ()) -> dict:
                 },
             }
             vault = Vault.create(_VAULT_PATH, passphrase, initial_state)
+            admins_cache = {k: dict(v) if isinstance(v, dict) else v for k, v in initial_state.get("admins", {}).items()}
+            bc_cache = dict(initial_state.get("backup_config", {}))
             cache = {
                 "mode": "client", "server": {}, "clients": {}, "ip_pool": {},
-                "admins": dict(initial_state["admins"]),
-                "dns_mappings": {}, "backup_config": dict(initial_state["backup_config"]),
+                "admins": admins_cache,
+                "dns_mappings": {}, "backup_config": bc_cache,
             }
             with _lock:
                 _session.update(vault=vault, passphrase=passphrase, cache=cache)
@@ -1352,9 +1569,7 @@ def _h_init_locked(req: "_Handler", _groups: tuple = ()) -> dict:
         except Exception:
             pass
         raise _ApiError(
-            f"Server initialization failed ({type(exc).__name__}: {exc}). "
-            "Check %APPDATA%\\WireSeal\\wireseal-gui.log on Windows or "
-            "audit.log on Unix for the full traceback.",
+            "Server initialization failed. Check the audit log.",
             500,
         )
     finally:
@@ -1413,6 +1628,7 @@ def _h_unlock(req: "_Handler", _groups: tuple) -> dict:
                 if totp_b32 is not None:
                     if not totp_code:
                         raise _ApiError("totp_code required", 401)
+                    _check_totp_rate_limit(admin_id)
                     totp_secret = b32_to_secret(totp_b32)
                     totp_str = str(totp_code)
                     # Hold _lock during check+record to make anti-replay atomic.
@@ -1420,7 +1636,12 @@ def _h_unlock(req: "_Handler", _groups: tuple) -> dict:
                         used_set = _totp_used_codes.setdefault(admin_id, set())
                         totp_ok = verify_totp(totp_secret, totp_str, used_codes=used_set)
                     if not totp_ok:
+                        AuditLog(_AUDIT_PATH).log("totp-failed", {"admin_id": admin_id}, actor=admin_id)
+                        _record_totp_failure(admin_id)
                         raise _ApiError("invalid_totp", 401)
+                    import time as _time
+                    with _lock:
+                        _totp_session_verified[admin_id] = _time.monotonic()
 
                 cache = _refresh_cache(st)
         except _ApiError:
@@ -1489,8 +1710,9 @@ def _h_lock(req: "_Handler", _groups: tuple) -> dict:
             _session["passphrase"].wipe()
         _session.update(vault=None, passphrase=None, cache=None,
                         admin_id=None, admin_role=None)
-        # Clear used TOTP codes for this admin to prevent unbounded set growth.
+        # Clear used TOTP codes and session for this admin.
         _totp_used_codes.pop(_lock_actor, None)
+        _totp_session_verified.pop(_lock_actor, None)
     AuditLog(_AUDIT_PATH).log("lock", {}, actor=_lock_actor)
     return {"ok": True}
 
@@ -1827,32 +2049,427 @@ def _h_set_client_ttl(req: "_Handler", groups: tuple) -> dict:
     return result
 
 
+# ---------------------------------------------------------------------------
+# Client access control management endpoints
+# ---------------------------------------------------------------------------
+
+
+def _h_get_client_details(req: "_Handler", groups: tuple) -> dict:
+    """GET /api/clients/{name}/details — full client info including access control."""
+    _require_unlocked()
+    _require_server_mode()
+    name = (groups[0] if groups else "").strip()
+    if not name:
+        raise _ApiError("client name is required", 400)
+
+    import time as _time
+    from wireseal.security.access_control import check_expiry_status, expiry_warning_days
+
+    with _lock:
+        cache = _session.get("cache") or {}
+
+    clients = cache.get("clients", {})
+    if name not in clients:
+        raise _ApiError(f"Client '{name}' not found.", 404)
+
+    d = clients[name]
+    now = _time.time()
+    status = check_expiry_status(d, now)
+    warn_days = expiry_warning_days(d, now)
+    expires_in = None
+    if not d.get("permanent", True) and d.get("ttl_expires_at"):
+        expires_in = max(0, int(d["ttl_expires_at"] - now))
+
+    return {
+        "name":               name,
+        "ip":                 d["ip"],
+        "access_level":       d.get("access_level", "standard"),
+        "status":             status.value,
+        "description":        d.get("description", ""),
+        "privileges":         d.get("privileges"),
+        "permanent":          d.get("permanent", True),
+        "ttl_seconds":        d.get("ttl_seconds"),
+        "ttl_expires_at":     d.get("ttl_expires_at"),
+        "expires_in_seconds": expires_in,
+        "warning_days":       warn_days,
+        "auto_revoke":        d.get("auto_revoke", True),
+        "created_at":         d.get("created_at"),
+    }
+
+
+def _h_edit_client(req: "_Handler", groups: tuple) -> dict:
+    """PUT /api/clients/{name} — edit access level, privileges, description.
+
+    Requires TOTP or passphrase confirmation.
+    """
+    _require_unlocked()
+    _require_server_mode()
+    _check_admin_rate_limit(req.client_address[0])
+    name = (groups[0] if groups else "").strip()
+    if not name:
+        raise _ApiError("client name is required", 400)
+
+    body = req._json()
+    _require_confirmation(body)
+
+    from wireseal.security.access_control import (
+        VALID_ACCESS_LEVELS, validate_access_level_change,
+        default_privileges, merge_privileges,
+    )
+    from wireseal.security.audit import AuditLog
+
+    new_level = body.get("access_level")
+    new_privs = body.get("privileges")
+    new_desc = body.get("description")
+
+    if new_level is not None and new_level not in VALID_ACCESS_LEVELS:
+        raise _ApiError(
+            f"access_level must be one of: {', '.join(VALID_ACCESS_LEVELS)}", 400
+        )
+
+    actor_level = _get_actor_access_level()
+
+    with _lock:
+        vault      = _session["vault"]
+        passphrase = _session["passphrase"]
+        _actor_id  = _session.get("admin_id", "owner")
+        cache      = _session.get("cache") or {}
+
+    if name not in cache.get("clients", {}):
+        raise _ApiError(f"Client '{name}' not found.", 404)
+
+    changes: dict = {}
+    with vault.open(passphrase, admin_id=_actor_id) as state:
+        if name not in state.clients:
+            raise _ApiError(f"Client '{name}' not found.", 404)
+        client = state.clients[name]
+
+        # Access level change
+        if new_level is not None:
+            old_level = client.get("access_level", "standard")
+            err = validate_access_level_change(actor_level, old_level, new_level)
+            if err:
+                raise _ApiError(err, 403)
+            client["access_level"] = new_level
+            # Reset privileges to defaults for new level
+            client["privileges"] = default_privileges(
+                __import__("wireseal.security.access_control", fromlist=["AccessLevel"])
+                .AccessLevel.from_str(new_level)
+            )
+            changes["access_level"] = {"old": old_level, "new": new_level}
+
+        # Privilege overrides (only for custom level)
+        if new_privs is not None:
+            current_level = client.get("access_level", "standard")
+            if current_level == "custom":
+                old_privs = dict(client.get("privileges", {}))
+                client["privileges"] = merge_privileges(
+                    client.get("privileges", {}), new_privs
+                )
+                changes["privileges"] = {"old": old_privs, "new": client["privileges"]}
+            else:
+                raise _ApiError(
+                    "Privileges can only be customized for 'custom' access level.", 400
+                )
+
+        # Description
+        if new_desc is not None:
+            client["description"] = new_desc
+            changes["description"] = new_desc
+
+        vault.save(state, passphrase)
+
+    _refresh_cache_unlocked(vault, passphrase, _actor_id)
+    AuditLog(_AUDIT_PATH).log(
+        "client-edited", {"name": name, "changes": changes}, actor=_actor_id
+    )
+    return {"ok": True, "name": name, "changes": changes}
+
+
+def _h_extend_client(req: "_Handler", groups: tuple) -> dict:
+    """POST /api/clients/{name}/extend — extend or change expiry.
+
+    Requires TOTP or passphrase confirmation.
+    Body: { extend_seconds, expires_at, remove_expiry, totp_code|confirm_passphrase }
+    """
+    _require_unlocked()
+    _require_server_mode()
+    _check_admin_rate_limit(req.client_address[0])
+    name = (groups[0] if groups else "").strip()
+    if not name:
+        raise _ApiError("client name is required", 400)
+
+    body = req._json()
+    _require_confirmation(body)
+
+    from wireseal.security.audit import AuditLog
+    import time as _time
+
+    extend_seconds = body.get("extend_seconds")
+    new_expires_at = body.get("expires_at")
+    remove_expiry = body.get("remove_expiry", False)
+
+    with _lock:
+        vault      = _session["vault"]
+        passphrase = _session["passphrase"]
+        _actor_id  = _session.get("admin_id", "owner")
+        cache      = _session.get("cache") or {}
+
+    if name not in cache.get("clients", {}):
+        raise _ApiError(f"Client '{name}' not found.", 404)
+
+    result = {}
+    with vault.open(passphrase, admin_id=_actor_id) as state:
+        if name not in state.clients:
+            raise _ApiError(f"Client '{name}' not found.", 404)
+        client = state.clients[name]
+
+        old_expires = client.get("ttl_expires_at")
+
+        if remove_expiry:
+            client["permanent"] = True
+            client["ttl_seconds"] = None
+            client["ttl_expires_at"] = None
+            result = {"ok": True, "permanent": True}
+        elif extend_seconds is not None:
+            secs = int(extend_seconds)
+            if secs <= 0:
+                raise _ApiError("extend_seconds must be positive.", 400)
+            base = client.get("ttl_expires_at") or _time.time()
+            # If already expired, extend from now
+            if base < _time.time():
+                base = _time.time()
+            client["permanent"] = False
+            client["ttl_expires_at"] = base + secs
+            client["ttl_seconds"] = secs
+            # Re-activate if was expired
+            if client.get("status") == "expired":
+                client["status"] = "active"
+            result = {"ok": True, "expires_at": client["ttl_expires_at"]}
+        elif new_expires_at is not None:
+            ts = float(new_expires_at)
+            if ts <= _time.time():
+                raise _ApiError("expires_at must be in the future.", 400)
+            client["permanent"] = False
+            client["ttl_expires_at"] = ts
+            client["ttl_seconds"] = int(ts - _time.time())
+            if client.get("status") == "expired":
+                client["status"] = "active"
+            result = {"ok": True, "expires_at": ts}
+        else:
+            raise _ApiError(
+                "Provide extend_seconds, expires_at, or remove_expiry.", 400
+            )
+
+        vault.save(state, passphrase)
+
+    _refresh_cache_unlocked(vault, passphrase, _actor_id)
+    AuditLog(_AUDIT_PATH).log(
+        "client-extended",
+        {"name": name, "old_expires": old_expires, "new_expires": client.get("ttl_expires_at")},
+        actor=_actor_id,
+    )
+    return result
+
+
+def _h_revoke_client(req: "_Handler", groups: tuple) -> dict:
+    """POST /api/clients/{name}/revoke — immediately revoke a client.
+
+    Removes the WireGuard peer but keeps the client record with status=revoked.
+    Requires TOTP or passphrase confirmation.
+    """
+    _require_unlocked()
+    _require_server_mode()
+    _check_admin_rate_limit(req.client_address[0])
+    name = (groups[0] if groups else "").strip()
+    if not name:
+        raise _ApiError("client name is required", 400)
+
+    body = req._json()
+    _require_confirmation(body)
+
+    from wireseal.security.audit import AuditLog
+
+    actor_level = _get_actor_access_level()
+
+    with _lock:
+        vault      = _session["vault"]
+        passphrase = _session["passphrase"]
+        _actor_id  = _session.get("admin_id", "owner")
+        cache      = _session.get("cache") or {}
+
+    if name not in cache.get("clients", {}):
+        raise _ApiError(f"Client '{name}' not found.", 404)
+
+    with vault.open(passphrase, admin_id=_actor_id) as state:
+        if name not in state.clients:
+            raise _ApiError(f"Client '{name}' not found.", 404)
+        client = state.clients[name]
+
+        # Check permission
+        from wireseal.security.access_control import AccessLevel
+        target_level = AccessLevel.from_str(client.get("access_level", "standard"))
+        actor = AccessLevel.from_str(actor_level)
+        if not actor.can_manage(target_level):
+            raise _ApiError("Insufficient privileges to revoke this client.", 403)
+
+        if client.get("status") == "revoked":
+            raise _ApiError("Client is already revoked.", 409)
+
+        # Remove WireGuard peer (but keep record)
+        pubkey = client.get("public_key", "")
+        from wireseal.security.secret_types import SecretBytes
+        if isinstance(pubkey, SecretBytes):
+            pubkey = pubkey.expose_secret().decode("ascii")
+        if pubkey:
+            import subprocess
+            cmd = ["wg", "set", _WG_IFACE, "peer", str(pubkey), "remove"]
+            if sys.platform != "win32":
+                cmd = _sudo(cmd)
+            try:
+                subprocess.run(cmd, capture_output=True, timeout=5)
+            except Exception:
+                pass
+
+        client["status"] = "revoked"
+        vault.save(state, passphrase)
+
+    _refresh_cache_unlocked(vault, passphrase, _actor_id)
+    AuditLog(_AUDIT_PATH).log("client-revoked", {"name": name}, actor=_actor_id)
+    return {"ok": True, "name": name, "status": "revoked"}
+
+
+def _h_suspend_client(req: "_Handler", groups: tuple) -> dict:
+    """POST /api/clients/{name}/suspend — suspend or unsuspend a client.
+
+    Suspended clients have their WireGuard peer removed but can be restored.
+    Body: { action: "suspend"|"unsuspend", totp_code|confirm_passphrase }
+    """
+    _require_unlocked()
+    _require_server_mode()
+    _check_admin_rate_limit(req.client_address[0])
+    name = (groups[0] if groups else "").strip()
+    if not name:
+        raise _ApiError("client name is required", 400)
+
+    body = req._json()
+    _require_confirmation(body)
+
+    action = body.get("action", "suspend")
+    if action not in ("suspend", "unsuspend"):
+        raise _ApiError("action must be 'suspend' or 'unsuspend'.", 400)
+
+    from wireseal.security.audit import AuditLog
+    from wireseal.core.config_builder import ConfigBuilder
+    from wireseal.platform.detect import get_adapter
+
+    with _lock:
+        vault      = _session["vault"]
+        passphrase = _session["passphrase"]
+        _actor_id  = _session.get("admin_id", "owner")
+
+    with vault.open(passphrase, admin_id=_actor_id) as state:
+        if name not in state.clients:
+            raise _ApiError(f"Client '{name}' not found.", 404)
+        client = state.clients[name]
+
+        if action == "suspend":
+            if client.get("status") in ("revoked", "suspended"):
+                raise _ApiError(f"Client is already {client['status']}.", 409)
+            # Remove peer
+            pubkey = client.get("public_key", "")
+            from wireseal.security.secret_types import SecretBytes
+            if isinstance(pubkey, SecretBytes):
+                pubkey = pubkey.expose_secret().decode("ascii")
+            if pubkey:
+                import subprocess
+                cmd = ["wg", "set", _WG_IFACE, "peer", str(pubkey), "remove"]
+                if sys.platform != "win32":
+                    cmd = _sudo(cmd)
+                try:
+                    subprocess.run(cmd, capture_output=True, timeout=5)
+                except Exception:
+                    pass
+            client["status"] = "suspended"
+        else:  # unsuspend
+            if client.get("status") != "suspended":
+                raise _ApiError("Client is not suspended.", 409)
+            client["status"] = "active"
+            # Re-add peer by regenerating server config with all active peers
+            peers = [
+                {
+                    "name":       n,
+                    "public_key": _extract(d["public_key"]),
+                    "psk":        _extract(d["psk"]),
+                    "ip":         d["ip"],
+                }
+                for n, d in state.clients.items()
+                if d.get("status", "active") == "active"
+            ]
+            server_config = ConfigBuilder().render_server_config(
+                server_private_key=_extract(state.server["private_key"]),
+                server_ip=state.server["ip"],
+                prefix_length=int(state.ip_pool["subnet"].split("/")[1]),
+                server_port=state.server["port"],
+                clients=peers,
+            )
+            try:
+                adapter = get_adapter()
+                adapter.check_privileges()
+                adapter.deploy_config(server_config)
+                _reload_wireguard()
+            except Exception:
+                pass
+
+        vault.save(state, passphrase)
+
+    _refresh_cache_unlocked(vault, passphrase, _actor_id)
+    AuditLog(_AUDIT_PATH).log(
+        f"client-{action}ed", {"name": name, "action": action}, actor=_actor_id
+    )
+    return {"ok": True, "name": name, "status": client["status"]}
+
+
 def _h_list_clients(req: "_Handler", _groups: tuple) -> list:
     _require_unlocked()
     import time as _time
+    from wireseal.security.access_control import check_expiry_status
     with _lock:
         cache = _session["cache"] or {}
     now = _time.time()
-    return [
-        {
-            "name":             n,
-            "ip":               d["ip"],
-            "permanent":        d.get("permanent", True),
-            "ttl_seconds":      d.get("ttl_seconds"),
-            "ttl_expires_at":   d.get("ttl_expires_at"),
-            "expires_in_seconds": (
-                max(0, int(d["ttl_expires_at"] - now))
-                if not d.get("permanent", True) and d.get("ttl_expires_at")
-                else None
-            ),
-        }
-        for n, d in cache.get("clients", {}).items()
-    ]
+    result = []
+    for n, d in cache.get("clients", {}).items():
+        status = check_expiry_status(d, now).value
+        expires_in = None
+        if not d.get("permanent", True) and d.get("ttl_expires_at"):
+            expires_in = max(0, int(d["ttl_expires_at"] - now))
+        result.append({
+            "name":               n,
+            "ip":                 d["ip"],
+            "permanent":          d.get("permanent", True),
+            "ttl_seconds":        d.get("ttl_seconds"),
+            "ttl_expires_at":     d.get("ttl_expires_at"),
+            "expires_in_seconds": expires_in,
+            "access_level":       d.get("access_level", "standard"),
+            "status":             status,
+            "description":        d.get("description", ""),
+            "created_at":         d.get("created_at"),
+        })
+    return result
 
 
 def _h_add_client(req: "_Handler", _groups: tuple) -> dict:
     _require_unlocked()
     _require_server_mode()
+    import time as _time
+    with _lock:
+        admin_id = _session.get("admin_id", "owner")
+        now = _time.time()
+        timestamps = _CLIENT_CREATIONS.setdefault(admin_id, [])
+        timestamps[:] = [t for t in timestamps if now - t < 3600]
+        if len(timestamps) >= _CLIENT_CREATION_LIMIT:
+            raise _ApiError("Client creation rate limit exceeded (max 50/hour).", 429)
+        timestamps.append(now)
     body = req._json()
     name = body.get("name", "").strip()
     if not name:
@@ -1865,6 +2482,19 @@ def _h_add_client(req: "_Handler", _groups: tuple) -> dict:
     tunnel_mode = body.get("tunnel_mode", "split-vpn")
     if tunnel_mode not in ("split-lan", "split-vpn", "full"):
         raise _ApiError("tunnel_mode must be 'split-lan', 'split-vpn', or 'full'.", 400)
+
+    # Access control fields (backward-compatible — all optional)
+    access_level = body.get("access_level", "standard")
+    from wireseal.security.access_control import (
+        VALID_ACCESS_LEVELS, build_client_access_fields, compute_expires_at,
+    )
+    if access_level not in VALID_ACCESS_LEVELS:
+        raise _ApiError(
+            f"access_level must be one of: {', '.join(VALID_ACCESS_LEVELS)}", 400
+        )
+    client_description = body.get("description", "")
+    client_privileges = body.get("privileges")
+    auto_revoke = body.get("auto_revoke", True)
 
     with _lock:
         vault      = _session["vault"]
@@ -1976,29 +2606,50 @@ def _h_add_client(req: "_Handler", _groups: tuple) -> dict:
         import secrets as _secrets_hb
         heartbeat_token = _secrets_hb.token_hex(32)
 
+        # Build access control metadata
+        ac_fields = build_client_access_fields(
+            access_level=access_level,
+            privileges=client_privileges,
+            description=client_description,
+            ttl_seconds=_ttl_secs,
+            expires_at=body.get("expires_at"),
+            auto_revoke=auto_revoke,
+        )
+
         state.clients[name] = {
-            "private_key":    priv_key_str,
-            "public_key":     pub_key_str,
-            "psk":            psk_str,
-            "ip":             allocated_ip,
-            "config_hash":    config_hash,
-            "permanent":      _permanent,
-            "ttl_seconds":    _ttl_secs,
-            "ttl_expires_at": _ttl_expires,
+            "private_key":     priv_key_str,
+            "public_key":      pub_key_str,
+            "psk":             psk_str,
+            "ip":              allocated_ip,
+            "config_hash":     config_hash,
+            "permanent":       _permanent,
+            "ttl_seconds":     _ttl_secs,
+            "ttl_expires_at":  _ttl_expires,
             "heartbeat_token": heartbeat_token,
-            "tunnel_mode":    tunnel_mode,
-            "allowed_ips":    allowed_ips,
+            "tunnel_mode":     tunnel_mode,
+            "allowed_ips":     allowed_ips,
+            # Access control fields
+            "access_level":    ac_fields["access_level"],
+            "privileges":      ac_fields["privileges"],
+            "description":     ac_fields["description"],
+            "status":          ac_fields["status"],
+            "auto_revoke":     ac_fields["auto_revoke"],
+            "created_at":      ac_fields["created_at"],
         }
         state.ip_pool["allocated"]        = pool.get_allocated()
         state.integrity[f"client-{name}"] = config_hash
         vault.save(state, passphrase)
 
-        AuditLog(_AUDIT_PATH).log("add-client", {"name": name, "ip": allocated_ip}, actor=_actor_id)
+        AuditLog(_AUDIT_PATH).log(
+            "add-client",
+            {"name": name, "ip": allocated_ip, "access_level": access_level},
+            actor=_actor_id,
+        )
 
         with _lock:
             _session["cache"] = _refresh_cache(state)
 
-    result: dict = {"name": name, "ip": allocated_ip}
+    result: dict = {"name": name, "ip": allocated_ip, "access_level": access_level}
     if wg_warning:
         result["warning"] = wg_warning
     return result
@@ -3263,17 +3914,9 @@ def _h_uninstall(req: "_Handler", _groups: tuple) -> dict:
     import os as _os
 
     system = _platform.system()
-    # Resolve the bundled script path. Resolution order:
-    #   1. PyInstaller-frozen → ``sys._MEIPASS/scripts`` (set by PyInstaller
-    #      when the bundle is extracted at runtime).
-    #   2. Source checkout → ``<repo>/scripts`` (parents[2] of api.py).
-    #   3. ``WIRESEAL_SCRIPTS_DIR`` env var override (for unusual layouts).
     import sys as _sys
     scripts_dir: Path | None = None
-    env_override = _os.environ.get("WIRESEAL_SCRIPTS_DIR")
-    if env_override:
-        scripts_dir = Path(env_override)
-    elif getattr(_sys, "frozen", False):
+    if getattr(_sys, "frozen", False):
         meipass = getattr(_sys, "_MEIPASS", None)
         if meipass:
             scripts_dir = Path(meipass) / "scripts"
@@ -4354,6 +4997,7 @@ def _h_totp_enroll_begin(req: "_Handler", _groups: tuple) -> dict:
     Returns: {otpauth_uri, secret_b32}
     """
     _require_unlocked()
+    _check_admin_rate_limit(req.client_address[0])
     with _lock:
         admin_id = _session.get("admin_id", "owner")
 
@@ -4361,10 +5005,38 @@ def _h_totp_enroll_begin(req: "_Handler", _groups: tuple) -> dict:
     uri = totp_uri(secret, admin_id)
     _pending_totp[admin_id] = {"secret": secret, "used_codes": set()}
 
-    return {
+    result: dict = {
         "otpauth_uri": uri,
         "secret_b32": secret_to_b32(secret),
     }
+
+    # Generate a base64-encoded QR image so the dashboard can display it
+    # without a client-side QR library.  Gracefully degrades if qrcode
+    # package is not installed.
+    try:
+        import qrcode as _qr
+        import qrcode.image.svg as _qr_svg
+
+        qr = _qr.QRCode(error_correction=_qr.constants.ERROR_CORRECT_L)
+        qr.add_data(uri)
+        qr.make(fit=True)
+
+        try:
+            img = qr.make_image(fill_color="black", back_color="white")
+            buf = io.BytesIO()
+            img.save(buf, format="PNG")
+            result["qr_b64"] = base64.b64encode(buf.getvalue()).decode()
+            result["qr_format"] = "png"
+        except Exception:
+            img = qr.make_image(image_factory=_qr_svg.SvgPathFillImage)
+            buf = io.BytesIO()
+            img.save(buf)
+            result["qr_b64"] = base64.b64encode(buf.getvalue()).decode()
+            result["qr_format"] = "svg+xml"
+    except ImportError:
+        pass  # qrcode not installed — frontend falls back to JS rendering
+
+    return result
 
 
 def _h_totp_enroll_confirm(req: "_Handler", _groups: tuple) -> dict:
@@ -4377,6 +5049,7 @@ def _h_totp_enroll_confirm(req: "_Handler", _groups: tuple) -> dict:
     The vault stores only their SHA-256 hashes.
     """
     _require_unlocked()
+    _check_admin_rate_limit(req.client_address[0])
     with _lock:
         admin_id  = _session.get("admin_id", "owner")
         vault     = _session["vault"]
@@ -4385,14 +5058,18 @@ def _h_totp_enroll_confirm(req: "_Handler", _groups: tuple) -> dict:
     body      = req._json()
     totp_code = str(body.get("totp_code", "")).strip()
 
+    _check_totp_rate_limit(admin_id)
+
     pending = _pending_totp.get(admin_id)
     if pending is None:
         raise _ApiError("No pending enrollment. Call /api/totp/enroll/begin first.", 400)
 
     if not verify_totp(pending["secret"], totp_code, used_codes=pending["used_codes"]):
+        _record_totp_failure(admin_id)
         raise _ApiError("invalid_code", 400)
 
-    # Enrollment verified — generate backup codes and persist to vault
+    # Enrollment verified — clear rate limit and generate backup codes
+    _clear_totp_failures(admin_id)
     backup_codes  = generate_backup_codes(8)
     hashed_codes  = [hash_backup_code(c) for c in backup_codes]
     b32           = secret_to_b32(pending["secret"])
@@ -4414,6 +5091,8 @@ def _h_totp_enroll_confirm(req: "_Handler", _groups: tuple) -> dict:
             admins_dict[admin_id]["backup_codes"]     = hashed_codes
             with _lock:
                 _session["cache"] = _refresh_cache(state)
+            # Persist to disk (v2 vaults don't auto-save)
+            vault.save(state, sess_pass)
     except _ApiError:
         raise
     except Exception as exc:
@@ -4430,8 +5109,9 @@ def _h_totp_enroll_confirm(req: "_Handler", _groups: tuple) -> dict:
 def _h_totp_disable(req: "_Handler", _groups: tuple) -> dict:
     """POST /api/totp/disable — disable TOTP for an admin.
 
-    Body (optional): {admin_id: "alice"}
+    Body (optional): {admin_id: "alice", totp_code|confirm_passphrase}
     Owner can disable any admin's TOTP; non-owner can only disable their own.
+    Requires TOTP or passphrase re-confirmation.
     """
     _require_unlocked()
     with _lock:
@@ -4442,6 +5122,8 @@ def _h_totp_disable(req: "_Handler", _groups: tuple) -> dict:
 
     body      = req._json()
     target_id = body.get("admin_id", acting_id).strip() or acting_id
+
+    _require_confirmation(body)
 
     if acting_role != "owner" and target_id != acting_id:
         raise _ApiError("may only disable your own TOTP", 403)
@@ -4456,6 +5138,7 @@ def _h_totp_disable(req: "_Handler", _groups: tuple) -> dict:
             admins_dict[target_id]["backup_codes"]     = []
             with _lock:
                 _session["cache"] = _refresh_cache(state)
+            vault.save(state, sess_pass)
     except _ApiError:
         raise
     except Exception as exc:
@@ -4473,7 +5156,8 @@ def _h_totp_disable(req: "_Handler", _groups: tuple) -> dict:
 def _h_totp_reset(req: "_Handler", _groups: tuple) -> dict:
     """POST /api/totp/reset — owner-only: force-clear TOTP for any admin.
 
-    Body: {admin_id: "alice"}
+    Body: {admin_id: "alice", totp_code|confirm_passphrase}
+    Requires TOTP or passphrase re-confirmation.
     """
     _require_unlocked()
     _require_owner()
@@ -4483,6 +5167,7 @@ def _h_totp_reset(req: "_Handler", _groups: tuple) -> dict:
         sess_pass = _session["passphrase"]
 
     body      = req._json()
+    _require_confirmation(body)
     target_id = body.get("admin_id", "").strip()
     if not target_id:
         raise _ApiError("admin_id is required", 400)
@@ -4497,6 +5182,7 @@ def _h_totp_reset(req: "_Handler", _groups: tuple) -> dict:
             admins_dict[target_id]["backup_codes"]     = []
             with _lock:
                 _session["cache"] = _refresh_cache(state)
+            vault.save(state, sess_pass)
     except _ApiError:
         raise
     except Exception as exc:
@@ -4532,6 +5218,7 @@ def _h_totp_verify_backup(req: "_Handler", _groups: tuple) -> dict:
         raise _ApiError("backup_code is required", 400)
 
     _check_rate_limit(client_ip)
+    _check_totp_backup_rate_limit(admin_id)
 
     from wireseal.security.secret_types import SecretBytes
     from wireseal.security.secrets_wipe import wipe_string
@@ -4558,10 +5245,19 @@ def _h_totp_verify_backup(req: "_Handler", _groups: tuple) -> dict:
                     raise _ApiError("invalid_backup_code", 401)
 
                 # Consume the matched code (single-use)
+                # h may be SecretBytes (wrapped by VaultState) or str — compare as str
+                matched_str: str | None = matched
                 admins_dict[admin_id]["backup_codes"] = [
-                    h for h in hashed_codes if h != matched
+                    h for h in hashed_codes
+                    if (bytes(h.expose_secret()).decode("utf-8") if isinstance(h, SecretBytes) else h) != matched_str
                 ]
                 cache = _refresh_cache(st)
+                # Persist consumed code to disk (v2 vaults don't auto-save)
+                save_pass = SecretBytes(bytearray(passphrase_str.encode()))
+                try:
+                    vault.save(st, save_pass)
+                finally:
+                    save_pass.wipe()
         except _ApiError:
             passphrase.wipe()
             raise
@@ -5856,8 +6552,13 @@ _ROUTES: list[tuple[str, re.Pattern, Any]] = [
     ("GET",    re.compile(r"^/api/clients/([^/]+)/config/download$"), _h_client_config_download),
     ("GET",    re.compile(r"^/api/clients/([^/]+)/config$"), _h_client_config),
     ("POST",   re.compile(r"^/api/clients/([^/]+)/rotate$"), _h_rotate_client_keys),
-    ("POST",   re.compile(r"^/api/clients/([^/]+)/ttl$"),   _h_set_client_ttl),
-    ("DELETE", re.compile(r"^/api/clients/([^/]+)$"),        _h_remove_client),
+    ("POST",   re.compile(r"^/api/clients/([^/]+)/ttl$"),       _h_set_client_ttl),
+    ("GET",    re.compile(r"^/api/clients/([^/]+)/details$"), _h_get_client_details),
+    ("PUT",    re.compile(r"^/api/clients/([^/]+)$"),         _h_edit_client),
+    ("POST",   re.compile(r"^/api/clients/([^/]+)/extend$"),  _h_extend_client),
+    ("POST",   re.compile(r"^/api/clients/([^/]+)/revoke$"),  _h_revoke_client),
+    ("POST",   re.compile(r"^/api/clients/([^/]+)/suspend$"), _h_suspend_client),
+    ("DELETE", re.compile(r"^/api/clients/([^/]+)$"),         _h_remove_client),
     ("POST",   re.compile(r"^/api/heartbeat/([^/]+)$"),      _h_heartbeat),
     ("GET",    re.compile(r"^/api/audit-log$"),              _h_audit_log),
     ("GET",    re.compile(r"^/api/session-summary$"),         _h_session_summary),
@@ -5943,30 +6644,15 @@ class _Handler(BaseHTTPRequestHandler):
         pass
 
     def _cors(self) -> None:
-        # Only allow requests from the same host — never wildcard.
-        # The dashboard is served from the same origin so no CORS header
-        # is strictly needed, but dev tools / local testing may use
-        # 127.0.0.1 or localhost interchangeably.
-        # When bound to 0.0.0.0 (headless/Pi), also allow the server's
-        # actual IP so LAN browsers can reach the dashboard.
-        #
-        # SEC-003 follow-up: keep this allowlist in lockstep with
-        # ``_enforce_same_origin`` so a request accepted by the pre-dispatch
-        # filter also receives a correct CORS response header (and vice versa).
         origin = self.headers.get("Origin", "")
         _allowed = {
             "http://127.0.0.1",  "https://127.0.0.1",
             "http://localhost",  "https://localhost",
         }
-        # Also allow the IP:port the client connected to (covers LAN access)
-        host_header = self.headers.get("Host", "")
-        if host_header:
-            host_only = host_header.split(":")[0]
-            _allowed.add(f"http://{host_only}")
-            _allowed.add(f"https://{host_only}")
+        if origin and not any(origin == a or origin.startswith(a + ":") for a in _allowed):
+            return
         if any(origin == a or origin.startswith(a + ":") for a in _allowed):
             self.send_header("Access-Control-Allow-Origin", origin)
-        # No header at all for unknown origins — browser will block.
         self.send_header("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
         self.send_header("Access-Control-Allow-Headers", "Content-Type")
 
@@ -6008,31 +6694,13 @@ class _Handler(BaseHTTPRequestHandler):
     _STATE_CHANGING_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
 
     def _enforce_same_origin(self) -> bool:
-        """Reject cross-origin state-changing requests pre-dispatch.
-
-        Returns True if the request was rejected (and a 403 was already
-        written); callers must short-circuit. Returns False if the request is
-        safe to dispatch.
-
-        The allowlist mirrors ``_cors()`` so origins that would receive an
-        ``Access-Control-Allow-Origin`` header after the fact are also the
-        origins we accept before the handler runs. Requests with no Origin
-        header (native CLI, curl, systemd services) are NOT rejected — only
-        explicit cross-origin browser requests are blocked.
-        """
         origin = self.headers.get("Origin", "")
         if not origin:
-            return False  # non-browser client
+            return False
         allowed = {"http://127.0.0.1", "http://localhost",
                    "https://127.0.0.1", "https://localhost"}
-        host_header = self.headers.get("Host", "")
-        if host_header:
-            host_only = host_header.split(":")[0]
-            allowed.add(f"http://{host_only}")
-            allowed.add(f"https://{host_only}")
         if any(origin == a or origin.startswith(a + ":") for a in allowed):
             return False
-        # Reject before the handler runs so the side-effect never happens.
         self._send(
             {"error": "Cross-origin request rejected by server CSRF filter."},
             403,
@@ -6062,7 +6730,7 @@ class _Handler(BaseHTTPRequestHandler):
                 except Exception as exc:
                     import traceback
                     traceback.print_exc()
-                    self._send({"error": f"Internal server error: {exc}"}, 500)
+                    self._send({"error": "Internal server error. Check the server logs."}, 500)
                 return
         self._send({"error": "Not found"}, 404)
 

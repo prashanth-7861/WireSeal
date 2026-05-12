@@ -34,6 +34,30 @@ Thumbs.db
 *.enc
 audit.log
 
-# Misc
+# Claude AI artifacts
+.claude-flow/
+.claude/
+.swarm/
+.mcp.json
+CLAUDE.md
+ocgo.exe
+ruvector.db
+
+# Planning documents
 plan.md
+TOTP-plan.md
+Access-Control-Plan.md
+SECURITY_AUDIT_REPORT.md
+
+# Build
 *.log
+.conf.dpapi
+12
+180
+2
+config
+dict*
+master
+Result
+SecretBytes
+verify

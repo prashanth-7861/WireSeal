@@ -158,3 +158,13 @@ class DnsmasqManager:
                 )
             except Exception:
                 pass
+        elif sys.platform == "darwin":
+            # DNS-05: Clean up macOS resolver files on shutdown.
+            try:
+                resolver_dir = self._MACOS_RESOLVER_DIR
+                if resolver_dir.exists():
+                    for f in resolver_dir.iterdir():
+                        if f.is_file():
+                            f.unlink(missing_ok=True)
+            except Exception:
+                pass

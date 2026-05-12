@@ -48,6 +48,9 @@ class ExpiryWatcher(threading.Thread):
 
     def _check_expiry(self):
         import time as _time
+        # CORE-09: import at top of function to avoid circular dependency at module load.
+        from wireseal.api import _refresh_cache
+
         # Quick read under lock — reference copies only, no Argon2id yet
         with self._lock:
             session = self._get_session()
@@ -59,19 +62,48 @@ class ExpiryWatcher(threading.Thread):
         if vault is None or passphrase is None:
             return  # Vault locked — skip cycle
 
-        # Check if any non-permanent clients have TTL set
+        # Check if any non-permanent clients have TTL set and are still active
         clients = cache.get("clients", {})
         now = _time.time()
+
+        # Check for expiry warnings at 7/3/1 day thresholds
+        from wireseal.security.audit import AuditLog
+        _audit_log = AuditLog(self._audit_path)
+        for cname, info in clients.items():
+            if info.get("permanent", True) or info.get("status", "active") != "active":
+                continue
+            expires_at = info.get("ttl_expires_at")
+            if expires_at is None or expires_at <= now:
+                continue
+            remaining = expires_at - now
+            days_left = remaining / 86400
+            try:
+                if days_left <= 1 and not info.get("warning_sent_1d"):
+                    _audit_log.log("expiry-warning", {"client": cname, "days_remaining": 1, "level": "final"})
+                    info["warning_sent_1d"] = True
+                elif days_left <= 3 and not info.get("warning_sent_3d"):
+                    _audit_log.log("expiry-warning", {"client": cname, "days_remaining": 3, "level": "warning"})
+                    info["warning_sent_3d"] = True
+                elif days_left <= 7 and not info.get("warning_sent_7d"):
+                    _audit_log.log("expiry-warning", {"client": cname, "days_remaining": 7, "level": "notice"})
+                    info["warning_sent_7d"] = True
+            except Exception:
+                pass
+
         candidates = [
             (name, info) for name, info in clients.items()
             if not info.get("permanent", True)
             and info.get("ttl_expires_at") is not None
             and info["ttl_expires_at"] <= now
+            and info.get("status", "active") == "active"
         ]
         if not candidates:
             return  # Nothing to evict — skip vault.open
 
-        # Open vault outside lock (Argon2id takes ~3s)
+        # CORE-06: Open vault outside lock (Argon2id takes ~3s). The lock is
+        # only held during the quick cache read above. Re-check inside vault
+        # handles TOCTOU races (heartbeat may have reset TTL between cache
+        # read and vault open).
         expired_names = []
         try:
             with vault.open(passphrase, admin_id=admin_id) as state:
@@ -81,21 +113,29 @@ class ExpiryWatcher(threading.Thread):
                     if client and not client.get("permanent", True):
                         expires_at = client.get("ttl_expires_at")
                         if expires_at is not None and expires_at <= _time.time():
-                            pubkey = client.get("public_key", "")
-                            self._remove_peer(pubkey, name)
-                            del state.clients[name]
-                            # Release IP back to pool
-                            ip = client.get("ip", "")
-                            allocated = state.ip_pool.get("allocated", {})
-                            if ip and name in allocated:
-                                del allocated[name]
-                            expired_names.append(name)
+                            if client.get("status", "active") not in ("revoked", "suspended"):
+                                pubkey = client.get("public_key", "")
+                                self._remove_peer(pubkey, name)
+                                auto_revoke = client.get("auto_revoke", True)
+                                if auto_revoke:
+                                    # Auto-revoke: mark as expired, remove peer, release IP
+                                    client["status"] = "expired"
+                                    ip = client.get("ip", "")
+                                    allocated = state.ip_pool.get("allocated", {})
+                                    if ip and name in allocated:
+                                        del allocated[name]
+                                else:
+                                    # No auto-revoke: mark expired but keep IP allocated
+                                    client["status"] = "expired"
+                                expired_names.append(name)
                 if expired_names:
                     vault.save(state, passphrase)
         except Exception:
             return
 
-        # Log audit events and refresh cache under lock
+        # CORE-08: Audit logged AFTER vault.save confirmed (save happens above
+        # inside the vault block). This ordering ensures the log entry is only
+        # written after the state change is persistent.
         if expired_names:
             from wireseal.security.audit import AuditLog
             audit = AuditLog(self._audit_path)
@@ -104,7 +144,7 @@ class ExpiryWatcher(threading.Thread):
                     audit.log("peer-expired", {"name": name, "reason": "ttl"}, actor="system")
                 except Exception:
                     pass
-            # Refresh in-memory cache
+        # Refresh in-memory cache
             with self._lock:
                 session = self._get_session()
                 if session.get("vault") is vault:  # Same session still active
@@ -130,7 +170,9 @@ class ExpiryWatcher(threading.Thread):
         cmd = ["wg", "set", self._wg_iface, "peer", str(pubkey), "remove"]
         if sys.platform != "win32":
             cmd = ["sudo", "-n"] + cmd
+        import logging as _logging
+        _log_remove = _logging.getLogger(__name__)
         try:
             subprocess.run(cmd, capture_output=True, timeout=5)
-        except Exception:
-            pass
+        except Exception as exc:
+            _log_remove.warning("CORE-07: wg set peer remove failed for %s: %s", name, exc)

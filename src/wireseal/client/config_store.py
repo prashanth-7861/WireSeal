@@ -17,6 +17,7 @@ The config text is encrypted at rest inside the vault (dual-layer AEAD).
 
 from __future__ import annotations
 
+import copy
 import re
 from datetime import datetime, timezone
 from typing import Any
@@ -55,7 +56,9 @@ def validate_conf(config_text: str) -> list[str]:
         elif stripped == "[peer]":
             has_peer = True
         elif stripped.startswith("privatekey") and has_interface:
-            has_private_key = True
+            _, _, val = line.strip().partition("=")
+            if val.strip():
+                has_private_key = True
 
     if not has_interface:
         errors.append("Missing [Interface] section")
@@ -148,8 +151,8 @@ def _get_entry_or_raise(state_data: dict[str, Any], name: str) -> dict[str, Any]
     configs = state_data.get("client_configs", {})
     if name not in configs:
         raise KeyError(f"Profile '{name}' not found")
-    # Return a shallow copy so callers can mutate without touching the vault.
-    return dict(configs[name])
+    # CLIENT-10: deep copy so callers cannot mutate the vault state.
+    return copy.deepcopy(configs[name])
 
 
 def get_config_redacted(

@@ -234,6 +234,9 @@ class BackupManager:
         resolved_dir = dest_dir.resolve(strict=False)
         _reject_system_destination(resolved_dir)
         dest_dir.mkdir(parents=True, exist_ok=True)
+        # BACKUP-05: Re-validate after mkdir (TOCTOU mitigation)
+        resolved_after = dest_dir.resolve(strict=True)
+        _reject_system_destination(resolved_after)
         dest_file = dest_dir / fname
         shutil.copy2(vault_path, dest_file)
         # Tighten permissions on Unix — the vault is encrypted but we still
@@ -262,7 +265,9 @@ class BackupManager:
             _validate_ssh_component(user, "ssh_user", _SSH_USER_RE)
         target = f"{user}@{host}:{remote_path}/{fname}" if user else f"{host}:{remote_path}/{fname}"
         result = subprocess.run(
-            ["rsync", "-az", str(vault_path), target],
+            ["rsync", "-az", "--timeout=30",
+             "-e", "ssh -o StrictHostKeyChecking=accept-new -o BatchMode=yes",
+             str(vault_path), target],
             capture_output=True, timeout=60,
         )
         if result.returncode != 0:

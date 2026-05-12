@@ -29,6 +29,7 @@ _IP_SOURCES: tuple[str, ...] = (
     "https://api.ipify.org",
     "https://checkip.amazonaws.com",
     "https://icanhazip.com",
+    "https://ifconfig.me/ip",
 )
 
 # ---------------------------------------------------------------------------
@@ -116,23 +117,23 @@ def _is_public_ipv4(addr: str) -> bool:
 
 
 def resolve_public_ip() -> ipaddress.IPv4Address:
-    """Query 3 independent HTTPS sources and return the consensus public IPv4.
+    """Query 4 independent HTTPS sources and return the consensus public IPv4.
 
-    Submits all 3 requests concurrently (max_workers=3) with a 10-second
+    Submits all 4 requests concurrently (max_workers=4) with a 10-second
     wall-clock timeout so a hanging source never blocks indefinitely.
 
     Returns:
-        ipaddress.IPv4Address representing the public IP that at least 2
-        of the 3 sources agreed on.
+        ipaddress.IPv4Address representing the public IP that at least 3
+        of the 4 sources agreed on.
 
     Raises:
-        IPConsensusError: Fewer than 2 sources returned the same public IPv4.
+        IPConsensusError: Fewer than 3 sources returned the same public IPv4.
             Callers should treat this as a hard abort for any DNS update
             operation (DNS-01 fail-closed guarantee).
     """
     results: list[str] = []
 
-    with ThreadPoolExecutor(max_workers=3) as executor:
+    with ThreadPoolExecutor(max_workers=4) as executor:
         futures = {executor.submit(_fetch_ip, url): url for url in _IP_SOURCES}
         for future in as_completed(futures, timeout=10):
             ip_str = future.result()
@@ -142,9 +143,9 @@ def resolve_public_ip() -> ipaddress.IPv4Address:
     counts = Counter(results)
     if counts:
         winning_ip, winning_count = counts.most_common(1)[0]
-        if winning_count >= 2:
+        if winning_count >= 3:
             return ipaddress.IPv4Address(winning_ip)
 
     raise IPConsensusError(
-        "No 2-of-3 IP consensus achieved. DNS update aborted."
+        "No 3-of-4 IP consensus achieved. DNS update aborted."
     )

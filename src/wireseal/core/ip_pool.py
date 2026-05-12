@@ -9,6 +9,8 @@ Released IPs are immediately available for reuse (IP-03).
 
 import ipaddress
 
+from wireseal.security.validator import _is_rfc1918
+
 
 class IPPool:
     """Manages VPN IP address allocation within a subnet.
@@ -39,7 +41,7 @@ class IPPool:
         # strict=False allows user-friendly input with host bits set (e.g., 10.0.0.1/24)
         self.network = ipaddress.ip_network(subnet, strict=False)
 
-        if not self.network.is_private:
+        if not _is_rfc1918(self.network):
             raise ValueError(
                 f"Subnet {subnet} is not an RFC 1918 private range. "
                 "Use a private range such as 10.0.0.0/8, 172.16.0.0/12, or 192.168.0.0/16."

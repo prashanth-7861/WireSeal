@@ -7,6 +7,7 @@ passphrase, no cryptographic material is exposed.
 
 [![CI](https://github.com/prashanth-7861/WireSeal/actions/workflows/build.yml/badge.svg)](https://github.com/prashanth-7861/WireSeal/actions/workflows/build.yml)
 [![Python](https://img.shields.io/badge/python-3.12%20%E2%80%93%203.14-blue)](https://python.org)
+[![Version](https://img.shields.io/badge/version-0.9.0-green)](https://github.com/prashanth-7861/WireSeal/releases)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 [![Website](https://img.shields.io/badge/website-wireseal.vercel.app-blue)](https://wireseal.vercel.app)
 
@@ -90,6 +91,15 @@ passphrase, no cryptographic material is exposed.
   re-provisioning the peer
 - **Auto-connect on unlock** — client mode connects to a configured profile automatically
   after passphrase unlock (honours kill switch and DNS override settings)
+
+### Access Control & Expiry (v0.9)
+- **Role-based access levels** — `admin`, `standard`, `guest` with granular privilege
+  matrix enforced at every endpoint
+- **Time-limited clients** — set TTL or specific expiry date when creating clients;
+  `ExpiryWatcher` background thread evicts expired peers automatically
+- **Expiry warnings** — audit-logged at 7/3/1 day thresholds before revocation
+- **TOTP secret upgraded** — 32-byte (256-bit) CSPRNG secrets matching RFC 6238
+  recommendation; individual failure audit logging
 
 ### Production Hardening
 - **API rate limiting** — sliding-window throttle on unlock endpoints (5 attempts per

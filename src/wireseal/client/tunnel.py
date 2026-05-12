@@ -13,6 +13,7 @@ import shutil
 import subprocess
 import sys
 import threading
+import time
 from pathlib import Path
 from typing import Any
 
@@ -27,6 +28,7 @@ _state: dict[str, Any] = {
     "active_profile": None,
     "config_path": None,
     "connected": False,
+    "connected_at": 0.0,
 }
 
 
@@ -76,8 +78,12 @@ def _deploy_config(config_text: str) -> Path:
     if sys.platform != "win32":
         try:
             os.chmod(config_path, 0o600)
-        except OSError:
-            pass
+        except OSError as exc:
+            log.warning(
+                "chmod(0o600) failed on %s — private key file may be world-readable: %s",
+                config_path,
+                exc,
+            )
 
     return config_path
 
@@ -98,7 +104,8 @@ def _interface_is_up() -> bool:
         )
         if proc.returncode != 0:
             return False
-        return CLIENT_INTERFACE.encode() in (proc.stdout or b"")
+        iface_marker = b"interface: " + CLIENT_INTERFACE.encode()
+        return iface_marker in (proc.stdout or b"")
     except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
         return False
 
@@ -239,6 +246,14 @@ def tunnel_up(
                         capture_output=True,
                         timeout=30,
                     )
+                # Windows tunnel service starts asynchronously — wait for
+                # the interface to actually appear before returning, otherwise
+                # the immediate status poll resets _state["connected"] to
+                # False (the "double-click to connect" bug).
+                for _ in range(10):
+                    if _interface_is_up():
+                        break
+                    time.sleep(0.5)
             else:
                 cmd = [*_sudo_prefix(), "wg-quick", "up", str(config_path)]
                 subprocess.run(
@@ -250,6 +265,7 @@ def tunnel_up(
 
             _state["connected"] = True
             _state["active_profile"] = profile_name
+            _state["connected_at"] = time.monotonic()
 
             # Engage kill switch if requested
             ks_status = None
@@ -352,6 +368,7 @@ def tunnel_down() -> dict[str, str]:
             _state["connected"] = False
             _state["active_profile"] = None
             _state["config_path"] = None
+            _state["connected_at"] = 0.0
 
         # Disengage kill switch on intentional disconnect
         ks_status = None
@@ -473,16 +490,20 @@ def tunnel_status() -> dict[str, Any]:
         except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
             raw = ""
 
-        live = bool(raw and CLIENT_INTERFACE in raw)
+        live = bool(raw and f"interface: {CLIENT_INTERFACE}" in raw)
 
         if live and not _state["connected"]:
             # Adopt the externally-created tunnel.
             _state["connected"] = True
         elif not live and _state["connected"]:
-            # External teardown — clear stale cache so UI shows reality.
-            _state["connected"] = False
-            _state["active_profile"] = None
-            _state["config_path"] = None
+            # Grace period: on Windows the tunnel service starts async —
+            # don't reset connected state within 10s of tunnel_up returning.
+            age = time.monotonic() - _state.get("connected_at", 0.0)
+            if age > 10:
+                # External teardown — clear stale cache so UI shows reality.
+                _state["connected"] = False
+                _state["active_profile"] = None
+                _state["config_path"] = None
 
         if not _state["connected"]:
             return {
@@ -492,12 +513,12 @@ def tunnel_status() -> dict[str, Any]:
                 "kill_switch": kill_switch.is_active(),
             }
 
+        # CLIENT-04: parsed stats returned instead of raw wg_output
         result: dict[str, Any] = {
             "connected": True,
             "profile": _state["active_profile"],
             "interface": CLIENT_INTERFACE,
             "kill_switch": kill_switch.is_active(),
-            "wg_output": raw,
         }
 
         parsed = _parse_wg_show(raw)

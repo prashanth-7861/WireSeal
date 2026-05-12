@@ -82,17 +82,6 @@ class VerifiedAsset:
     signature_verified: bool
 
 
-def _sha256_file(path: Path, chunk_size: int = 1 << 20) -> bytes:
-    digest = hashlib.sha256()
-    with path.open("rb") as fh:
-        while True:
-            chunk = fh.read(chunk_size)
-            if not chunk:
-                break
-            digest.update(chunk)
-    return digest.digest()
-
-
 def verify_release_asset(
     asset_path: Path,
     expected_sha256_hex: str,
@@ -126,11 +115,14 @@ def verify_release_asset(
     if not asset_path.exists() or not asset_path.is_file():
         raise UpdateVerificationError("Asset file missing.")
 
+    # ---- Read file once to avoid TOCTOU between SHA-256 and signature ----
+    data = asset_path.read_bytes()
+
     # ---- SHA-256 ----
     expected = expected_sha256_hex.strip().lower()
     if len(expected) != 64 or not all(c in "0123456789abcdef" for c in expected):
         raise UpdateVerificationError("Malformed SHA-256 digest.")
-    computed = _sha256_file(asset_path).hex()
+    computed = hashlib.sha256(data).hexdigest()
     if not hmac.compare_digest(computed, expected):
         raise UpdateVerificationError(
             "SHA-256 mismatch — downloaded asset has been tampered with or is corrupt."
@@ -149,10 +141,6 @@ def verify_release_asset(
     if len(signature) != 64:
         raise UpdateVerificationError("Signature must be 64 raw bytes (Ed25519).")
 
-    # Verify over the *file bytes*, not the digest — the digest is already
-    # pinned but signing over the raw file prevents length-extension style
-    # confusion and matches minisign / signify conventions.
-    data = asset_path.read_bytes()
     try:
         pubkey.verify(signature, data)
     except InvalidSignature:

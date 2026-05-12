@@ -32,7 +32,14 @@ def set_file_permissions(path: Path, mode: int = 0o600) -> None:
         mode: Unix permission mode (default 0o600). Ignored on Windows.
     """
     if sys.platform != "win32":
-        os.chmod(path, mode)
+        try:
+            os.chmod(path, mode)
+        except OSError as exc:
+            warnings.warn(
+                f"SEC-PERM: chmod({mode:o}) failed on {path}: {exc}. "
+                "File may be accessible to other users.",
+                stacklevel=3,
+            )
     else:
         _set_windows_file_permissions(path)
 

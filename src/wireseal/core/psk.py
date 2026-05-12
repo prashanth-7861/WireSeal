@@ -24,8 +24,8 @@ def generate_psk() -> SecretBytes:
     # KEYGEN-03: 256-bit cryptographically random, unique per peer
     raw_psk = bytearray(os.urandom(32))
 
-    # Base64-encode (standard base64, not url-safe -- matches wg format)
-    psk_b64 = base64.b64encode(bytes(raw_psk))
+    # Base64-encode directly from bytearray (no intermediate bytes() copy)
+    psk_b64 = base64.b64encode(raw_psk)
 
     # KEYGEN-04: wipe intermediate raw bytes immediately after encoding
     wipe_bytes(raw_psk)

@@ -7,6 +7,102 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.9.0] — 2026-05-12
+
+### Security — Critical Fixes
+
+- **Host header CSRF bypass (C-09)** — CORS allowlist no longer expands from `Host` header.
+  Origin validated against static allowlist only.
+- **schtasks `/TR` injection (C-10)** — `bind` and `vault_dir` validated with strict regex
+  before interpolating into scheduled task command. `%` characters escaped to `%%`.
+- **nftables table name mismatch (C-11)** — `apply_firewall_rules` and
+  `remove_firewall_rules` now target the same table names — cleanup is no longer a no-op.
+- **UAC non-elevation bypass (C-12)** — `IsUserAnAdmin` (group membership only) replaced with
+  `OpenProcessToken` + `GetTokenInformation(TokenElevation)` for proper elevation detection.
+- **PowerShell injection in DNS updater (C-05)** — script path validated before use in
+  `Register-ScheduledTask`. Proper injection character blocking.
+- **Systemd unit injection (C-04)** — `bind` validated via `ipaddress.ip_address()` before
+  systemd unit file generation.
+
+### Security — High-Severity Fixes
+
+- **SecretBytes shared reference (H-10)** — constructor now always copies `bytearray(input)`
+  so caller cannot mutate the secret after wipe.
+- **Passphrase copies not wiped (H-11)** — `bytearray()` copies in `open()`, `save()`,
+  `change_passphrase()`, `verify_integrity()` now wiped in `finally` blocks.
+- **TOTP session downgraded 24h→1h (H-12)** — reduces post-compromise window from 24 hours
+  to 1 hour.
+- **Config race window (H-13)** — directory permissions set before file write on Windows.
+- **nftables injection via interface name (H-14)** — `detect_outbound_interface()` output
+  validated against `_INTERFACE_NAME_PATTERN` before use.
+- **Non-atomic sysctl writes (H-15)** — `/etc/sysctl.d/` hardening now uses `atomic_write()`.
+- **schtasks `%VAR%` expansion (H-16)** — percent signs escaped in scheduled task command.
+- **Cron file world-readable (H-17)** — `/etc/cron.d/wireseal` mode tightened from `0o644` to `0o640`.
+- **SSH backup MITM (H-18)** — rsync now uses `StrictHostKeyChecking=accept-new`.
+- **DuckDNS token memory leak (H-19)** — token/URL strings wiped via `ctypes.memset`.
+- **SSH password memory leak (H-20)** — password strings wiped via `ctypes.memset`.
+
+### Platform Hardening
+
+- **Windows**: All 55 `subprocess.run()` calls now have explicit `timeout=` parameters.
+  `sshd_config` writes use `atomic_write()` with backup. Firewall rules added before old
+  rules deleted. `netstat -an` parsing replaced with locale-independent PowerShell.
+  `auto_updates` status read from registry instead of hardcoded `True`.
+- **Linux**: `install_wireguard()` now detects distro (pacman/dnf/apt).
+  `_configure_firewalld_full()` accepts real `subnet` parameter. `_setup_fail2ban()`
+  accepts real `wg_port` parameter. Firewalld cleanup added to `remove_firewall_rules()`.
+  Expiry warnings dispatched at 7/3/1 day thresholds via audit log.
+- **macOS**: `SUDO_USER` validated against strict regex. `dscl` UID check changed from
+  200 sequential calls to single `-list` call. SIP detection before IP forwarding.
+  Log rotation added. `lsof -iTCP` replaced with `lsof -i` for UDP coverage.
+
+### Cryptography & Vault
+
+- **TOTP secret length**: `os.urandom(20)` → `os.urandom(32)` per spec (§5.4).
+- **Individual TOTP failure audit logging**: every failed attempt now logged.
+- **SecretBytes**: `__copy__`/`__deepcopy__` now raise `TypeError`.
+- **`wipe_bytes`**: Python for-loop replaced with `ctypes.memset` (zero-random-zero).
+- **`_encrypt_payload`**: uses mutable `bytearray` instead of immutable `str`, wiped after use.
+- **`_deep_clear`**: `change_passphrase()` now recursively clears nested dicts.
+- **argon2 params**: moved to `_argon2_params.py` breaking circular import between
+  `vault.py` ↔ `keyslot.py`. Keyslot bounds now match vault bounds.
+- **Audit chain**: `verify_chain()` now validates rotated log files.
+- **update_verifier**: TOCTOU fixed — file read once, SHA-256 and signature from same bytes.
+
+### Access Control & Client Management
+
+- **CLI `add-client`**: new `--access-level`, `--ttl`, `--expires-at` options for setting
+  client role and expiry at creation time.
+- **Missing privilege fields**: `dns_only`, `vpn_internal_only`, `manage_pin`,
+  `change_own_access`, `change_passphrase` added to all access levels.
+- **Expiry warnings**: background `ExpiryWatcher` dispatches audit log entries at 7/3/1
+  day thresholds before expiry.
+
+### Dashboard
+
+- **localStorage→sessionStorage**: sensitive vault state no longer persisted to disk.
+- **CSRF tokens**: added `X-CSRF-Token` header to all API requests.
+- **Security headers**: `X-Content-Type-Options`, `X-Frame-Options`, `X-XSS-Protection`,
+  `Referrer-Policy`, `Content-Security-Policy` added to Vite dev server.
+- **`dangerouslySetInnerHTML`**: input sanitized to prevent XSS.
+
+### Fixes Since Previous Audit
+
+- **CLI `restore-vault` TOCTOU**: file read once, verified via temp file, then same bytes
+  written — eliminates swap window between verify and write.
+- **`WIRESEAL_SCRIPTS_DIR` LPE**: environment variable override removed.
+- **Jinja2 sandbox**: `SandboxedEnvironment` used instead of plain `Environment`.
+- **NSIS installer PATH injection**: PowerShell replaced with base64-encoded `-EncodedCommand`.
+- **IP resolver**: 4th source added for 3-of-4 consensus (was 2-of-3).
+
+### Tests
+
+- **307 tests pass, 2 skipped, 0 failed** (all 78 source files, ~35,000 lines analyzed).
+- New TOTP tests: secret length, anti-replay pruning, backup code hashing.
+- New access control tests: privilege matrix, expiry warnings, level validation.
+
+---
+
 ## [0.8.4] — 2026-05-07
 
 ### Fixed

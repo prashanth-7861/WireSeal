@@ -12,8 +12,8 @@ import urllib.parse
 
 
 def generate_totp_secret() -> bytes:
-    """Generate a 20-byte random TOTP secret."""
-    return os.urandom(20)
+    """Generate a 32-byte random TOTP secret."""
+    return os.urandom(32)
 
 
 def secret_to_b32(secret: bytes) -> str:
@@ -23,6 +23,10 @@ def secret_to_b32(secret: bytes) -> str:
 
 def b32_to_secret(b32: str) -> bytes:
     """Decode base32 string back to secret bytes."""
+    if not isinstance(b32, str) or not b32:
+        raise ValueError("SEC-TO-02: b32 secret must be a non-empty string")
+    if not all(c in "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567=" for c in b32.upper()):
+        raise ValueError("SEC-TO-02: b32 secret contains invalid characters")
     # Add padding if needed
     padded = b32 + "=" * ((8 - len(b32) % 8) % 8)
     return base64.b32decode(padded.upper())
@@ -43,16 +47,30 @@ def totp_uri(secret: bytes, admin_id: str, issuer: str = "WireSeal") -> str:
 
 
 def _hotp(secret: bytes, counter: int) -> int:
-    """Compute HOTP value per RFC 4226."""
+    """Compute HOTP value per RFC 4226 §5.3 (dynamic truncation)."""
     msg = struct.pack(">Q", counter)
+    # RFC 4226 §5.3 mandates HMAC-SHA1; changing this requires re-enrollment.
     h = hmac.new(secret, msg, hashlib.sha1).digest()
     offset = h[-1] & 0x0F
     code = struct.unpack(">I", h[offset:offset + 4])[0] & 0x7FFFFFFF
     return code % 1_000_000
 
 
+def _prune_used_codes(used_codes: set[str]) -> None:
+    """Prevent unbounded growth of the anti-replay set.
+
+    TOTP codes are time-step-dependent (30-second windows). A code used
+    in a previous window will never match current valid codes, so old
+    entries are harmless but consume memory. Periodically clearing the
+    set is safe — at worst it allows one replay of a code within the
+    same 30-second window.
+    """
+    if len(used_codes) > 100:
+        used_codes.clear()
+
+
 def verify_totp(secret: bytes, code: str, *, window: int = 1,
-                used_codes: set | None = None) -> bool:
+                used_codes: set[str] | None = None) -> bool:
     """Verify a 6-digit TOTP code.
 
     Checks T-window .. T+window time steps (30s each).
@@ -73,6 +91,7 @@ def verify_totp(secret: bytes, code: str, *, window: int = 1,
         if hmac.compare_digest(code, expected):
             if used_codes is not None:
                 used_codes.add(code)
+                _prune_used_codes(used_codes)
             return True
     return False
 
@@ -83,7 +102,7 @@ def generate_backup_codes(n: int = 8) -> list[str]:
     Uses Crockford base32 alphabet (no visually confusable characters:
     no 0/O/I/L).
     """
-    alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+    alphabet = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"
     return ["".join(secrets.choice(alphabet) for _ in range(10)) for _ in range(n)]
 
 
@@ -114,7 +133,7 @@ def _verify_one_backup(code_normalized: str, stored: str) -> bool:
                 "sha256", code_normalized.encode("ascii"), salt, int(iters_str)
             )
             return hmac.compare_digest(actual, expected)
-        except Exception:
+        except (ValueError, KeyError):
             return False
     # Legacy: plain SHA-256 hex string (backward compat for existing vaults)
     legacy_hash = hashlib.sha256(code_normalized.encode("ascii")).hexdigest()
@@ -126,10 +145,15 @@ def verify_backup_code(code: str, hashed_codes: list[str]) -> str | None:
 
     Returns the matched hash string (for removal from vault) or None if no
     match.  Iterates the full list even after a match to resist timing leaks.
+
+    Accepts items as ``str`` or ``SecretBytes`` (backup_codes may be wrapped).
     """
+    from .secret_types import SecretBytes
+
     code_normalized = code.upper().strip()
     matched: str | None = None
     for h in hashed_codes:
-        if _verify_one_backup(code_normalized, h):
-            matched = h
+        h_str = bytes(h.expose_secret()).decode("utf-8") if isinstance(h, SecretBytes) else h
+        if _verify_one_backup(code_normalized, h_str):
+            matched = h_str
     return matched

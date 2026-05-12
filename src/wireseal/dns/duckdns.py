@@ -28,6 +28,8 @@ import urllib.parse
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
+from ..security.secrets_wipe import wipe_string
+
 if TYPE_CHECKING:
     from ..security.secret_types import SecretBytes
 
@@ -152,8 +154,8 @@ def update_dns(domain: str, token: "SecretBytes", ip: str) -> dict:
         raise DuckDNSError(f"DuckDNS update failed: {err_msg}") from exc
 
     finally:
-        # Wipe the local token string reference -- best effort for str objects
-        # (Python strings are immutable; we can only del the reference)
-        del token_str, url, params
+        wipe_string(token_str)
+        wipe_string(url)
+        wipe_string(params)
 
     return result

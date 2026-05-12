@@ -15,6 +15,7 @@ Requirements satisfied:
 from __future__ import annotations
 
 import hashlib
+import itertools
 import json
 import re
 import threading
@@ -351,7 +352,9 @@ class AuditLog:
                 if is_new:
                     self._apply_permissions()
             except OSError as exc:
-                raise AuditError(f"Failed to write audit log entry: {exc}") from exc
+                raise AuditError(f"SEC-AU-03: Failed to write audit log entry: {exc}") from exc
+            except Exception as exc:
+                raise AuditError(f"SEC-AU-03: Unexpected error writing audit log: {exc}") from exc
 
         return entry
 
@@ -404,6 +407,9 @@ class AuditLog:
     def verify_chain(self) -> tuple[bool, int, str | None]:
         """Verify the hash chain of every entry currently on disk.
 
+        Checks rotated files (audit.log.1, .2, ...) in order and threads
+        the expected chain hash across file boundaries.
+
         Returns ``(ok, verified_count, error)``. ``ok`` is True when every
         entry's ``chain_hash`` equals ``sha256(prev_hash + canonical_body)``
         and the chain starts at the genesis hash. Entries that predate the
@@ -411,52 +417,70 @@ class AuditLog:
         this lets operators run ``verify_chain`` on a log that was started
         before the upgrade without flagging every legacy entry as tampered.
         """
-        if not self._log_path.exists():
+        # Collect all log files in chronological order (oldest first)
+        file_paths: list[Path] = []
+        for i in range(MAX_ROTATED, 0, -1):
+            f = self._log_path.parent / f"{self._log_path.name}.{i}"
+            if f.exists():
+                file_paths.append(f)
+        if self._log_path.exists():
+            file_paths.append(self._log_path)
+
+        if not file_paths:
             return True, 0, None
 
         expected_prev = _AUDIT_GENESIS_HASH
         count = 0
-        try:
-            lines = self._log_path.read_text(encoding="utf-8").splitlines()
-        except OSError as exc:
-            return False, 0, f"cannot read log: {exc}"
+        global_line = -1
 
-        for idx, line in enumerate(lines):
-            line = line.strip()
-            if not line:
-                continue
+        for file_path in file_paths:
             try:
-                d = json.loads(line)
-            except Exception as exc:
-                return False, count, f"line {idx}: not valid JSON ({exc})"
-            chain_hash = d.get("chain_hash")
-            prev_hash = d.get("prev_hash")
-            if chain_hash is None or prev_hash is None:
-                # Legacy entry from before SEC-025 — don't fail, but don't
-                # anchor the chain to it either.
+                lines = file_path.read_text(encoding="utf-8").splitlines()
+            except OSError as exc:
+                return False, count, f"cannot read {file_path.name}: {exc}"
+
+            for line in lines:
+                global_line += 1
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    d = json.loads(line)
+                except Exception as exc:
+                    return False, count, (
+                        f"line {global_line} ({file_path.name}): "
+                        f"not valid JSON ({exc})"
+                    )
+                chain_hash = d.get("chain_hash")
+                prev_hash = d.get("prev_hash")
+                if chain_hash is None or prev_hash is None:
+                    count += 1
+                    continue
+                if prev_hash != expected_prev:
+                    return False, count, (
+                        f"line {global_line} ({file_path.name}): "
+                        f"prev_hash mismatch (got {prev_hash!r}, "
+                        f"expected {expected_prev!r})"
+                    )
+                body = {
+                    "timestamp": d["timestamp"],
+                    "action": d["action"],
+                    "metadata": d.get("metadata", {}),
+                    "success": d["success"],
+                    "error": d.get("error"),
+                    "prev_hash": prev_hash,
+                }
+                body_json = json.dumps(body, sort_keys=True, separators=(",", ":"))
+                expected = hashlib.sha256(
+                    (prev_hash + body_json).encode("utf-8")
+                ).hexdigest()
+                if expected != chain_hash:
+                    return False, count, (
+                        f"line {global_line} ({file_path.name}): "
+                        f"chain_hash mismatch"
+                    )
+                expected_prev = chain_hash
                 count += 1
-                continue
-            if prev_hash != expected_prev:
-                return False, count, (
-                    f"line {idx}: prev_hash mismatch (got {prev_hash!r}, "
-                    f"expected {expected_prev!r})"
-                )
-            body = {
-                "timestamp": d["timestamp"],
-                "action": d["action"],
-                "metadata": d.get("metadata", {}),
-                "success": d["success"],
-                "error": d.get("error"),
-                "prev_hash": prev_hash,
-            }
-            body_json = json.dumps(body, sort_keys=True, separators=(",", ":"))
-            expected = hashlib.sha256(
-                (prev_hash + body_json).encode("utf-8")
-            ).hexdigest()
-            if expected != chain_hash:
-                return False, count, f"line {idx}: chain_hash mismatch"
-            expected_prev = chain_hash
-            count += 1
         return True, count, None
 
     # ------------------------------------------------------------------
@@ -474,28 +498,29 @@ class AuditLog:
         This ensures the returned entries are always the freshest available,
         even if older rotated archives still exist on disk.
         """
-        newest_first: list[str] = []
+        with self._class_lock:
+            newest_first: list[str] = []
 
-        # 1) Current log file first — it holds the newest entries.
-        if self._log_path.exists():
-            try:
-                cur = self._log_path.read_text(encoding="utf-8").splitlines()
-                newest_first.extend(reversed(cur))
-            except OSError:
-                pass
+            # 1) Current log file first — it holds the newest entries.
+            if self._log_path.exists():
+                try:
+                    cur = self._log_path.read_text(encoding="utf-8").splitlines()
+                    newest_first.extend(reversed(cur))
+                except OSError:
+                    pass
 
-        # 2) Then walk rotated files from newest (.1) to oldest (.MAX_ROTATED).
-        for i in range(1, MAX_ROTATED + 1):
-            if len(newest_first) >= n:
-                break
-            rotated = self._log_path.parent / f"{self._log_path.name}.{i}"
-            if not rotated.exists():
-                continue
-            try:
-                rot = rotated.read_text(encoding="utf-8").splitlines()
-                newest_first.extend(reversed(rot))
-            except OSError:
-                continue
+            # 2) Then walk rotated files from newest (.1) to oldest (.MAX_ROTATED).
+            for i in range(1, MAX_ROTATED + 1):
+                if len(newest_first) >= n:
+                    break
+                rotated = self._log_path.parent / f"{self._log_path.name}.{i}"
+                if not rotated.exists():
+                    continue
+                try:
+                    rot = rotated.read_text(encoding="utf-8").splitlines()
+                    newest_first.extend(reversed(rot))
+                except OSError:
+                    continue
 
         if not newest_first:
             return []

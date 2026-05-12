@@ -78,19 +78,23 @@ const ChartStyle = ({ id, config }: { id: string; config: ChartConfig }) => {
     return null;
   }
 
+  const sanitizeId = id.replace(/[^a-zA-Z0-9_-]/g, "");
+  const sanitizeKey = (k: string) => k.replace(/[^a-zA-Z0-9_-]/g, "");
+
   return (
     <style
       dangerouslySetInnerHTML={{
         __html: Object.entries(THEMES)
           .map(
             ([theme, prefix]) => `
-${prefix} [data-chart=${id}] {
+${prefix} [data-chart=${sanitizeId}] {
 ${colorConfig
   .map(([key, itemConfig]) => {
     const color =
       itemConfig.theme?.[theme as keyof typeof itemConfig.theme] ||
       itemConfig.color;
-    return color ? `  --color-${key}: ${color};` : null;
+    const safeKey = sanitizeKey(key);
+    return color && safeKey ? `  --color-${safeKey}: ${color};` : null;
   })
   .join("\n")}
 }
