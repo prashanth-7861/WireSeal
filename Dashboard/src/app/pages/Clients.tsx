@@ -31,6 +31,11 @@ export function Clients() {
   const [tunnelMode, setTunnelMode] = useState<TunnelMode>("split-vpn");
   const [adding, setAdding] = useState(false);
   const [addError, setAddError] = useState("");
+  const [newClientAccessLevel, setNewClientAccessLevel] = useState<string>("standard");
+  const [expiryType, setExpiryType] = useState<string>("permanent");
+  const [ttlValue, setTtlValue] = useState<string>("");
+  const [customTtl, setCustomTtl] = useState<string>("");
+  const [expiryDate, setExpiryDate] = useState<string>("");
 
   // QR side panel
   const [qrPanel, setQrPanel] = useState<QrPanel | null>(null);
@@ -113,10 +118,28 @@ export function Clients() {
     setAddError("");
     setAdding(true);
     try {
-      const client = await api.addClient(newName.trim(), undefined, tunnelMode);
+      let ttlSeconds: number | undefined = undefined;
+      let expiresAt: number | undefined = undefined;
+      if (expiryType === "ttl") {
+        ttlSeconds = ttlValue === "custom" ? parseInt(customTtl) : parseInt(ttlValue);
+        if (isNaN(ttlSeconds) || ttlSeconds <= 0) ttlSeconds = undefined;
+      } else if (expiryType === "date") {
+        expiresAt = expiryDate ? new Date(expiryDate).getTime() / 1000 : undefined;
+      }
+      const client = await api.addClient(newName.trim(), {
+        tunnel_mode: tunnelMode,
+        access_level: newClientAccessLevel,
+        ttl_seconds: ttlSeconds,
+        expires_at: expiresAt,
+      });
       setClients((prev) => [...prev, client]);
       setNewName("");
       setTunnelMode("split-vpn");
+      setNewClientAccessLevel("standard");
+      setExpiryType("permanent");
+      setTtlValue("");
+      setCustomTtl("");
+      setExpiryDate("");
       setShowAddDialog(false);
       setSuccess(`Client "${client.name}" added — scan the QR code to connect`);
       setTimeout(() => setSuccess(""), 5000);
@@ -263,6 +286,7 @@ export function Clients() {
               <thead className="bg-gray-50 border-b border-gray-200">
                 <tr>
                   <th className="text-left px-6 py-3 text-sm font-medium text-gray-700">Name</th>
+                  <th className="text-left px-6 py-3 text-sm font-medium text-gray-700">Access</th>
                   <th className="text-left px-6 py-3 text-sm font-medium text-gray-700">Assigned IP</th>
                   <th className="text-left px-6 py-3 text-sm font-medium text-gray-700">Status</th>
                   <th className="text-left px-6 py-3 text-sm font-medium text-gray-700">Expires</th>
@@ -280,6 +304,9 @@ export function Clients() {
                         <Monitor className="w-5 h-5 text-gray-400 flex-shrink-0" />
                         <span className="font-medium text-gray-900">{client.name}</span>
                       </div>
+                    </td>
+                    <td className="px-6 py-4">
+                      <span className="capitalize text-sm">{client.access_level || "standard"}</span>
                     </td>
                     <td className="px-6 py-4 text-gray-700 font-mono text-sm">{client.ip}</td>
                     <td className="px-6 py-4">
@@ -449,6 +476,106 @@ export function Clients() {
                 </p>
               </div>
 
+              <div className="mb-4">
+                <label className="block text-sm font-medium text-gray-700 mb-2">Access Level</label>
+                <div className="flex gap-4">
+                  {["admin", "standard", "guest"].map((level) => (
+                    <label key={level} className="flex items-center gap-2 cursor-pointer">
+                      <input
+                        type="radio"
+                        name="accessLevel"
+                        value={level}
+                        checked={newClientAccessLevel === level}
+                        onChange={() => setNewClientAccessLevel(level)}
+                        className="radio radio-primary"
+                        disabled={adding}
+                      />
+                      <span className="capitalize">{level}</span>
+                    </label>
+                  ))}
+                </div>
+              </div>
+
+              <div className="mb-4">
+                <label className="block text-sm font-medium text-gray-700 mb-2">Expiry</label>
+                <div className="flex gap-4 items-center">
+                  <label className="flex items-center gap-2 cursor-pointer">
+                    <input
+                      type="radio"
+                      name="expiryType"
+                      value="permanent"
+                      checked={expiryType === "permanent"}
+                      onChange={() => setExpiryType("permanent")}
+                      className="radio radio-primary"
+                      disabled={adding}
+                    />
+                    <span>Permanent</span>
+                  </label>
+                  <label className="flex items-center gap-2 cursor-pointer">
+                    <input
+                      type="radio"
+                      name="expiryType"
+                      value="ttl"
+                      checked={expiryType === "ttl"}
+                      onChange={() => setExpiryType("ttl")}
+                      className="radio radio-primary"
+                      disabled={adding}
+                    />
+                    <span>TTL (seconds)</span>
+                  </label>
+                  <label className="flex items-center gap-2 cursor-pointer">
+                    <input
+                      type="radio"
+                      name="expiryType"
+                      value="date"
+                      checked={expiryType === "date"}
+                      onChange={() => setExpiryType("date")}
+                      className="radio radio-primary"
+                      disabled={adding}
+                    />
+                    <span>Specific Date</span>
+                  </label>
+                </div>
+                {expiryType === "ttl" && (
+                  <div className="mt-2">
+                    <select
+                      value={ttlValue}
+                      onChange={(e) => setTtlValue(e.target.value)}
+                      className="select select-bordered w-full max-w-xs"
+                      disabled={adding}
+                    >
+                      <option value="">Select duration...</option>
+                      <option value="3600">1 hour</option>
+                      <option value="28800">8 hours</option>
+                      <option value="86400">1 day</option>
+                      <option value="604800">7 days</option>
+                      <option value="2592000">30 days</option>
+                      <option value="31536000">1 year</option>
+                      <option value="custom">Custom...</option>
+                    </select>
+                    {ttlValue === "custom" && (
+                      <input
+                        type="number"
+                        placeholder="Custom TTL in seconds"
+                        value={customTtl}
+                        onChange={(e) => setCustomTtl(e.target.value)}
+                        className="input input-bordered w-full mt-2"
+                        disabled={adding}
+                      />
+                    )}
+                  </div>
+                )}
+                {expiryType === "date" && (
+                  <input
+                    type="datetime-local"
+                    value={expiryDate}
+                    onChange={(e) => setExpiryDate(e.target.value)}
+                    className="input input-bordered w-full mt-2"
+                    disabled={adding}
+                  />
+                )}
+              </div>
+
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-2">Tunnel Mode</label>
                 <div className="space-y-2">
@@ -493,7 +620,7 @@ export function Clients() {
               <div className="flex gap-3 pt-1">
                 <button
                   type="button"
-                  onClick={() => { setShowAddDialog(false); setAddError(""); setNewName(""); setTunnelMode("split-vpn"); }}
+                  onClick={() => { setShowAddDialog(false); setAddError(""); setNewName(""); setTunnelMode("split-vpn"); setNewClientAccessLevel("standard"); setExpiryType("permanent"); setTtlValue(""); setCustomTtl(""); setExpiryDate(""); }}
                   className="flex-1 px-4 py-2.5 border border-gray-300 rounded-lg hover:bg-gray-50 transition-colors"
                   disabled={adding}
                 >

@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from "react";
 import { api } from "../api";
 import type { AdminInfo } from "../api";
+import { TotpEnrollDialog } from "../components/TotpEnrollDialog";
 import { AdminRoleBadge } from "../components/AdminRoleBadge";
 
 // Module-level cache — survives navigation, avoids blank loading flash
@@ -17,6 +18,7 @@ export function Admins() {
   const [newRole, setNewRole] = useState<"admin" | "owner" | "readonly">("admin");
   const [addError, setAddError] = useState<string | null>(null);
   const [adding, setAdding] = useState(false);
+  const [enrollingAdmin, setEnrollingAdmin] = useState<string | null>(null);
 
   const load = () => {
     setLoading(true);
@@ -53,6 +55,16 @@ export function Admins() {
     }
   };
 
+  const handleDisableTotp = async (targetId: string) => {
+    if (!window.confirm(`Disable TOTP for admin "${targetId}"?`)) return;
+    try {
+      await api.totpDisable(targetId);
+      load();
+    } catch (err: unknown) {
+      alert(err instanceof Error ? err.message : "Failed to disable TOTP");
+    }
+  };
+
   // Current admin id — tracked by api module since successful unlock
   const currentAdminId = api.getCurrentAdminId();
   const ownerCount = admins.filter(a => a.role === "owner").length;
@@ -84,7 +96,23 @@ export function Admins() {
                 <tr key={admin.id} className="hover:bg-gray-50">
                   <td className="px-4 py-2 border-b font-mono">{admin.id}</td>
                   <td className="px-4 py-2 border-b"><AdminRoleBadge role={admin.role} /></td>
-                  <td className="px-4 py-2 border-b">{admin.totp_enrolled ? "Enrolled" : "\u2014"}</td>
+                  <td className="px-4 py-2 border-b">
+                    {admin.totp_enrolled ? (
+                      <button
+                        onClick={() => handleDisableTotp(admin.id)}
+                        className="text-xs text-red-600 hover:text-red-800 font-medium"
+                      >
+                        Disable
+                      </button>
+                    ) : (
+                      <button
+                        onClick={() => setEnrollingAdmin(admin.id)}
+                        className="text-xs text-indigo-600 hover:text-indigo-800 font-medium"
+                      >
+                        Enroll
+                      </button>
+                    )}
+                  </td>
                   <td className="px-4 py-2 border-b text-gray-500">{admin.last_unlock ?? "Never"}</td>
                   <td className="px-4 py-2 border-b">
                     <button
@@ -142,6 +170,13 @@ export function Admins() {
           </button>
         </form>
       </div>
+
+      {enrollingAdmin && (
+        <TotpEnrollDialog
+          onClose={() => setEnrollingAdmin(null)}
+          onEnrolled={() => { setEnrollingAdmin(null); load(); }}
+        />
+      )}
     </div>
   );
 }

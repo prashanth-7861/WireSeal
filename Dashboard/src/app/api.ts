@@ -81,6 +81,7 @@ export interface AdminInfo {
   role: "owner" | "admin" | "readonly";
   totp_enrolled: boolean;
   last_unlock: string | null;
+  backup_codes_remaining?: number;
 }
 
 export interface Peer {
@@ -114,6 +115,7 @@ export interface Client {
   ttl_seconds: number | null;
   ttl_expires_at: number | null;
   expires_in_seconds: number | null;
+  access_level?: string;
 }
 
 export interface AuditEntry {
@@ -337,12 +339,13 @@ export const api = {
   listClients: () =>
     _fetch<Client[]>("GET", "/clients"),
 
-  addClient: (name: string, ttl_seconds?: number, tunnel_mode?: TunnelMode) =>
-    _fetch<Client>("POST", "/clients", {
-      name,
-      ...(ttl_seconds != null && { ttl_seconds }),
-      ...(tunnel_mode && { tunnel_mode }),
-    }),
+  addClient: (name: string, opts?: {
+    tunnel_mode?: TunnelMode;
+    access_level?: string;
+    ttl_seconds?: number;
+    expires_at?: number;
+  }) =>
+    _fetch<Client>("POST", "/clients", { name, ...opts }),
 
   removeClient: (name: string) =>
     _fetch<{ ok: boolean }>("DELETE", `/clients/${encodeURIComponent(name)}`),
@@ -352,6 +355,12 @@ export const api = {
 
   heartbeat: (name: string) =>
     _fetch<{ ok: boolean; expires_at?: number; permanent?: boolean }>("POST", `/heartbeat/${encodeURIComponent(name)}`),
+
+  extendClient: (name: string, ttl_seconds?: number, expires_at?: string) =>
+    _fetch<{ ok: boolean }>("POST", `/clients/${encodeURIComponent(name)}/extend`, { ttl_seconds, expires_at }),
+
+  revokeClient: (name: string) =>
+    _fetch<{ ok: boolean }>("POST", `/clients/${encodeURIComponent(name)}/revoke`),
 
   clientQr: (name: string) =>
     _fetch<{ name: string; qr_png_b64: string; format?: string }>("GET", `/clients/${encodeURIComponent(name)}/qr`),
@@ -571,6 +580,32 @@ export const api = {
 
   health: (): Promise<{ status: string; vault_initialized: boolean; vault_locked: boolean; uptime_seconds: number; version?: string }> =>
     _fetch<{ status: string; vault_initialized: boolean; vault_locked: boolean; uptime_seconds: number; version?: string }>("GET", "/health"),
+
+  // ── TOTP two-factor authentication ──────────────────────────────────────
+  totpEnrollBegin: (adminId?: string) =>
+    _fetch<{ otpauth_uri: string; secret_b32: string; qr_svg?: string }>(
+      "POST", "/totp/enroll/begin", adminId ? { admin_id: adminId } : undefined
+    ),
+
+  totpEnrollConfirm: (code: string) =>
+    _fetch<{ backup_codes: string[] }>("POST", "/totp/enroll/confirm", { code }),
+
+  totpDisable: (adminId?: string, confirmPassphrase?: string) =>
+    _fetch<{ ok: boolean }>("POST", "/totp/disable", {
+      ...(adminId ? { admin_id: adminId } : {}),
+      ...(confirmPassphrase ? { confirm_passphrase: confirmPassphrase } : {}),
+    }),
+
+  totpReset: (adminId?: string) =>
+    _fetch<{ ok: boolean }>("POST", "/totp/reset", adminId ? { admin_id: adminId } : undefined),
+
+  totpVerifyBackup: (passphrase: string, code: string) =>
+    _fetch<{ ok: boolean; admin_id: string; admin_role: string }>(
+      "POST", "/totp/verify-backup", { passphrase, code }
+    ),
+
+  totpStatus: () =>
+    _fetch<{ totp_required_for: string[] }>("GET", "/admins/totp-status"),
 
   // ── Client mode — config management + tunnel ──────────────────────────────
   clientListConfigs: () =>
