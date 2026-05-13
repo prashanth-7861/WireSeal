@@ -584,13 +584,13 @@ export const api = {
     _fetch<{ status: string; vault_initialized: boolean; vault_locked: boolean; uptime_seconds: number; version?: string }>("GET", "/health"),
 
   // ── TOTP two-factor authentication ──────────────────────────────────────
-  totpEnrollBegin: (adminId?: string) =>
+  totpEnrollBegin: (confirmPassphrase: string, adminId?: string) =>
     _fetch<{ otpauth_uri: string; secret_b32: string; qr_svg?: string }>(
-      "POST", "/totp/enroll/begin", adminId ? { admin_id: adminId } : undefined
+      "POST", "/totp/enroll/begin", { confirm_passphrase: confirmPassphrase, ...(adminId ? { admin_id: adminId } : {}) }
     ),
 
-  totpEnrollConfirm: (code: string) =>
-    _fetch<{ backup_codes: string[] }>("POST", "/totp/enroll/confirm", { code }),
+  totpEnrollConfirm: (code: string, adminId?: string) =>
+    _fetch<{ backup_codes: string[] }>("POST", "/totp/enroll/confirm", adminId ? { code, admin_id: adminId } : { code }),
 
   totpDisable: (adminId?: string, confirmPassphrase?: string) =>
     _fetch<{ ok: boolean }>("POST", "/totp/disable", {

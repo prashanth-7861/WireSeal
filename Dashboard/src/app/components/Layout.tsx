@@ -6,6 +6,7 @@ import {
   Shield, Sparkles, Wifi, WifiOff, Circle, RotateCcw,
   KeyRound, Hash, ArrowLeft, Trash2, ShieldAlert, Timer,
   Users, Globe, HardDrive, ArrowLeftRight,
+  ShieldCheck, Smartphone,
 } from "lucide-react";
 import { api, VAULT_LOCKED_EVENT, type Status } from "../api";
 import { AppModeProvider, useAppMode } from "../context/AppModeContext";
@@ -469,6 +470,7 @@ function LayoutInner() {
     { to: "/audit-log", label: "Audit Log", icon: ScrollText },
     { to: "/security", label: "Security", icon: Shield },
     { to: "/admins", label: "Admins", icon: Users },
+    { to: "/two-factor", label: "Two-Factor Auth", icon: Smartphone },
     { to: "/dns", label: "DNS", icon: Globe },
     { to: "/backup", label: "Backup", icon: HardDrive },
     { to: "/settings", label: "Settings", icon: Settings },

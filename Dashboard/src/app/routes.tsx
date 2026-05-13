@@ -10,6 +10,7 @@ import { Admin } from "./pages/Admin";
 import { Admins } from "./pages/Admins";
 import { Dns } from "./pages/Dns";
 import { Backup } from "./pages/Backup";
+import { TwoFactor } from "./pages/TwoFactor";
 import { Connect } from "./pages/client/Connect";
 import { Terminal } from "./pages/client/Terminal";
 import { ClientSettings } from "./pages/client/ClientSettings";
@@ -28,6 +29,7 @@ export const router = createBrowserRouter([
       { path: "admin", Component: Admin },
       { path: "admins", Component: Admins },
       { path: "dns", Component: Dns },
+      { path: "two-factor", Component: TwoFactor },
       { path: "backup", Component: Backup },
       // Client mode routes
       { path: "client", Component: Connect },

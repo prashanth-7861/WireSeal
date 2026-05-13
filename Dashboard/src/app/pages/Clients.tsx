@@ -198,34 +198,38 @@ export function Clients() {
 
   // ── Download config ──────────────────────────────────────────────────────
   const handleDownloadConfig = async (name: string) => {
-    // BUGFIX: window.open(...) fails inside pywebview/WebView2 — the popup
-    // navigates but the attachment response is dropped. Fetch as a blob in the
-    // current document and trigger a synthetic anchor click so the runtime
-    // handles the download natively.
     try {
       const res = await fetch(`/api/clients/${encodeURIComponent(name)}/config/download`, {
         credentials: "same-origin",
       });
       if (!res.ok) {
         let msg = `Download failed (HTTP ${res.status})`;
-        try {
-          const err = await res.json();
-          if (err?.error) msg = err.error;
-        } catch {
-          /* non-JSON body — keep default message */
-        }
+        try { const err = await res.json(); if (err?.error) msg = err.error; } catch { /* ignore */ }
         throw new Error(msg);
       }
       const blob = await res.blob();
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = `${name}.conf`;
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      URL.revokeObjectURL(url);
-      setSuccess(`Config saved: ${name}.conf`);
+      // Try File System Access API first (shows "Save As" dialog in Chromium/WebView2)
+      try {
+        const handle = await (window as any).showSaveFilePicker({
+          suggestedName: `${name}.conf`,
+          types: [{ description: "WireGuard Config", accept: { "application/octet-stream": [".conf"] } }],
+        });
+        const writable = await handle.createWritable();
+        await writable.write(blob);
+        await writable.close();
+        setSuccess(`Config saved: ${name}.conf`);
+      } catch {
+        // Fallback: showSaveFilePicker cancelled or unavailable — use blob download
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = `${name}.conf`;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+        setSuccess(`Config saved: ${name}.conf`);
+      }
       setTimeout(() => setSuccess(""), 4000);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to download config");

@@ -811,8 +811,8 @@ def _require_totp_for_reveal(req: "_Handler") -> None:
     """Require TOTP verification before revealing client config/QR.
 
     If the current admin has TOTP enrolled, reads ``totp_code`` from the
-    request body and verifies it.  Raises 401 with a clear message if the
-    code is missing or wrong.
+    request body (POST) or query string (GET) and verifies it.
+    Raises 401 if the code is missing or wrong.
     If the admin does NOT have TOTP enrolled, this is a no-op.
     """
     _require_unlocked()
@@ -825,11 +825,23 @@ def _require_totp_for_reveal(req: "_Handler") -> None:
     if not totp_b32:
         return
 
+    # Read code from body (POST) or query string (GET)
+    totp_code = None
     try:
         body = req._json()
+        totp_code = body.get("totp_code") if isinstance(body, dict) else None
     except Exception:
-        body = {}
-    totp_code = body.get("totp_code") if isinstance(body, dict) else None
+        pass
+    if not totp_code:
+        try:
+            from urllib.parse import urlsplit, parse_qs as _parse_qs
+            q = urlsplit(getattr(req, "path", "") or "").query
+            qs = _parse_qs(q)
+            vals = qs.get("code", [])
+            if vals:
+                totp_code = vals[0]
+        except Exception:
+            pass
     if not totp_code:
         raise _ApiError("totp_code required to reveal client config.", 401)
 
@@ -5044,16 +5056,20 @@ def _h_change_admin_passphrase(req: "_Handler", groups: tuple) -> dict:
 def _h_totp_enroll_begin(req: "_Handler", _groups: tuple) -> dict:
     """POST /api/totp/enroll/begin — generate a new TOTP secret for enrollment.
 
-    Requires unlocked vault.  Stores a pending enrollment entry in
-    ``_pending_totp`` keyed by admin_id.  The Dashboard renders the QR code
-    from the returned otpauth:// URI using a JS library.
-
-    Returns: {otpauth_uri, secret_b32}
+    Requires unlocked vault + passphrase re-confirmation.
+    Body: {confirm_passphrase: "..."} — verifies the vault passphrase before
+    allowing enrollment. PIN-only auth is insufficient (SEC-018).
+    Stores a pending enrollment entry in ``_pending_totp`` keyed by admin_id.
+    Returns: {otpauth_uri, secret_b32, ...}
     """
     _require_unlocked()
     _check_admin_rate_limit(req.client_address[0])
+    body = req._json()
+    # Require passphrase re-entry (SEC-018: PIN-only not sufficient)
+    _require_confirmation(body)
     with _lock:
-        admin_id = _session.get("admin_id", "owner")
+        session_admin = _session.get("admin_id", "owner")
+    admin_id = str(body.get("admin_id", session_admin)) if isinstance(body, dict) else session_admin
 
     secret = generate_totp_secret()
     uri = totp_uri(secret, admin_id)
@@ -5104,10 +5120,12 @@ def _h_totp_enroll_confirm(req: "_Handler", _groups: tuple) -> dict:
     """
     _require_unlocked()
     _check_admin_rate_limit(req.client_address[0])
+    body = req._json()
     with _lock:
-        admin_id  = _session.get("admin_id", "owner")
+        session_admin = _session.get("admin_id", "owner")
         vault     = _session["vault"]
         sess_pass = _session["passphrase"]
+    admin_id = str(body.get("admin_id", session_admin)) if isinstance(body, dict) else session_admin
 
     body      = req._json()
     totp_code = str(body.get("totp_code", "")).strip()
