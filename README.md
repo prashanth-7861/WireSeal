@@ -62,20 +62,53 @@ passphrase, no cryptographic material is exposed.
   configured automatically during `wireseal init`
 - **Optional DuckDNS** dynamic DNS with 2-of-3 IP consensus
 
-### Zero-Trust Network Access (ZTNA — v0.7)
-- **Multi-admin vault** — LUKS-style keyslots (FORMAT_VERSION 3); each admin holds an
-  independent 144-byte keyslot with their own Argon2id-derived wrapping key
-- **Role-based access** — `owner`, `admin`, and `readonly` roles enforced at every API endpoint
-- **TOTP 2FA** (RFC 6238, stdlib-only) — per-admin TOTP with QR enrollment, backup codes
-  hashed with PBKDF2-HMAC-SHA256, and atomic anti-replay protection
-- **Ephemeral client keys** — optional TTL on any peer; heartbeat resets the timer;
-  expired peers are automatically removed from WireGuard by a background watcher
-- **Split-DNS** — dnsmasq config writer maps internal hostnames to VPN IPs;
-  hot-reloaded via SIGHUP; hostname and IP validated against strict allowlists
-- **Encrypted remote backup** — push vault snapshots to local path, SSH (rsync), or
-  WebDAV; two-phase restore verifies decryption before touching the live vault
-- **Admin management API & Dashboard** — add/remove admins, change passphrases, view
-  roles; full Admin, TOTP, DNS, and Backup pages in the dashboard
+### TOTP 2FA (v0.7 — enhanced v0.9)
+- **RFC 6238 compliant** — Time-based One-Time Passwords with 30-second step, SHA1,
+  6-digit codes, and ±1 window tolerance (90 seconds)
+- **32-byte (256-bit) CSPRNG secrets** — upgraded from 160-bit to 256-bit in v0.9
+- **QR enrollment** — `wireseal totp-enroll <admin-id>` generates a scannable
+  `otpauth://` URI; confirm via `POST /api/totp/enroll/confirm`
+- **Backup codes** — 8 one-time recovery codes hashed with PBKDF2-HMAC-SHA256;
+  shown once at enrollment; each code invalidated after use
+- **Anti-replay** — used codes rejected within the same time window; periodic pruning
+  prevents unbounded set growth
+- **Per-admin independent** — every admin holds a separate TOTP secret in the vault,
+  wrapped as `SecretBytes` and wiped on vault close
+- **Rate-limited** — 3 failures per minute, 30-second lockout, max 10 attempts per
+  session; backup codes limited to 3 per 5 minutes
+- **Vault unlock integration** — passphrase + TOTP required at unlock when enrolled
+- **Individual failure audit logging** — every failed TOTP attempt logged (v0.9)
+- **Session caching** — TOTP verification cached for 1 hour (configurable) after
+  successful entry
+
+### Access Control & Client Expiry (v0.9)
+- **Role-based access levels** — `admin`, `standard`, `guest` with ascending privilege
+  levels; `owner` (immutable) created at vault init; `custom` for user-defined profiles
+- **Granular privilege matrix** — 15+ privileges per level covering:
+  - **Network**: full_network_access, dns_only, vpn_internal_only, specific_ip_ranges
+  - **Services**: ssh_access, smb_access, http_access, camera_access, custom_ports
+  - **Management**: server_management, client_management, configure_2fa, manage_pin
+  - **Security**: view_audit_logs, backup_restore, change_passphrase, change_own_access
+- **CLI client creation** — `wireseal add-client <name> --access-level <level> --ttl <seconds> --expires-at <iso8601>`
+- **Time-limited access** — set TTL (seconds) or absolute expiry date; `ExpiryWatcher`
+  background thread polls every 60 seconds and removes expired peers from WireGuard
+- **Auto-revoke** — expired peers removed from WireGuard, IP released to pool,
+  status set to `expired`; configurable via `auto_revoke` flag
+- **Expiry warnings** — audit-logged at 7/3/1 day thresholds before revocation
+- **Client status lifecycle** — `active` → `expired` / `revoked` / `suspended`;
+  suspended clients keep their IP but cannot connect
+- **Post-creation management** — edit access level, extend expiry, revoke/suspend
+  via API or dashboard; all modifications require TOTP/passphrase confirmation
+
+### Multi-Admin (v0.7 — v0.9)
+- **LUKS-style keyslots** (FORMAT_VERSION 3) — each admin holds an independent
+  144-byte keyslot wrapping the vault master key under their own Argon2id passphrase
+- **Role hierarchy** — `owner` (full control), `admin` (manage clients + admins),
+  `readonly` (view-only)
+- **CLI management** — `add-admin`, `remove-admin`, `list-admins`, `change-admin-passphrase`
+- **Dashboard pages** — Admin management, TOTP enrollment, backup codes, role overview
+- **Keyslot operations** — add, remove, change passphrase; v2→v3 vault upgrade
+  happens automatically on first keyslot creation
 
 ### Client Mode & Kill Switch (v0.8)
 - **Kill switch** — blocks all traffic when the WireGuard tunnel drops unexpectedly;
@@ -350,8 +383,23 @@ File operations are logged and visible in the dashboard's **Audit Log → File A
 | `rotate-server-keys` | Rotate the server keypair and update all client configs |
 | `backup-vault` | Back up the encrypted vault to a destination path |
 | `restore-vault` | Restore the vault from a backup file (with passphrase verification) |
+| `add-admin` | Add a new admin keyslot (prompts for owner + new passphrase) |
+| `remove-admin` | Remove an admin keyslot (prevents removing the last owner) |
+| `list-admins` | List admins with role, TOTP status, and last unlock time |
+| `change-admin-passphrase` | Change an admin's vault passphrase |
+| `totp-enroll` | Print TOTP enrollment URI for an admin (scan with authenticator app) |
+| `totp-disable` | Disable TOTP 2FA for an admin (owner only, emergency recovery) |
 | `update-dns` | Push the current public IP to DuckDNS (2-of-3 resolver consensus) |
 | `audit-log` | Display recent audit log entries (no passphrase required) |
+| `backup` | Create a timestamped vault backup (local, SSH, or WebDAV) |
+| `restore` | Restore vault from a backup file (verifies decryptable first) |
+| `service` | Manage the WireSeal background service (install/uninstall/start/stop/status) |
+| `uninstall` | Remove WireSeal from the system (platform uninstall script) |
+
+**Client creation options (`add-client`):**
+- `--access-level <admin|standard|guest>` — set role at creation time (default: standard)
+- `--ttl <seconds>` — time-to-live (e.g., `86400` for 1 day)
+- `--expires-at <ISO8601>` — absolute expiry (e.g., `2026-07-01T00:00:00Z`)
 
 > **Forgot your passphrase?** There is no recovery. Run `sudo wireseal fresh-start` to wipe everything and re-initialise.
 
