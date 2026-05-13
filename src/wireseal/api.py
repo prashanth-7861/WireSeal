@@ -807,6 +807,49 @@ def _require_confirmation(body: dict) -> None:
     )
 
 
+def _require_totp_for_reveal(req: "_Handler") -> None:
+    """Require TOTP verification before revealing client config/QR.
+
+    If the current admin has TOTP enrolled, reads ``totp_code`` from the
+    request body and verifies it.  Raises 401 with a clear message if the
+    code is missing or wrong.
+    If the admin does NOT have TOTP enrolled, this is a no-op.
+    """
+    _require_unlocked()
+    with _lock:
+        admin_id = _session.get("admin_id", "owner")
+        cache = _session.get("cache") or {}
+    admins = cache.get("admins", {})
+    admin = admins.get(admin_id, {})
+    totp_b32 = admin.get("totp_secret_b32")
+    if not totp_b32:
+        return
+
+    try:
+        body = req._json()
+    except Exception:
+        body = {}
+    totp_code = body.get("totp_code") if isinstance(body, dict) else None
+    if not totp_code:
+        raise _ApiError("totp_code required to reveal client config.", 401)
+
+    _check_totp_rate_limit(admin_id)
+    if isinstance(totp_b32, str):
+        from wireseal.security.secret_types import SecretBytes
+        secret = SecretBytes(bytearray(b32_to_secret(totp_b32)))
+    else:
+        secret = totp_b32
+    with _lock:
+        used_set = _totp_used_codes.setdefault(admin_id, set())
+    ok = verify_totp(secret, str(totp_code), used_codes=used_set)
+    if not ok:
+        _record_totp_failure(admin_id)
+        raise _ApiError("Invalid TOTP code.", 401)
+    import time as _time
+    with _lock:
+        _totp_session_verified[admin_id] = _time.monotonic()
+
+
 def _get_actor_access_level() -> str:
     """Return the access level of the current admin (from vault cache)."""
     with _lock:
@@ -2649,6 +2692,14 @@ def _h_add_client(req: "_Handler", _groups: tuple) -> dict:
         with _lock:
             _session["cache"] = _refresh_cache(state)
 
+    # TOTP gate: if admin has TOTP enrolled, don't return config data yet
+    with _lock:
+        _cache = _session.get("cache") or {}
+    _admins = _cache.get("admins", {}) if _cache else {}
+    _admin_info = _admins.get(_actor_id, {})
+    if _admin_info.get("totp_secret_b32"):
+        return {"name": name, "ip": allocated_ip, "totp_required": True}
+
     result: dict = {"name": name, "ip": allocated_ip, "access_level": access_level}
     if wg_warning:
         result["warning"] = wg_warning
@@ -2734,6 +2785,7 @@ def _h_remove_client(req: "_Handler", groups: tuple) -> dict:
 
 def _h_client_qr(req: "_Handler", groups: tuple) -> dict:
     _require_unlocked()
+    _require_totp_for_reveal(req)
     name = (groups[0] if groups else "").strip()
     if not name:
         raise _ApiError("client name is required", 400)
@@ -2796,6 +2848,7 @@ def _h_client_qr(req: "_Handler", groups: tuple) -> dict:
 def _h_client_config(req: "_Handler", groups: tuple) -> dict:
     """Return the client WireGuard config as text for download."""
     _require_unlocked()
+    _require_totp_for_reveal(req)
     name = (groups[0] if groups else "").strip()
     if not name:
         raise _ApiError("client name is required", 400)
@@ -2837,6 +2890,7 @@ def _h_client_config(req: "_Handler", groups: tuple) -> dict:
 def _h_client_config_download(req: "_Handler", groups: tuple) -> None:
     """Serve the client WireGuard config as a direct file download."""
     _require_unlocked()
+    _require_totp_for_reveal(req)
     name = (groups[0] if groups else "").strip()
     if not name:
         raise _ApiError("client name is required", 400)

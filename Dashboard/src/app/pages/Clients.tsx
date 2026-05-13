@@ -37,6 +37,12 @@ export function Clients() {
   const [customTtl, setCustomTtl] = useState<string>("");
   const [expiryDate, setExpiryDate] = useState<string>("");
 
+  // TOTP prompt state
+  const [totpRequiredName, setTotpRequiredName] = useState<string | null>(null);
+  const [totpCode, setTotpCode] = useState("");
+  const [totpError, setTotpError] = useState("");
+  const [totpLoading, setTotpLoading] = useState(false);
+
   // QR side panel
   const [qrPanel, setQrPanel] = useState<QrPanel | null>(null);
   const [qrCountdown, setQrCountdown] = useState(0);
@@ -126,13 +132,18 @@ export function Clients() {
       } else if (expiryType === "date") {
         expiresAt = expiryDate ? new Date(expiryDate).getTime() / 1000 : undefined;
       }
-      const client = await api.addClient(newName.trim(), {
+      const res = await api.addClient(newName.trim(), {
         tunnel_mode: tunnelMode,
         access_level: newClientAccessLevel,
         ttl_seconds: ttlSeconds,
         expires_at: expiresAt,
       });
-      setClients((prev) => [...prev, client]);
+      if (res.totp_required) {
+        setTotpRequiredName(newName.trim());
+        setShowAddDialog(false);
+        return;
+      }
+      setClients((prev) => [...prev, res]);
       setNewName("");
       setTunnelMode("split-vpn");
       setNewClientAccessLevel("standard");
@@ -141,14 +152,33 @@ export function Clients() {
       setCustomTtl("");
       setExpiryDate("");
       setShowAddDialog(false);
-      setSuccess(`Client "${client.name}" added — scan the QR code to connect`);
+      setSuccess(`Client "${res.name}" added — scan the QR code to connect`);
       setTimeout(() => setSuccess(""), 5000);
       // Auto-open QR for the new client
-      openQr(client.name);
+      openQr(res.name);
     } catch (e: unknown) {
       setAddError(e instanceof Error ? e.message : "Failed to add client");
     } finally {
       setAdding(false);
+    }
+  };
+
+  // ── TOTP confirm handler ──────────────────────────────────────────────────
+  const handleTotpConfirm = async () => {
+    if (!totpRequiredName) return;
+    setTotpLoading(true);
+    setTotpError("");
+    try {
+      const qrRes = await api.clientQr(totpRequiredName, totpCode);
+      const expiresAt = Date.now() + QR_TTL * 1000;
+      setQrPanel({ name: qrRes.name, qr: qrRes.qr_png_b64, format: qrRes.format || "png", expiresAt });
+      startCountdown(expiresAt);
+      setTotpRequiredName(null);
+      setTotpCode("");
+    } catch (err: unknown) {
+      setTotpError(err instanceof Error ? err.message : "Invalid code");
+    } finally {
+      setTotpLoading(false);
     }
   };
 
@@ -632,6 +662,47 @@ export function Clients() {
                   disabled={adding}
                 >
                   {adding ? "Generating…" : "Add Client"}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* ── TOTP confirmation dialog ───────────────────────────────────── */}
+      {totpRequiredName && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
+          <div className="bg-white rounded-lg shadow-xl p-6 w-full max-w-sm">
+            <h3 className="text-lg font-semibold mb-2">Two-Factor Required</h3>
+            <p className="text-sm text-gray-600 mb-4">
+              Enter your authenticator code to reveal the client config.
+            </p>
+            <form onSubmit={(e) => { e.preventDefault(); handleTotpConfirm(); }}>
+              <input
+                type="text"
+                inputMode="numeric"
+                maxLength={6}
+                placeholder="000000"
+                value={totpCode}
+                onChange={(e) => setTotpCode(e.target.value.replace(/\D/g, "").slice(0, 6))}
+                className="w-full border rounded px-3 py-2 text-lg text-center tracking-widest mb-3"
+                autoFocus
+              />
+              {totpError && <p className="text-red-600 text-sm mb-2">{totpError}</p>}
+              <div className="flex gap-2 justify-end">
+                <button
+                  type="button"
+                  onClick={() => { setTotpRequiredName(null); setTotpCode(""); setTotpError(""); }}
+                  className="px-4 py-2 text-sm text-gray-600 hover:text-gray-800"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={totpLoading || totpCode.length !== 6}
+                  className="px-4 py-2 text-sm bg-blue-600 text-white rounded hover:bg-blue-700 disabled:opacity-50"
+                >
+                  {totpLoading ? "Verifying..." : "Verify"}
                 </button>
               </div>
             </form>

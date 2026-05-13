@@ -27,5 +27,13 @@ export default defineConfig({
         changeOrigin: true,
       },
     },
+    // DASH-04: Security headers (helmet-equivalent for dev server)
+    headers: {
+      "X-Content-Type-Options": "nosniff",
+      "X-Frame-Options": "DENY",
+      "X-XSS-Protection": "1; mode=block",
+      "Referrer-Policy": "strict-origin-when-cross-origin",
+      "Content-Security-Policy": "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' ws://127.0.0.1:* http://127.0.0.1:*; font-src 'self' data:",
+    },
   },
 })

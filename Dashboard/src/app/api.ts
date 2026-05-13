@@ -345,7 +345,7 @@ export const api = {
     ttl_seconds?: number;
     expires_at?: number;
   }) =>
-    _fetch<Client>("POST", "/clients", { name, ...opts }),
+    _fetch<Client & { totp_required?: boolean }>("POST", "/clients", { name, ...opts }),
 
   removeClient: (name: string) =>
     _fetch<{ ok: boolean }>("DELETE", `/clients/${encodeURIComponent(name)}`),
@@ -362,8 +362,10 @@ export const api = {
   revokeClient: (name: string) =>
     _fetch<{ ok: boolean }>("POST", `/clients/${encodeURIComponent(name)}/revoke`),
 
-  clientQr: (name: string) =>
-    _fetch<{ name: string; qr_png_b64: string; format?: string }>("GET", `/clients/${encodeURIComponent(name)}/qr`),
+  clientQr: (name: string, totpCode?: string) =>
+    _fetch<{ name: string; qr_png_b64: string; format?: string }>(
+      "GET", `/clients/${encodeURIComponent(name)}/qr${totpCode ? `?code=${encodeURIComponent(totpCode)}` : ""}`
+    ),
 
   clientConfig: (name: string) =>
     _fetch<{ name: string; config: string }>("GET", `/clients/${encodeURIComponent(name)}/config`),
