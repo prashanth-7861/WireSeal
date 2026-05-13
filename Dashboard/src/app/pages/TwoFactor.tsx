@@ -19,6 +19,21 @@ export function TwoFactor() {
   const [disablePass, setDisablePass] = useState("");
   const [disableError, setDisableError] = useState("");
   const [disabling, setDisabling] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [showBackupCodes, setShowBackupCodes] = useState(false);
+  const [showAdvanced, setShowAdvanced] = useState(false);
+
+  const currentId = api.getCurrentAdminId();
+  const me = admins.find(a => a.id === currentId);
+  const enrolled = me?.totp_enrolled ?? false;
+
+  const load = () => {
+    setLoading(true); setError(null);
+    api.listAdmins()
+      .then(d => { _cache = d.admins; setAdmins(d.admins); })
+      .catch((e: unknown) => setError(e instanceof Error ? e.message : "Failed to load"))
+      .finally(() => setLoading(false));
+  };
 
   const handleDisable = async (e?: React.FormEvent) => {
     if (e) e.preventDefault();
