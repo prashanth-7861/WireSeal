@@ -61,6 +61,11 @@ def _make_request(body: dict | None = None, client_ip: str = "127.0.0.1") -> Any
     return req
 
 
+def _enroll_begin_req() -> Any:
+    """Request object with the vault passphrase included for enrollment."""
+    return _make_request({"confirm_passphrase": _PASSPHRASE_STR})
+
+
 def _init_vault(tmp_path: Path) -> tuple[Vault, SecretBytes]:
     """Create a fresh vault with an owner admin entry and return (vault, passphrase)."""
     vault_path = tmp_path / "vault.enc"
@@ -181,7 +186,7 @@ class TestEnrollmentFlow:
     """Test begin -> confirm -> verify enrolled."""
 
     def test_enroll_begin_returns_uri_and_secret(self, vault_env):
-        req = _make_request()
+        req = _enroll_begin_req()
         result = api._h_totp_enroll_begin(req, ())
 
         assert "otpauth_uri" in result
@@ -190,13 +195,13 @@ class TestEnrollmentFlow:
         assert "owner" in result["otpauth_uri"]
 
     def test_enroll_begin_stores_pending(self, vault_env):
-        api._h_totp_enroll_begin(_make_request(), ())
+        api._h_totp_enroll_begin(_enroll_begin_req(), ())
         assert "owner" in api._pending_totp
         assert "secret" in api._pending_totp["owner"]
 
     def test_enroll_confirm_with_valid_code(self, vault_env):
         # Begin enrollment
-        begin_result = api._h_totp_enroll_begin(_make_request(), ())
+        begin_result = api._h_totp_enroll_begin(_enroll_begin_req(), ())
         secret_b32 = begin_result["secret_b32"]
         secret_bytes = b32_to_secret(secret_b32)
 
@@ -214,7 +219,7 @@ class TestEnrollmentFlow:
     def test_enroll_confirm_updates_session_cache(self, vault_env):
         """After enrollment, the in-memory cache reflects the TOTP data."""
         # Complete enrollment
-        begin_result = api._h_totp_enroll_begin(_make_request(), ())
+        begin_result = api._h_totp_enroll_begin(_enroll_begin_req(), ())
         secret_bytes = b32_to_secret(begin_result["secret_b32"])
         code = _current_totp_code(secret_bytes)
         api._h_totp_enroll_confirm(_make_request({"totp_code": code}), ())
@@ -228,7 +233,7 @@ class TestEnrollmentFlow:
         assert len(admin["backup_codes"]) == 8
 
     def test_enroll_clears_pending(self, vault_env):
-        begin_result = api._h_totp_enroll_begin(_make_request(), ())
+        begin_result = api._h_totp_enroll_begin(_enroll_begin_req(), ())
         secret_bytes = b32_to_secret(begin_result["secret_b32"])
         code = _current_totp_code(secret_bytes)
         api._h_totp_enroll_confirm(_make_request({"totp_code": code}), ())
@@ -241,7 +246,7 @@ class TestEnrollmentFlow:
         assert "owner" not in status["totp_required_for"]
 
         # Enroll
-        begin_result = api._h_totp_enroll_begin(_make_request(), ())
+        begin_result = api._h_totp_enroll_begin(_enroll_begin_req(), ())
         secret_bytes = b32_to_secret(begin_result["secret_b32"])
         code = _current_totp_code(secret_bytes)
         api._h_totp_enroll_confirm(_make_request({"totp_code": code}), ())
@@ -259,7 +264,7 @@ class TestEnrollmentFlow:
 class TestEnrollmentRejection:
 
     def test_confirm_with_invalid_code(self, vault_env):
-        api._h_totp_enroll_begin(_make_request(), ())
+        api._h_totp_enroll_begin(_enroll_begin_req(), ())
         req = _make_request({"totp_code": "000000"})
         with pytest.raises(api._ApiError) as exc:
             api._h_totp_enroll_confirm(req, ())
@@ -274,7 +279,7 @@ class TestEnrollmentRejection:
         assert "pending" in str(exc.value).lower()
 
     def test_confirm_with_wrong_length_code(self, vault_env):
-        api._h_totp_enroll_begin(_make_request(), ())
+        api._h_totp_enroll_begin(_enroll_begin_req(), ())
         req = _make_request({"totp_code": "12345"})
         with pytest.raises(api._ApiError) as exc:
             api._h_totp_enroll_confirm(req, ())
@@ -418,7 +423,7 @@ class TestAntiReplay:
 
     def test_same_code_rejected_twice_via_handler(self, vault_env):
         """Enrollment confirm rejects a replayed code within the same pending session."""
-        begin_result = api._h_totp_enroll_begin(_make_request(), ())
+        begin_result = api._h_totp_enroll_begin(_enroll_begin_req(), ())
         secret_bytes = b32_to_secret(begin_result["secret_b32"])
         code = _current_totp_code(secret_bytes)
 
@@ -429,7 +434,7 @@ class TestAntiReplay:
         # and try the same code — it should fail because time hasn't advanced
         # enough for a new code window, but it's a fresh pending session
         # so anti-replay is per-pending-session.
-        api._h_totp_enroll_begin(_make_request(), ())
+        api._h_totp_enroll_begin(_enroll_begin_req(), ())
         # The pending session has a fresh used_codes set, so the same code
         # within the same time window should still verify (it's a new session).
         # This tests that anti-replay is scoped to the enrollment session.
@@ -456,7 +461,7 @@ class TestTotpDisable:
 
     def _enroll_owner(self, vault_env) -> str:
         """Enroll owner and return the secret_b32."""
-        begin = api._h_totp_enroll_begin(_make_request(), ())
+        begin = api._h_totp_enroll_begin(_enroll_begin_req(), ())
         secret_bytes = b32_to_secret(begin["secret_b32"])
         code = _current_totp_code(secret_bytes)
         api._h_totp_enroll_confirm(_make_request({"totp_code": code}), ())
@@ -597,7 +602,7 @@ class TestTotpSession:
         vault, _ = vault_env
 
         # Enroll TOTP
-        begin = api._h_totp_enroll_begin(_make_request(), ())
+        begin = api._h_totp_enroll_begin(_enroll_begin_req(), ())
         secret_bytes = b32_to_secret(begin["secret_b32"])
         code = _current_totp_code(secret_bytes)
         api._h_totp_enroll_confirm(_make_request({"totp_code": code}), ())
@@ -792,7 +797,7 @@ class TestEnrollmentGuards:
 
     def test_begin_requires_unlocked(self, tmp_path):
         with pytest.raises(api._ApiError) as exc:
-            api._h_totp_enroll_begin(_make_request(), ())
+            api._h_totp_enroll_begin(_enroll_begin_req(), ())
         assert exc.value.status == 401
 
     def test_confirm_requires_unlocked(self, tmp_path):
@@ -823,7 +828,7 @@ class TestBackupCodeConsumption:
         vault, _ = vault_env
 
         # Enroll
-        begin = api._h_totp_enroll_begin(_make_request(), ())
+        begin = api._h_totp_enroll_begin(_enroll_begin_req(), ())
         secret_bytes = b32_to_secret(begin["secret_b32"])
         code = _current_totp_code(secret_bytes)
         confirm = api._h_totp_enroll_confirm(
