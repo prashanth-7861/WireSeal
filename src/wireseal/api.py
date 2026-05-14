@@ -5127,8 +5127,6 @@ def _h_totp_enroll_confirm(req: "_Handler", _groups: tuple) -> dict:
         vault     = _session["vault"]
         sess_pass = _session["passphrase"]
     admin_id = str(body.get("admin_id", session_admin)) if isinstance(body, dict) else session_admin
-
-    body      = req._json()
     totp_code = str(body.get("totp_code", "")).strip()
 
     _check_totp_rate_limit(admin_id)
