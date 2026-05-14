@@ -4883,6 +4883,7 @@ def _h_list_admins(req: "_Handler", _groups: tuple) -> dict:
             "id": aid,
             "role": info.get("role", "admin"),
             "totp_enrolled": info.get("totp_secret_b32") is not None,
+            "backup_codes_remaining": len(info.get("backup_codes", [])),
             "last_unlock": info.get("last_unlock"),
         })
     return {"admins": result}

@@ -39,6 +39,7 @@ export function Clients() {
 
   // TOTP prompt state
   const [totpRequiredName, setTotpRequiredName] = useState<string | null>(null);
+  const [totpAction, setTotpAction] = useState<"qr" | "download">("qr");
   const [totpCode, setTotpCode] = useState("");
   const [totpError, setTotpError] = useState("");
   const [totpLoading, setTotpLoading] = useState(false);
@@ -107,7 +108,13 @@ export function Clients() {
       setQrPanel({ name: res.name, qr: res.qr_png_b64, format: res.format || "png", expiresAt });
       startCountdown(expiresAt);
     } catch (e: unknown) {
-      setError(e instanceof Error ? e.message : "Failed to load QR code");
+      const msg = e instanceof Error ? e.message : "";
+      if (msg.includes("totp_code required")) {
+        setTotpAction("qr");
+        setTotpRequiredName(name);
+      } else {
+        setError(msg || "Failed to load QR code");
+      }
     } finally {
       setQrRefreshing(false);
     }
@@ -169,10 +176,14 @@ export function Clients() {
     setTotpLoading(true);
     setTotpError("");
     try {
-      const qrRes = await api.clientQr(totpRequiredName, totpCode);
-      const expiresAt = Date.now() + QR_TTL * 1000;
-      setQrPanel({ name: qrRes.name, qr: qrRes.qr_png_b64, format: qrRes.format || "png", expiresAt });
-      startCountdown(expiresAt);
+      if (totpAction === "download") {
+        await handleDownloadConfig(totpRequiredName, totpCode);
+      } else {
+        const qrRes = await api.clientQr(totpRequiredName, totpCode);
+        const expiresAt = Date.now() + QR_TTL * 1000;
+        setQrPanel({ name: qrRes.name, qr: qrRes.qr_png_b64, format: qrRes.format || "png", expiresAt });
+        startCountdown(expiresAt);
+      }
       setTotpRequiredName(null);
       setTotpCode("");
     } catch (err: unknown) {
@@ -197,14 +208,18 @@ export function Clients() {
   };
 
   // ── Download config ──────────────────────────────────────────────────────
-  const handleDownloadConfig = async (name: string) => {
+  const handleDownloadConfig = async (name: string, totpCodeOverride?: string) => {
     try {
-      const res = await fetch(`/api/clients/${encodeURIComponent(name)}/config/download`, {
-        credentials: "same-origin",
-      });
+      const url = `/api/clients/${encodeURIComponent(name)}/config/download${totpCodeOverride ? `?code=${encodeURIComponent(totpCodeOverride)}` : ""}`;
+      const res = await fetch(url, { credentials: "same-origin" });
       if (!res.ok) {
         let msg = `Download failed (HTTP ${res.status})`;
         try { const err = await res.json(); if (err?.error) msg = err.error; } catch { /* ignore */ }
+        if (msg.includes("totp_code required")) {
+          setTotpAction("download");
+          setTotpRequiredName(name);
+          return;
+        }
         throw new Error(msg);
       }
       const blob = await res.blob();

@@ -139,8 +139,23 @@ export function TwoFactor() {
               </button>
             </div>
             {showBackupCodes && (
-              <div className="mt-3 bg-gray-50 border rounded-lg p-4">
-                <p className="text-xs text-gray-500 mb-2">(Backup codes will be displayed here after enrollment)</p>
+              <div className="mt-3 bg-gray-50 border rounded-lg p-4 space-y-2">
+                <div className="flex items-center justify-between">
+                  <span className="text-sm text-gray-700">Remaining codes</span>
+                  <span className={`text-sm font-semibold ${(me?.backup_codes_remaining ?? 0) <= 2 ? "text-red-600" : "text-gray-900"}`}>
+                    {me?.backup_codes_remaining ?? 0} of 8
+                  </span>
+                </div>
+                {(me?.backup_codes_remaining ?? 0) <= 2 && (
+                  <p className="text-xs text-red-600 flex items-center gap-1.5">
+                    <AlertTriangle className="w-3.5 h-3.5" />
+                    Low on recovery codes. Consider re-enrolling to generate new ones.
+                  </p>
+                )}
+                <p className="text-xs text-gray-500">
+                  Recovery codes are shown only once during enrollment. Store them securely.
+                  Each code can be used once to unlock your vault if you lose your authenticator.
+                </p>
               </div>
             )}
           </div>

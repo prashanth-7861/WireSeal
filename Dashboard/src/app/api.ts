@@ -590,7 +590,7 @@ export const api = {
     ),
 
   totpEnrollConfirm: (code: string, adminId?: string) =>
-    _fetch<{ backup_codes: string[] }>("POST", "/totp/enroll/confirm", adminId ? { code, admin_id: adminId } : { code }),
+    _fetch<{ backup_codes: string[] }>("POST", "/totp/enroll/confirm", { totp_code: code, ...(adminId ? { admin_id: adminId } : {}) }),
 
   totpDisable: (adminId?: string, confirmPassphrase?: string) =>
     _fetch<{ ok: boolean }>("POST", "/totp/disable", {
