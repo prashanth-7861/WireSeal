@@ -65,6 +65,26 @@ class SftpSessionManager:
     # Public API
     # ------------------------------------------------------------------
 
+    def run(self, token: str, coro, timeout: float | None = None) -> object:
+        """Run an async SFTP operation on this session's event loop.
+
+        All ``_h_sftp_*`` API handlers should call this instead of
+        ``asyncio.run()`` so the SFTP client runs on the SAME event
+        loop that created it.  Using ``asyncio.run()`` creates a new
+        loop each time, causing "Event loop is closed" errors and
+        silent connection drops.
+
+        Returns the coroutine result, or raises ``LookupError`` if
+        the session token is not found.
+        """
+        with self._lock:
+            session = self._sessions.get(token)
+            if not session:
+                raise LookupError("Session not found or expired")
+            session.touch()
+        loop = self._get_loop()
+        return loop.run_until_complete(coro)
+
     def connect(self, host: str, port: int = 22,
                 username: str = "root", password: str = "") -> str:
         """Open an SSH connection, start SFTP, return a session token.
