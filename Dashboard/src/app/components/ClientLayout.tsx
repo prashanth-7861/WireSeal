@@ -25,10 +25,29 @@ export function ClientLayout({ onLock }: ClientLayoutProps) {
   const [confirmPin, setConfirmPin] = useState("");
   const [pinSetupError, setPinSetupError] = useState("");
   const [pinSetupLoading, setPinSetupLoading] = useState(false);
+  const [tunnelConnected, setTunnelConnected] = useState(false);
+  const [tunnelProfile, setTunnelProfile] = useState<string | null>(null);
 
   useEffect(() => {
     api.pinInfo().then((info) => setPinSet(info.pin_set ?? false)).catch(() => {});
   }, []);
+
+  // Poll tunnel status every 5s when connected, 15s when disconnected
+  useEffect(() => {
+    let cancelled = false;
+    const poll = async () => {
+      try {
+        const status = await api.clientTunnelStatus();
+        if (!cancelled) {
+          setTunnelConnected(status.connected);
+          setTunnelProfile(status.profile);
+        }
+      } catch {}
+    };
+    poll();
+    const interval = setInterval(poll, tunnelConnected ? 5000 : 15000);
+    return () => { cancelled = true; clearInterval(interval); };
+  }, [tunnelConnected]);
 
   const handlePinSetup = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -96,11 +115,15 @@ export function ClientLayout({ onLock }: ClientLayoutProps) {
         <div className="px-4 py-3 border-t border-gray-100 space-y-2">
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-2">
-              <WifiOff className="w-3 h-3 text-gray-400" />
+              {tunnelConnected ? (
+                <Wifi className="w-3 h-3 text-emerald-500" />
+              ) : (
+                <WifiOff className="w-3 h-3 text-gray-400" />
+              )}
               <span className="text-xs text-gray-500">VPN Tunnel</span>
             </div>
-            <span className="text-xs font-medium text-gray-400">
-              Not connected
+            <span className={`text-xs font-medium ${tunnelConnected ? "text-emerald-600" : "text-gray-400"}`}>
+              {tunnelConnected ? (tunnelProfile ? tunnelProfile : "Connected") : "Not connected"}
             </span>
           </div>
           <div className="flex items-center justify-between">
