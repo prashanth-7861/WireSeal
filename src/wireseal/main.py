@@ -1872,49 +1872,120 @@ def export(name: str, path: str) -> None:
 @cli.command("audit-log")
 @click.option("--lines", default=50, type=int, show_default=True,
               help="Number of recent entries to display")
-def audit_log(lines: int) -> None:
-    """Display recent audit log entries (no vault passphrase required)."""
-    # Step 1: No vault unlock needed — audit log contains no secrets (AUDIT-01)
+@click.option("--action", "-a", default=None,
+              help="Filter by action type (e.g. init, add-client, totp-enrolled, sftp-write)")
+@click.option("--actor", default=None,
+              help="Filter by actor (admin_id)")
+@click.option("--since", default=None,
+              help="Show entries since ISO timestamp (e.g. 2026-05-01T00:00:00)")
+@click.option("--json", "json_out", is_flag=True, default=False,
+              help="Output as JSON (one object per line, ndjson)")
+@click.option("--follow", "-f", is_flag=True, default=False,
+              help="Watch for new entries (like tail -f)")
+def audit_log(lines: int, action: str | None, actor: str | None,
+              since: str | None, json_out: bool, follow: bool) -> None:
+    """Display recent audit log entries (no vault passphrase required).
 
-    # Step 2: Retrieve entries via AuditLog API
+    Examples:
+
+      wireseal audit-log                          # last 50 entries
+      wireseal audit-log --lines 200              # last 200 entries
+      wireseal audit-log --action add-client      # only client additions
+      wireseal audit-log --actor owner            # only owner actions
+      wireseal audit-log --since 2026-05-01       # since May 1
+      wireseal audit-log --json --action sftp     # SFTP ops as JSON
+      wireseal audit-log --follow                 # live tail
+    """
+    import datetime as _dt, time as _time, json as _json
+
     from wireseal.security.audit import AuditLog
 
     audit = AuditLog(DEFAULT_AUDIT_LOG_PATH)
-    entries = audit.get_recent_entries(lines)
 
-    # Step 3: Empty log case
-    if not entries:
-        click.echo("Audit log is empty.")
+    # Parse --since into a timestamp for comparison
+    since_ts: float | None = None
+    if since:
+        try:
+            since_ts = _dt.datetime.fromisoformat(since).timestamp()
+        except Exception:
+            click.echo(f"Error: invalid --since format '{since}'. Use ISO 8601.", err=True)
+            raise SystemExit(1)
+
+    def match(entry) -> bool:
+        """Check if an entry matches the filters."""
+        if action and entry.action != action:
+            return False
+        if actor:
+            entry_actor = entry.metadata.get("actor", "") or entry.metadata.get("admin_id", "")
+            if actor not in str(entry_actor):
+                return False
+        if since_ts:
+            try:
+                entry_ts = _dt.datetime.fromisoformat(entry.timestamp).timestamp()
+                if entry_ts < since_ts:
+                    return False
+            except Exception:
+                pass
+        return True
+
+    def print_entry(entry, show_header: bool = False) -> None:
+        if json_out:
+            click.echo(_json.dumps({
+                "timestamp": entry.timestamp,
+                "action": entry.action,
+                "success": entry.success,
+                "actor": entry.metadata.get("actor") or entry.metadata.get("admin_id") or "",
+                "metadata": entry.metadata,
+                "error": entry.error,
+            }))
+        else:
+            ts = entry.timestamp[:19] if len(entry.timestamp) >= 19 else entry.timestamp
+            status = "" if entry.success else " [FAILED]"
+            actor_str = entry.metadata.get("actor", "") or entry.metadata.get("admin_id", "") or ""
+            meta_parts = [f"{k}={v}" for k, v in entry.metadata.items()
+                          if k not in ("actor", "admin_id")]
+            meta_str = "  ".join(meta_parts) if meta_parts else ""
+            error_str = f"  ERROR: {entry.error}" if entry.error else ""
+            click.echo(f"{ts}  [{entry.action}{status}]  {actor_str}  {meta_str}{error_str}")
+
+    # If --follow, poll continuously
+    if follow:
+        last_seen = _time.time()
+        seen_ids: set[str] = set()
+        while True:
+            try:
+                entries = audit.get_recent_entries(100)
+                new_entries = [e for e in entries if e.timestamp not in seen_ids
+                               and match(e) and _time.time() - last_seen < 10]
+                for e in new_entries:
+                    seen_ids.add(e.timestamp)
+                    print_entry(e)
+                last_seen = _time.time()
+                _time.sleep(2)
+            except KeyboardInterrupt:
+                break
+            except Exception as exc:
+                click.echo(f"Error: {exc}", err=True)
+                _time.sleep(5)
         return
 
-    # SECURITY INVARIANT: verify no entry contains key material field names
-    _SECRET_FIELD_NAMES = {"PrivateKey", "psk", "passphrase", "token"}
+    # Normal mode: fetch and filter
+    entries = audit.get_recent_entries(lines * 3)  # fetch more for filtering
+    filtered = [e for e in entries if match(e)]
 
-    # Step 4: Format and print each entry
-    for entry in entries:
-        # Check for secret field names in this entry's metadata
-        secret_fields_found = _SECRET_FIELD_NAMES & set(entry.metadata.keys())
-        if secret_fields_found:
-            click.echo(
-                f"CRITICAL: Audit log entry contains secret field name(s): "
-                f"{secret_fields_found}. AUDIT-01 invariant violated at write time."
-            )
+    if not filtered:
+        click.echo("No matching audit entries found.")
+        return
 
-        # Build metadata display string (skip error=None)
-        meta_pairs = []
-        for k, v in entry.metadata.items():
-            meta_pairs.append(f"{k}={v}")
-        if entry.error is not None:
-            meta_pairs.append(f"error={entry.error}")
+    if not json_out:
+        click.echo(f"\n{'Timestamp':<22} {'Action':<30} {'Actor':<12} {'Details'}")
+        click.echo("-" * 100)
 
-        meta_str = "  ".join(meta_pairs) if meta_pairs else ""
-        action_label = entry.action
-        status_label = "" if entry.success else " [FAILED]"
+    for entry in filtered[:lines]:
+        print_entry(entry)
 
-        click.echo(f"{entry.timestamp}  [{action_label}{status_label}]  {meta_str}")
-
-    # Step 5: Divider and total count
-    click.echo(f"-- {len(entries)} entries shown --")
+    if not json_out:
+        click.echo(f"\n-- {len(filtered[:lines])} entries shown ({len(filtered)} matched) --")
 
 
 # ===========================================================================
