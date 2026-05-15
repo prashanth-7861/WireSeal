@@ -738,7 +738,11 @@ def _extract_secret_str(value: object) -> str:
               help="Time-to-live in seconds (e.g., 86400 for 1 day)")
 @click.option("--expires-at", default=None,
               help="Expiry date/time in ISO 8601 format (e.g., 2026-07-01T00:00:00Z)")
-def add_client(name: str, access_level: str, ttl: int | None, expires_at: str | None) -> None:
+@click.option("--tunnel-mode", default=None,
+              type=click.Choice(["split-vpn", "split-lan", "full"]),
+              help="Tunnel mode for the client config (default: full via CLI, split-vpn via API)")
+def add_client(name: str, access_level: str, ttl: int | None, expires_at: str | None,
+               tunnel_mode: str | None) -> None:
     """Add a new WireGuard client and generate its config.
 
     Access control options:
@@ -803,6 +807,18 @@ def add_client(name: str, access_level: str, ttl: int | None, expires_at: str | 
 
             server_endpoint = _resolve_client_endpoint(state.server)
 
+            # Resolve allowed_ips based on tunnel_mode
+            vpn_subnet = state.ip_pool.get("subnet", "10.0.0.0/24")
+            if tunnel_mode == "full":
+                allowed_ips = "0.0.0.0/0"
+            elif tunnel_mode == "split-lan":
+                lan_subnet = state.server.get("lan_subnet", "")
+                allowed_ips = f"{vpn_subnet}, {lan_subnet}" if lan_subnet else vpn_subnet
+            elif tunnel_mode == "split-vpn":
+                allowed_ips = vpn_subnet
+            else:
+                allowed_ips = "0.0.0.0/0"  # CLI default: full tunnel
+
             builder = ConfigBuilder()
             # Validation is performed inside render_client_config (CONFIG-02)
             client_config_str = builder.render_client_config(
@@ -812,6 +828,7 @@ def add_client(name: str, access_level: str, ttl: int | None, expires_at: str | 
                 server_public_key=server_pub_key,
                 psk=psk_str,
                 server_endpoint=server_endpoint,
+                allowed_ips=allowed_ips,
             )
 
             # Step 10: Write client config atomically with 600 permissions
@@ -862,6 +879,7 @@ def add_client(name: str, access_level: str, ttl: int | None, expires_at: str | 
                 "ip": allocated_ip,
                 "config_hash": config_hash,
                 "access_level": access_level,
+                "tunnel_mode": tunnel_mode or "full",
                 "status": "active",
                 "permanent": ttl is None and expires_at is None,
             }
@@ -1115,6 +1133,8 @@ def list_clients() -> None:
                     "public_key": _extract_secret_str(cdata["public_key"]),
                     "ip": cdata["ip"],
                     "access_level": cdata.get("access_level", "standard"),
+                    "ttl_seconds": cdata.get("ttl_seconds"),
+                    "ttl_expires_at": cdata.get("ttl_expires_at"),
                 }
 
         if not clients_snapshot:
@@ -1151,16 +1171,29 @@ def list_clients() -> None:
                 click.echo("WARNING: WireGuard not running or no active peers.")
 
             # Step 4: Print table — CLIENT-03: no private keys or PSKs
-            has_access = any("access_level" in c for c in state.clients.values())
-            if has_access:
-                click.echo(f"\n{'Name':20}  {'IP':15}  {'Access':10}  {'Last Handshake'}")
-                click.echo("-" * 77)
+            has_access = any(cdata.get("access_level") for cdata in state.clients.values())
+            has_expiry = any(cdata.get("ttl_seconds") or cdata.get("ttl_expires_at") for cdata in state.clients.values())
+            if has_access or has_expiry:
+                header = f"{'Name':20}  {'IP':15}"
+                if has_access: header += f"  {'Access':10}"
+                if has_expiry: header += f"  {'Expires':14}"
+                header += "  {'Last Handshake'}"
+                click.echo(f"\n{header}")
+                click.echo("-" * len(header))
                 for cname, cinfo in clients_snapshot.items():
                     pubkey = cinfo["public_key"]
                     ip = cinfo["ip"]
-                    access = cinfo.get("access_level", "standard")
+                    row = f"{cname:20}  {ip:15}"
+                    if has_access: row += f"  {cinfo.get('access_level', 'standard'):10}"
+                    if has_expiry:
+                        expiry = cinfo.get("ttl_expires_at") or ""
+                        if not expiry and cname in state.clients:
+                            ttl = state.clients[cname].get("ttl_seconds")
+                            expiry = f"ttl={ttl}s" if ttl else "never"
+                        row += f"  {str(expiry)[:14]:14}"
                     handshake = handshake_by_pubkey.get(pubkey, "never")
-                    click.echo(f"{cname:20}  {ip:15}  {access:10}  {handshake}")
+                    row += f"  {handshake}"
+                    click.echo(row)
             else:
                 click.echo(f"\n{'Name':20}  {'IP':15}  {'Last Handshake'}")
                 click.echo("-" * 65)
