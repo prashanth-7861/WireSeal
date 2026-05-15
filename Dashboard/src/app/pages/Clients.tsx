@@ -171,15 +171,17 @@ export function Clients() {
   };
 
   // ── TOTP confirm handler ──────────────────────────────────────────────────
-  const handleTotpConfirm = async () => {
+  const handleTotpConfirm = async (codeOverride?: string) => {
     if (!totpRequiredName) return;
+    const code = codeOverride || totpCode;
+    if (code.length !== 6) return;
     setTotpLoading(true);
     setTotpError("");
     try {
       if (totpAction === "download") {
-        await handleDownloadConfig(totpRequiredName, totpCode);
+        await handleDownloadConfig(totpRequiredName, code);
       } else {
-        const qrRes = await api.clientQr(totpRequiredName, totpCode);
+        const qrRes = await api.clientQr(totpRequiredName, code);
         const expiresAt = Date.now() + QR_TTL * 1000;
         setQrPanel({ name: qrRes.name, qr: qrRes.qr_png_b64, format: qrRes.format || "png", expiresAt });
         startCountdown(expiresAt);
@@ -703,7 +705,11 @@ export function Clients() {
                 maxLength={6}
                 placeholder="000000"
                 value={totpCode}
-                onChange={(e) => setTotpCode(e.target.value.replace(/\D/g, "").slice(0, 6))}
+                onChange={(e) => {
+                  const val = e.target.value.replace(/\D/g, "").slice(0, 6);
+                  setTotpCode(val);
+                  if (val.length === 6 && !totpLoading) handleTotpConfirm(val);
+                }}
                 className="w-full border rounded px-3 py-2 text-lg text-center tracking-widest mb-3"
                 autoFocus
               />

@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useRef, useEffect } from "react";
 import { AlertTriangle, CheckCircle, Copy, X, ShieldCheck, Eye, EyeOff } from "lucide-react";
 import { api } from "../api";
 
@@ -18,12 +18,14 @@ export function TotpEnrollDialog({ onClose, onEnrolled, adminId }: Props) {
   const [confirmLoading, setConfirmLoading] = useState(false);
   const [otpauthUri, setOtpauthUri] = useState("");
   const [secretB32, setSecretB32] = useState("");
+  const [qrB64, setQrB64] = useState("");
+  const [qrFormat, setQrFormat] = useState("png");
   const [totpCode, setTotpCode] = useState("");
   const [backupCodes, setBackupCodes] = useState<string[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [copied, setCopied] = useState(false);
-  const [qrImageError, setQrImageError] = useState(false);
+  const codeInputRef = useRef<HTMLInputElement>(null);
 
   const handleConfirmPassphrase = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -33,6 +35,10 @@ export function TotpEnrollDialog({ onClose, onEnrolled, adminId }: Props) {
       const res = await api.totpEnrollBegin(confirmPass, adminId);
       setOtpauthUri(res.otpauth_uri);
       setSecretB32(res.secret_b32);
+      if (res.qr_b64) {
+        setQrB64(res.qr_b64);
+        setQrFormat(res.qr_format || "png");
+      }
       setStep("qr");
     } catch (e) {
       setConfirmError(e instanceof Error ? e.message : "Incorrect passphrase");
@@ -41,19 +47,31 @@ export function TotpEnrollDialog({ onClose, onEnrolled, adminId }: Props) {
     }
   };
 
-  const handleConfirmCode = async (e: React.FormEvent) => {
-    e.preventDefault();
+  const handleConfirmCode = async (code?: string) => {
+    const codeToVerify = code || totpCode;
+    if (codeToVerify.length !== 6) return;
     setError("");
     setLoading(true);
     try {
-      const res = await api.totpEnrollConfirm(totpCode, adminId);
+      const res = await api.totpEnrollConfirm(codeToVerify, adminId);
       setBackupCodes(res.backup_codes);
       setStep("backup");
     } catch (e) {
       const msg = e instanceof Error ? e.message : "Verification failed";
       setError(msg === "invalid_code" ? "Invalid code — check your authenticator and try again." : msg);
+      setTotpCode("");
+      codeInputRef.current?.focus();
     } finally {
       setLoading(false);
+    }
+  };
+
+  // Auto-submit when 6 digits entered
+  const handleCodeChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const val = e.target.value.replace(/\D/g, "").slice(0, 6);
+    setTotpCode(val);
+    if (val.length === 6 && !loading) {
+      handleConfirmCode(val);
     }
   };
 
@@ -73,9 +91,16 @@ export function TotpEnrollDialog({ onClose, onEnrolled, adminId }: Props) {
     } catch { /* ignore */ }
   };
 
-  const qrImageUrl = otpauthUri
+  // Focus code input when entering verify step
+  useEffect(() => {
+    if (step === "verify") codeInputRef.current?.focus();
+  }, [step]);
+
+  // Fallback: external QR API only if backend didn't provide one
+  const qrImageUrl = !qrB64 && otpauthUri
     ? `https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=${encodeURIComponent(otpauthUri)}`
     : "";
+  const [qrImageError, setQrImageError] = useState(false);
 
   return (
     <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
@@ -151,36 +176,34 @@ export function TotpEnrollDialog({ onClose, onEnrolled, adminId }: Props) {
             <p className="text-sm text-gray-600">
               Scan this QR code with your authenticator app (Google Authenticator, Aegis, Bitwarden, etc.)
             </p>
-            {loading ? (
-              <div className="flex justify-center py-8">
-                <div className="w-8 h-8 border-2 border-indigo-600 border-t-transparent rounded-full animate-spin" />
+            <div className="flex justify-center">
+              {qrB64 ? (
+                <img
+                  src={`data:image/${qrFormat === "svg+xml" ? "svg+xml" : "png"};base64,${qrB64}`}
+                  alt="TOTP QR Code" width={200} height={200}
+                  className="rounded-lg border border-gray-200"
+                />
+              ) : !qrImageError && qrImageUrl ? (
+                <img src={qrImageUrl} alt="TOTP QR Code" width={200} height={200}
+                  className="rounded-lg border border-gray-200"
+                  onError={() => setQrImageError(true)}
+                />
+              ) : (
+                <div className="bg-gray-50 border border-gray-200 rounded-lg p-4 text-center">
+                  <p className="text-xs text-gray-500 mb-2">QR image unavailable.</p>
+                  <p className="text-xs text-gray-500">Use manual entry below.</p>
+                </div>
+              )}
+            </div>
+            <div className="bg-gray-50 rounded-lg p-3">
+              <p className="text-xs font-medium text-gray-500 mb-1">Manual entry secret</p>
+              <div className="flex items-center gap-2">
+                <code className="flex-1 text-xs font-mono text-gray-800 break-all">{secretB32}</code>
+                <button type="button" onClick={handleCopySecret} className="text-gray-400 hover:text-gray-600 flex-shrink-0" title="Copy secret">
+                  {copied ? <CheckCircle className="w-4 h-4 text-green-500" /> : <Copy className="w-4 h-4" />}
+                </button>
               </div>
-            ) : (
-              <>
-                <div className="flex justify-center">
-                  {!qrImageError && qrImageUrl ? (
-                    <img src={qrImageUrl} alt="TOTP QR Code" width={200} height={200}
-                      className="rounded-lg border border-gray-200"
-                      onError={() => setQrImageError(true)}
-                    />
-                  ) : (
-                    <div className="bg-gray-50 border border-gray-200 rounded-lg p-4 text-center">
-                      <p className="text-xs text-gray-500 mb-2">QR image unavailable.</p>
-                      <p className="text-xs text-gray-500">Use manual entry below.</p>
-                    </div>
-                  )}
-                </div>
-                <div className="bg-gray-50 rounded-lg p-3">
-                  <p className="text-xs font-medium text-gray-500 mb-1">Manual entry secret</p>
-                  <div className="flex items-center gap-2">
-                    <code className="flex-1 text-xs font-mono text-gray-800 break-all">{secretB32}</code>
-                    <button type="button" onClick={handleCopySecret} className="text-gray-400 hover:text-gray-600 flex-shrink-0" title="Copy secret">
-                      {copied ? <CheckCircle className="w-4 h-4 text-green-500" /> : <Copy className="w-4 h-4" />}
-                    </button>
-                  </div>
-                </div>
-              </>
-            )}
+            </div>
             {error && (
               <div className="flex items-center gap-2 text-red-600 text-sm bg-red-50 p-3 rounded-lg">
                 <AlertTriangle className="w-4 h-4 flex-shrink-0" />
@@ -191,7 +214,7 @@ export function TotpEnrollDialog({ onClose, onEnrolled, adminId }: Props) {
               <button type="button" onClick={onClose} className="flex-1 px-4 py-2 border border-gray-300 rounded-lg hover:bg-gray-50 text-sm">
                 Cancel
               </button>
-              <button type="button" onClick={() => { setStep("verify"); setError(""); }} disabled={!otpauthUri || loading}
+              <button type="button" onClick={() => { setStep("verify"); setError(""); }} disabled={!otpauthUri}
                 className="flex-1 bg-indigo-600 text-white px-4 py-2 rounded-lg hover:bg-indigo-700 text-sm disabled:opacity-60">
                 Next
               </button>
@@ -201,15 +224,21 @@ export function TotpEnrollDialog({ onClose, onEnrolled, adminId }: Props) {
 
         {/* Step 2: Verify code */}
         {step === "verify" && (
-          <form onSubmit={handleConfirmCode} className="space-y-4">
-            <p className="text-sm text-gray-600">Enter the 6-digit code from your authenticator app to confirm enrollment.</p>
+          <form onSubmit={(e) => { e.preventDefault(); handleConfirmCode(); }} className="space-y-4">
+            <p className="text-sm text-gray-600">Enter the 6-digit code from your authenticator app.</p>
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-2">Verification code</label>
-              <input type="text" inputMode="numeric" maxLength={6} pattern="[0-9]{6}"
-                value={totpCode} onChange={e => setTotpCode(e.target.value.replace(/\D/g, "").slice(0, 6))}
+              <input ref={codeInputRef} type="text" inputMode="numeric" maxLength={6} pattern="[0-9]{6}"
+                value={totpCode} onChange={handleCodeChange}
                 className="w-full px-4 py-3 text-center text-2xl font-mono tracking-widest border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-transparent"
                 placeholder="000000" autoFocus required disabled={loading}
               />
+              {loading && (
+                <div className="flex items-center justify-center gap-2 mt-2 text-indigo-600 text-sm">
+                  <div className="w-4 h-4 border-2 border-indigo-400 border-t-transparent rounded-full animate-spin" />
+                  <span>Verifying...</span>
+                </div>
+              )}
             </div>
             {error && (
               <div className="flex items-center gap-2 text-red-600 text-sm bg-red-50 p-3 rounded-lg">
@@ -222,7 +251,7 @@ export function TotpEnrollDialog({ onClose, onEnrolled, adminId }: Props) {
                 className="flex-1 px-4 py-2 border border-gray-300 rounded-lg hover:bg-gray-50 text-sm" disabled={loading}>Back</button>
               <button type="submit" disabled={totpCode.length !== 6 || loading}
                 className="flex-1 bg-indigo-600 text-white px-4 py-2 rounded-lg hover:bg-indigo-700 text-sm disabled:opacity-60">
-                {loading ? "Verifying\u2026" : "Confirm"}
+                Confirm
               </button>
             </div>
           </form>

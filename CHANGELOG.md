@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.9.1] — 2026-05-15
+
+### Added — SFTP File Browser (client mode)
+- **Full file manager UI** — list/grid views, breadcrumb navigation, search filter, right-click context menu
+- **File operations** — upload, download (Save As dialog), inline text editor, create file, new folder, rename, copy, delete
+- **SFTP session manager** — persistent SSH connection caching with 15-minute idle timeout, single event loop reuse
+- **Audit logging** — all SFTP mutations logged (connect, write, delete, mkdir, rename, copy) with actor, path, host
+- **Admin role enforcement** — write operations require `admin` or `owner` role via `_require_admin_role()`
+- **Cross-platform directory detection** — POSIX `S_IFDIR` + SFTPv5 `DT_DIR` fallback for Windows SFTP servers
+- **File type icons** — 19 file extension categories (code, image, archive, spreadsheet, audio, video)
+
+### Added — SFTP page in dashboard
+- New `/client/sftp` route and sidebar nav item in client mode
+- Connection panel with host/port/username/password
+- 5 new REST endpoints: `connect`, `disconnect`, `rename`, `copy`
+- `SftpSessionManager` with `reap_stale()` for idle connection cleanup
+
+### Enhanced — Audit Log page
+- Category filter pills (Auth, Client, Admin, SFTP, Config, System)
+- Text search with clear button across all event metadata
+- Actor column showing who performed each action
+- Expandable metadata chips ("N more" toggle)
+- Pagination (50 events/page) with page number navigation
+- Relative timestamps ("2m ago") alongside absolute time
+- 30 action types with color-coded badges and icons
+
+---
+
 ## [0.9.0] — 2026-05-12
 
 ### Security — Critical Fixes

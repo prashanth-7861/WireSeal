@@ -692,6 +692,17 @@ def _sudo(cmd: list[str]) -> list[str]:
     return ["sudo", "-n"] + cmd  # -n = non-interactive (no password prompt)
 
 
+def _require_admin_role() -> None:
+    """Require admin or owner role for the current session (write operations).
+
+    Raises 403 if the session role is ``readonly``.
+    """
+    with _lock:
+        role = _session.get("admin_role", "owner")
+    if role == "readonly":
+        raise _ApiError("Admin privileges required for this operation.", 403)
+
+
 def _require_unlocked() -> None:
     global _last_activity
     if _session["vault"] is None:
@@ -1045,15 +1056,27 @@ def _refresh_cache(state: Any) -> dict:
 
     Handles both server-mode vaults (have .server/.clients/.ip_pool) and
     client-mode vaults (only have client_configs).
+
+    IMPORTANT: Admin dicts are deep-copied with SecretBytes unwrapped to plain
+    strings.  A shallow copy shares inner dict references with the vault state;
+    when ``VaultState.__exit__`` wipes SecretBytes on close, the cache would
+    hold zeroed objects — breaking TOTP enrollment checks and verification.
     """
+    from wireseal.security.vault import VaultState
+
     mode = state.data.get("mode", "server")
+    admins_raw = state.data.get("admins", {})
+    admins_cache = {
+        k: VaultState._unwrap_secrets(dict(v)) if isinstance(v, dict) else v
+        for k, v in admins_raw.items()
+    }
     if mode == "client":
         return {
             "mode": "client",
             "server": {},
             "clients": {},
             "ip_pool": {},
-            "admins": dict(state.data.get("admins", {})),
+            "admins": admins_cache,
             "dns_mappings": {},
             "backup_config": {},
         }
@@ -1084,7 +1107,7 @@ def _refresh_cache(state: Any) -> dict:
             for name, data in state.clients.items()
         },
         "ip_pool": dict(state.ip_pool),
-        "admins": dict(state.data.get("admins", {})),
+        "admins": admins_cache,
         "dns_mappings": dict(state.data.get("dns_mappings", {})),
         "backup_config": dict(state.data.get("backup_config", {})),
     }
@@ -6554,6 +6577,375 @@ def _h_ssh_token(req: "_Handler", _groups: tuple) -> dict:
     }
 
 
+def _h_sftp_connect(req: "_Handler", _groups: tuple) -> dict:
+    """POST /api/sftp/connect — Open an SFTP session.
+
+    Body: {host, port, username, password}
+    Returns: {session_id, host, port, username}
+    """
+    _require_unlocked()
+    body = req._json()
+    if not isinstance(body, dict):
+        raise _ApiError("Invalid JSON body", 400)
+    host = str(body.get("host", "")).strip()
+    port = int(body.get("port", 22))
+    username = str(body.get("username", "")).strip()
+    password = str(body.get("password", ""))
+    if not host or not username:
+        raise _ApiError("host and username are required", 400)
+    if port < 1 or port > 65535:
+        raise _ApiError("port out of range", 400)
+
+    from wireseal.sftp.bridge import get_manager as _sftp_mgr
+    from wireseal.security.audit import AuditLog
+
+    try:
+        session_id = _sftp_mgr().connect(host, port, username, password)
+        with _lock:
+            _actor = _session.get("admin_id", "unknown")
+        AuditLog(_AUDIT_PATH).log("sftp-connect", {"host": host, "port": port, "username": username},
+                                  actor=_actor)
+        return {"session_id": session_id, "host": host, "port": port, "username": username}
+    except OSError as e:
+        raise _ApiError(f"Connection failed: {e}", 502)
+
+
+def _h_sftp_disconnect(req: "_Handler", _groups: tuple) -> dict:
+    """POST /api/sftp/disconnect — Close an SFTP session.
+
+    Body: {session_id}
+    """
+    _require_unlocked()
+    body = req._json()
+    session_id = str(body.get("session_id", "")).strip() if isinstance(body, dict) else ""
+    if not session_id:
+        raise _ApiError("session_id is required", 400)
+    from wireseal.sftp.bridge import get_manager as _sftp_mgr
+    _sftp_mgr().disconnect(session_id)
+    return {"ok": True}
+
+
+def _h_sftp_list(req: "_Handler", _groups: tuple) -> dict:
+    """POST /api/sftp/list — List directory contents via SFTP.
+
+    Body: {session_id, path}
+    """
+    _require_unlocked()
+    body = req._json()
+    if not isinstance(body, dict):
+        raise _ApiError("Invalid JSON body", 400)
+    session_id = str(body.get("session_id", "")).strip()
+    path = str(body.get("path", "/")).strip()
+    if not session_id:
+        raise _ApiError("session_id is required", 400)
+
+    from wireseal.sftp.bridge import get_manager as _sftp_mgr
+    session = _sftp_mgr().get(session_id)
+    if not session:
+        raise _ApiError("Session not found or expired. Reconnect.", 401)
+
+    import asyncio as _asyncio
+    async def _list():
+        entries = []
+        async for entry in session.sftp.scandir(path):
+            attrs = entry.attributes
+            # Cross-platform directory detection: check POSIX S_IFDIR bit first,
+            # fall back to the entry type field if available (some SFTP servers
+            # only set type, not permissions).
+            is_dir = False
+            if hasattr(attrs, 'permissions') and attrs.permissions:
+                is_dir = bool(attrs.permissions & 0o40000)
+            elif hasattr(attrs, 'type'):
+                is_dir = attrs.type == 2  # SFTPv5+ DT_DIR = 2
+            entries.append({
+                "name": entry.filename,
+                "size": attrs.size if hasattr(attrs, 'size') else 0,
+                "type": "dir" if is_dir else "file",
+                "modified": attrs.mtime if hasattr(attrs, 'mtime') and attrs.mtime else 0,
+            })
+        entries.sort(key=lambda e: (0 if e["type"] == "dir" else 1, e["name"].lower()))
+        return {"path": path, "entries": entries}
+
+    try:
+        return _asyncio.run(_list())
+    except asyncssh.SFTPNoSuchFile:
+        raise _ApiError("Path not found", 404)
+    except asyncssh.SFTPPermissionError:
+        raise _ApiError("Permission denied", 403)
+    except asyncssh.Error as e:
+        raise _ApiError(f"SFTP error: {e}", 500)
+
+
+def _h_sftp_read(req: "_Handler", _groups: tuple) -> dict:
+    """POST /api/sftp/read — Read a remote file as base64 via SFTP.
+
+    Body: {session_id, path}
+    """
+    _require_unlocked()
+    body = req._json()
+    if not isinstance(body, dict):
+        raise _ApiError("Invalid JSON body", 400)
+    session_id = str(body.get("session_id", "")).strip()
+    path = str(body.get("path", "")).strip()
+    if not session_id or not path:
+        raise _ApiError("session_id and path are required", 400)
+
+    from wireseal.sftp.bridge import get_manager as _sftp_mgr
+    session = _sftp_mgr().get(session_id)
+    if not session:
+        raise _ApiError("Session not found or expired. Reconnect.", 401)
+
+    import asyncio as _asyncio
+    import asyncssh as _asyncssh
+    import base64 as _b64
+    MAX_READ = 10 * 1024 * 1024
+
+    async def _read():
+        stat = await session.sftp.stat(path)
+        size = stat.size if hasattr(stat, 'size') else 0
+        if size > MAX_READ:
+            raise _ApiError("File too large (max 10 MB)", 413)
+        data = await session.sftp.readbytes(path)
+        import mimetypes as _mime
+        mime, _ = _mime.guess_type(path)
+        return {"path": path, "content_b64": _b64.b64encode(data).decode(), "size": size, "mime": mime or "application/octet-stream"}
+
+    try:
+        return _asyncio.run(_read())
+    except _asyncssh.SFTPNoSuchFile:
+        raise _ApiError("File not found", 404)
+    except _asyncssh.SFTPPermissionError:
+        raise _ApiError("Permission denied", 403)
+    except _asyncssh.Error as e:
+        raise _ApiError(f"SFTP error: {e}", 500)
+
+
+def _h_sftp_write(req: "_Handler", _groups: tuple) -> dict:
+    """POST /api/sftp/write — Write content to a remote file via SFTP.
+
+    Body: {session_id, path, content_b64}
+    Requires admin or owner role.
+    """
+    _require_unlocked()
+    _require_admin_role()
+    body = req._json()
+    if not isinstance(body, dict):
+        raise _ApiError("Invalid JSON body", 400)
+    session_id = str(body.get("session_id", "")).strip()
+    path = str(body.get("path", "")).strip()
+    content_b64 = str(body.get("content_b64", "")).strip()
+    if not session_id or not path or not content_b64:
+        raise _ApiError("session_id, path, and content_b64 are required", 400)
+
+    from wireseal.sftp.bridge import get_manager as _sftp_mgr
+    session = _sftp_mgr().get(session_id)
+    if not session:
+        raise _ApiError("Session not found or expired. Reconnect.", 401)
+
+    import asyncio as _asyncio
+    import asyncssh as _asyncssh
+    import base64 as _b64
+    from wireseal.security.audit import AuditLog
+
+    MAX_WRITE = 50 * 1024 * 1024
+    try:
+        data = _b64.b64decode(content_b64)
+    except Exception:
+        raise _ApiError("Invalid base64 content", 400)
+    if len(data) > MAX_WRITE:
+        raise _ApiError("File too large (max 50 MB)", 413)
+
+    async def _write():
+        await session.sftp.writebytes(path, data)
+        with _lock:
+            _actor = _session.get("admin_id", "unknown")
+        AuditLog(_AUDIT_PATH).log("sftp-write", {"path": path, "size": len(data), "host": session.host},
+                                  actor=_actor)
+        return {"ok": True, "path": path, "size": len(data)}
+
+    try:
+        return _asyncio.run(_write())
+    except _asyncssh.SFTPPermissionError:
+        raise _ApiError("Permission denied", 403)
+    except _asyncssh.Error as e:
+        raise _ApiError(f"SFTP error: {e}", 500)
+
+
+def _h_sftp_delete(req: "_Handler", _groups: tuple) -> dict:
+    """POST /api/sftp/delete — Delete a remote file or directory via SFTP.
+
+    Body: {session_id, path}
+    Requires admin or owner role.
+    """
+    _require_unlocked()
+    _require_admin_role()
+    body = req._json()
+    if not isinstance(body, dict):
+        raise _ApiError("Invalid JSON body", 400)
+    session_id = str(body.get("session_id", "")).strip()
+    path = str(body.get("path", "")).strip()
+    if not session_id or not path:
+        raise _ApiError("session_id and path are required", 400)
+
+    from wireseal.sftp.bridge import get_manager as _sftp_mgr
+    session = _sftp_mgr().get(session_id)
+    if not session:
+        raise _ApiError("Session not found or expired. Reconnect.", 401)
+
+    import asyncio as _asyncio
+    import asyncssh as _asyncssh
+
+    async def _delete():
+        from wireseal.security.audit import AuditLog
+        try:
+            await session.sftp.rmdir(path)
+        except _asyncssh.SFTPFailure:
+            await session.sftp.remove(path)
+        with _lock:
+            _actor = _session.get("admin_id", "unknown")
+        AuditLog(_AUDIT_PATH).log("sftp-delete", {"path": path, "host": session.host}, actor=_actor)
+        return {"ok": True, "path": path}
+
+    try:
+        return _asyncio.run(_delete())
+    except _asyncssh.SFTPNoSuchFile:
+        raise _ApiError("Path not found", 404)
+    except _asyncssh.SFTPPermissionError:
+        raise _ApiError("Permission denied", 403)
+    except _asyncssh.Error as e:
+        raise _ApiError(f"SFTP error: {e}", 500)
+
+
+def _h_sftp_rename(req: "_Handler", _groups: tuple) -> dict:
+    """POST /api/sftp/rename — Rename or move a remote file/directory.
+
+    Body: {session_id, path, new_path}
+    Requires admin or owner role.
+    """
+    _require_unlocked()
+    _require_admin_role()
+    body = req._json()
+    if not isinstance(body, dict):
+        raise _ApiError("Invalid JSON body", 400)
+    session_id = str(body.get("session_id", "")).strip()
+    path = str(body.get("path", "")).strip()
+    new_path = str(body.get("new_path", "")).strip()
+    if not session_id or not path or not new_path:
+        raise _ApiError("session_id, path, and new_path are required", 400)
+
+    from wireseal.sftp.bridge import get_manager as _sftp_mgr
+    session = _sftp_mgr().get(session_id)
+    if not session:
+        raise _ApiError("Session not found or expired. Reconnect.", 401)
+
+    import asyncio as _asyncio
+    import asyncssh as _asyncssh
+
+    async def _rename():
+        await session.sftp.rename(path, new_path)
+        with _lock:
+            _actor = _session.get("admin_id", "unknown")
+        from wireseal.security.audit import AuditLog
+        AuditLog(_AUDIT_PATH).log("sftp-rename", {"from": path, "to": new_path, "host": session.host},
+                                  actor=_actor)
+        return {"ok": True, "path": path, "new_path": new_path}
+
+    try:
+        return _asyncio.run(_rename())
+    except _asyncssh.SFTPNoSuchFile:
+        raise _ApiError("Path not found", 404)
+    except _asyncssh.SFTPPermissionError:
+        raise _ApiError("Permission denied", 403)
+    except _asyncssh.SFTPFailure as e:
+        raise _ApiError(f"Rename failed: {e}", 500)
+
+
+def _h_sftp_copy(req: "_Handler", _groups: tuple) -> dict:
+    """POST /api/sftp/copy — Copy a remote file to a new path.
+
+    Body: {session_id, path, new_path}
+    Reads the source file and writes it to the destination path.
+    Requires admin or owner role.
+    """
+    _require_unlocked()
+    _require_admin_role()
+    body = req._json()
+    if not isinstance(body, dict):
+        raise _ApiError("Invalid JSON body", 400)
+    session_id = str(body.get("session_id", "")).strip()
+    path = str(body.get("path", "")).strip()
+    new_path = str(body.get("new_path", "")).strip()
+    if not session_id or not path or not new_path:
+        raise _ApiError("session_id, path, and new_path are required", 400)
+
+    from wireseal.sftp.bridge import get_manager as _sftp_mgr
+    session = _sftp_mgr().get(session_id)
+    if not session:
+        raise _ApiError("Session not found or expired. Reconnect.", 401)
+
+    import asyncio as _asyncio
+    import asyncssh as _asyncssh
+
+    async def _copy():
+        data = await session.sftp.readbytes(path)
+        await session.sftp.writebytes(new_path, data)
+        with _lock:
+            _actor = _session.get("admin_id", "unknown")
+        from wireseal.security.audit import AuditLog
+        AuditLog(_AUDIT_PATH).log("sftp-copy", {"from": path, "to": new_path, "host": session.host},
+                                  actor=_actor)
+        return {"ok": True, "path": path, "new_path": new_path}
+
+    try:
+        return _asyncio.run(_copy())
+    except _asyncssh.SFTPNoSuchFile:
+        raise _ApiError("Source not found", 404)
+    except _asyncssh.SFTPPermissionError:
+        raise _ApiError("Permission denied", 403)
+    except _asyncssh.Error as e:
+        raise _ApiError(f"Copy failed: {e}", 500)
+
+
+def _h_sftp_mkdir(req: "_Handler", _groups: tuple) -> dict:
+    """POST /api/sftp/mkdir — Create a remote directory via SFTP.
+
+    Body: {session_id, path}
+    Requires admin or owner role.
+    """
+    _require_unlocked()
+    _require_admin_role()
+    body = req._json()
+    if not isinstance(body, dict):
+        raise _ApiError("Invalid JSON body", 400)
+    session_id = str(body.get("session_id", "")).strip()
+    path = str(body.get("path", "")).strip()
+    if not session_id or not path:
+        raise _ApiError("session_id and path are required", 400)
+
+    from wireseal.sftp.bridge import get_manager as _sftp_mgr
+    session = _sftp_mgr().get(session_id)
+    if not session:
+        raise _ApiError("Session not found or expired. Reconnect.", 401)
+
+    import asyncio as _asyncio
+    import asyncssh as _asyncssh
+
+    async def _mkdir():
+        await session.sftp.mkdir(path, parents=True)
+        with _lock:
+            _actor = _session.get("admin_id", "unknown")
+        from wireseal.security.audit import AuditLog
+        AuditLog(_AUDIT_PATH).log("sftp-mkdir", {"path": path, "host": session.host}, actor=_actor)
+        return {"ok": True, "path": path}
+
+    try:
+        return _asyncio.run(_mkdir())
+    except _asyncssh.SFTPPermissionError:
+        raise _ApiError("Permission denied", 403)
+    except _asyncssh.Error as e:
+        raise _ApiError(f"SFTP error: {e}", 500)
+
+
 def _h_ssh_accept_host_key(req: "_Handler", _groups: tuple) -> dict:
     """POST /api/ssh/accept-host-key — Trust a new SSH host key (TOFU).
 
@@ -6703,6 +7095,16 @@ _ROUTES: list[tuple[str, re.Pattern, Any]] = [
     ("POST",   re.compile(r"^/api/ssh/token$"),                         _h_ssh_token),
     ("POST",   re.compile(r"^/api/ssh/accept-host-key$"),               _h_ssh_accept_host_key),
     ("GET",    re.compile(r"^/api/ssh/sessions$"),                      _h_ssh_sessions),
+    # SFTP file browser
+    ("POST",   re.compile(r"^/api/sftp/connect$"),                        _h_sftp_connect),
+    ("POST",   re.compile(r"^/api/sftp/disconnect$"),                     _h_sftp_disconnect),
+    ("POST",   re.compile(r"^/api/sftp/list$"),                           _h_sftp_list),
+    ("POST",   re.compile(r"^/api/sftp/read$"),                           _h_sftp_read),
+    ("POST",   re.compile(r"^/api/sftp/write$"),                          _h_sftp_write),
+    ("POST",   re.compile(r"^/api/sftp/delete$"),                         _h_sftp_delete),
+    ("POST",   re.compile(r"^/api/sftp/mkdir$"),                          _h_sftp_mkdir),
+    ("POST",   re.compile(r"^/api/sftp/rename$"),                         _h_sftp_rename),
+    ("POST",   re.compile(r"^/api/sftp/copy$"),                           _h_sftp_copy),
 ]
 
 # ---------------------------------------------------------------------------

@@ -133,6 +133,19 @@ export interface FileActivityEvent {
   details: Record<string, string>;
 }
 
+export interface SftpEntry {
+  name: string;
+  size: number;
+  type: "file" | "dir";
+  modified: number;
+}
+
+export interface SftpListResponse { path: string; entries: SftpEntry[]; }
+export interface SftpReadResponse { path: string; content_b64: string; size: number; mime: string; }
+export interface SftpWriteResponse { ok: boolean; path: string; size: number; }
+export interface SftpDeleteResponse { ok: boolean; path: string; }
+export interface SftpMkdirResponse { ok: boolean; path: string; }
+
 export interface SecurityCheck {
   name: string;
   ok: boolean;
@@ -585,7 +598,7 @@ export const api = {
 
   // ── TOTP two-factor authentication ──────────────────────────────────────
   totpEnrollBegin: (confirmPassphrase: string, adminId?: string) =>
-    _fetch<{ otpauth_uri: string; secret_b32: string; qr_svg?: string }>(
+    _fetch<{ otpauth_uri: string; secret_b32: string; qr_b64?: string; qr_format?: string }>(
       "POST", "/totp/enroll/begin", { confirm_passphrase: confirmPassphrase, ...(adminId ? { admin_id: adminId } : {}) }
     ),
 
@@ -662,6 +675,34 @@ export const api = {
 
   sshSessions: () =>
     _fetch<{ sessions: SshSessionInfo[] }>("GET", "/ssh/sessions"),
+
+  // ── SFTP file browser ──────────────────────────────────────────────────
+  sftpConnect: (host: string, port: number, username: string, password: string) =>
+    _fetch<{ session_id: string; host: string; port: number; username: string }>("POST", "/sftp/connect", { host, port, username, password }),
+
+  sftpDisconnect: (sessionId: string) =>
+    _fetch<{ ok: boolean }>("POST", "/sftp/disconnect", { session_id: sessionId }),
+
+  sftpList: (sessionId: string, path: string) =>
+    _fetch<SftpListResponse>("POST", "/sftp/list", { session_id: sessionId, path }),
+
+  sftpRead: (sessionId: string, path: string) =>
+    _fetch<SftpReadResponse>("POST", "/sftp/read", { session_id: sessionId, path }),
+
+  sftpWrite: (sessionId: string, path: string, contentB64: string) =>
+    _fetch<SftpWriteResponse>("POST", "/sftp/write", { session_id: sessionId, path, content_b64: contentB64 }),
+
+  sftpDelete: (sessionId: string, path: string) =>
+    _fetch<SftpDeleteResponse>("POST", "/sftp/delete", { session_id: sessionId, path }),
+
+  sftpMkdir: (sessionId: string, path: string) =>
+    _fetch<SftpMkdirResponse>("POST", "/sftp/mkdir", { session_id: sessionId, path }),
+
+  sftpRename: (sessionId: string, path: string, newPath: string) =>
+    _fetch<{ ok: boolean; path: string; new_path: string }>("POST", "/sftp/rename", { session_id: sessionId, path, new_path: newPath }),
+
+  sftpCopy: (sessionId: string, path: string, newPath: string) =>
+    _fetch<{ ok: boolean; path: string; new_path: string }>("POST", "/sftp/copy", { session_id: sessionId, path, new_path: newPath }),
 
   // ── Client settings ─────────────────────────────────────────────────────────
   clientSettingsGet: () =>

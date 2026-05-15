@@ -13,6 +13,7 @@ import { Backup } from "./pages/Backup";
 import { TwoFactor } from "./pages/TwoFactor";
 import { Connect } from "./pages/client/Connect";
 import { Terminal } from "./pages/client/Terminal";
+import { Sftp } from "./pages/client/Sftp";
 import { ClientSettings } from "./pages/client/ClientSettings";
 
 export const router = createBrowserRouter([
@@ -34,6 +35,7 @@ export const router = createBrowserRouter([
       // Client mode routes
       { path: "client", Component: Connect },
       { path: "client/terminal", Component: Terminal },
+      { path: "client/sftp", Component: Sftp },
       { path: "client/settings", Component: ClientSettings },
       // Shared routes
       { path: "about", Component: About },
