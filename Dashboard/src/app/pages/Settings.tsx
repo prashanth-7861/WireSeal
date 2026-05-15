@@ -12,7 +12,6 @@ import {
   Trash2,
   Copy,
   X,
-  Cpu,
 } from "lucide-react";
 import { api } from "../api";
 
@@ -74,12 +73,6 @@ export function Settings() {
   const [showEndpointDialog, setShowEndpointDialog] = useState(false);
   const [endpoint, setEndpoint] = useState("");
   const [endpointLoading, setEndpointLoading] = useState(false);
-
-  // Background service
-  const [svcStatus, setSvcStatus] = useState<{
-    installed: boolean; running: boolean; enabled: boolean;
-  } | null>(null);
-  const [svcLoading, setSvcLoading] = useState(false);
 
   // Port change
   const [showPortDialog, setShowPortDialog] = useState(false);
@@ -265,80 +258,6 @@ export function Settings() {
     }
   };
 
-  // ── Background-service handlers ─────────────────────────────────────────
-  // Each call refreshes svcStatus from the backend so the UI reflects the
-  // OS service-manager's truth (systemd / launchd / Task Scheduler).
-  const refreshSvcStatus = async () => {
-    try {
-      const s = await api.serviceStatus();
-      setSvcStatus({ installed: s.installed, running: s.running, enabled: s.enabled });
-    } catch {
-      setSvcStatus(null);
-    }
-  };
-
-  useEffect(() => {
-    refreshSvcStatus();
-    // Re-poll once a minute so external state changes (sysadmin runs
-    // `systemctl stop wireseal-api` directly) eventually surface in the UI.
-    const t = setInterval(refreshSvcStatus, 60_000);
-    return () => clearInterval(t);
-  }, []);
-
-  const handleSvcInstall = async () => {
-    setSvcLoading(true);
-    try {
-      const s = await api.serviceInstall({ autostart: true });
-      setSvcStatus({ installed: s.installed, running: s.running, enabled: s.enabled });
-      flash("Service installed. Click Start to launch it now.");
-    } catch (e: unknown) {
-      flashError(e instanceof Error ? e.message : "Service install failed");
-    } finally {
-      setSvcLoading(false);
-    }
-  };
-
-  const handleSvcUninstall = async () => {
-    if (!confirm("Uninstall the WireSeal background service? Dashboard will only run when launched manually.")) return;
-    setSvcLoading(true);
-    try {
-      await api.serviceUninstall();
-      await refreshSvcStatus();
-      flash("Service uninstalled.");
-    } catch (e: unknown) {
-      flashError(e instanceof Error ? e.message : "Service uninstall failed");
-    } finally {
-      setSvcLoading(false);
-    }
-  };
-
-  const handleSvcStart = async () => {
-    setSvcLoading(true);
-    try {
-      const s = await api.serviceStart();
-      setSvcStatus({ installed: s.installed, running: s.running, enabled: s.enabled });
-      flash("Service started.");
-    } catch (e: unknown) {
-      flashError(e instanceof Error ? e.message : "Service start failed");
-    } finally {
-      setSvcLoading(false);
-    }
-  };
-
-  const handleSvcStop = async () => {
-    if (!confirm("Stop the background service? The dashboard will keep running until you close it.")) return;
-    setSvcLoading(true);
-    try {
-      const s = await api.serviceStop();
-      setSvcStatus({ installed: s.installed, running: s.running, enabled: s.enabled });
-      flash("Service stopped.");
-    } catch (e: unknown) {
-      flashError(e instanceof Error ? e.message : "Service stop failed");
-    } finally {
-      setSvcLoading(false);
-    }
-  };
-
   const handleTerminate = async () => {
     if (!confirm("Stop the WireGuard interface (wg-quick down)? Clients will disconnect.")) return;
     setTerminateLoading(true);
@@ -450,117 +369,6 @@ export function Settings() {
               <Globe className="w-4 h-4" />
               Change Port
             </button>
-          </div>
-        </div>
-      </div>
-
-      {/* Background Service */}
-      <div className="bg-white rounded-lg shadow-sm border border-gray-200 mb-6">
-        <div className="p-6 border-b border-gray-200">
-          <div className="flex items-center gap-3">
-            <Cpu className="w-6 h-6 text-gray-700" />
-            <h2 className="text-xl font-semibold text-gray-900">Background Service</h2>
-          </div>
-          <p className="text-xs text-gray-500 mt-1.5">
-            Run WireSeal as an OS-managed service that survives terminal close and starts at boot.
-            Linux <code>systemd</code> · macOS <code>launchd</code> · Windows Task Scheduler.
-          </p>
-        </div>
-
-        <div className="p-6 space-y-4">
-          {/* Status row — three indicators. */}
-          <div className="grid grid-cols-3 gap-3">
-            {([
-              ["installed", "Registered", "Service is registered with the OS service manager"],
-              ["enabled",   "Auto-start", "Will start at boot / system login"],
-              ["running",   "Running",    "Service is currently running in the background"],
-            ] as const).map(([k, label, hint]) => (
-              <div
-                key={k}
-                className="border border-gray-200 rounded-lg p-3"
-                title={hint}
-              >
-                <div className="flex items-center gap-2">
-                  <span
-                    className={`w-2.5 h-2.5 rounded-full ${
-                      svcStatus && svcStatus[k] ? "bg-green-500" : "bg-gray-300"
-                    }`}
-                  />
-                  <span className="text-xs font-medium text-gray-700">{label}</span>
-                </div>
-                <p className="text-sm font-semibold text-gray-900 mt-1">
-                  {svcStatus
-                    ? svcStatus[k]
-                      ? "Yes"
-                      : "No"
-                    : "—"}
-                </p>
-              </div>
-            ))}
-          </div>
-
-          {/* Action buttons — install/uninstall + start/stop. */}
-          <div className="flex flex-wrap gap-2">
-            {!svcStatus?.installed ? (
-              <button
-                onClick={handleSvcInstall}
-                disabled={svcLoading}
-                className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors flex items-center gap-2 disabled:opacity-60"
-              >
-                <Cpu className="w-4 h-4" />
-                {svcLoading ? "Installing..." : "Install Service"}
-              </button>
-            ) : (
-              <>
-                {svcStatus.running ? (
-                  <button
-                    onClick={handleSvcStop}
-                    disabled={svcLoading}
-                    className="px-4 py-2 bg-yellow-600 text-white rounded-lg hover:bg-yellow-700 transition-colors flex items-center gap-2 disabled:opacity-60"
-                  >
-                    <PowerOff className="w-4 h-4" />
-                    {svcLoading ? "Stopping..." : "Stop"}
-                  </button>
-                ) : (
-                  <button
-                    onClick={handleSvcStart}
-                    disabled={svcLoading}
-                    className="px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 transition-colors flex items-center gap-2 disabled:opacity-60"
-                  >
-                    <CheckCircle className="w-4 h-4" />
-                    {svcLoading ? "Starting..." : "Start"}
-                  </button>
-                )}
-                <button
-                  onClick={handleSvcUninstall}
-                  disabled={svcLoading}
-                  className="px-4 py-2 border border-red-300 text-red-700 rounded-lg hover:bg-red-50 transition-colors flex items-center gap-2 disabled:opacity-60"
-                >
-                  <Trash2 className="w-4 h-4" />
-                  Uninstall
-                </button>
-              </>
-            )}
-            <button
-              onClick={refreshSvcStatus}
-              disabled={svcLoading}
-              className="px-4 py-2 border border-gray-300 rounded-lg hover:bg-gray-50 transition-colors text-gray-700 disabled:opacity-60"
-            >
-              Refresh
-            </button>
-          </div>
-
-          <div className="bg-blue-50 border border-blue-200 rounded-lg p-3 text-xs text-blue-900">
-            <p className="font-medium mb-1">Where this lives on disk:</p>
-            <ul className="list-disc list-inside space-y-0.5 font-mono">
-              <li>Linux: <code>/etc/systemd/system/wireseal.service</code></li>
-              <li>macOS: <code>/Library/LaunchDaemons/com.wireseal.api.plist</code></li>
-              <li>Windows: Task Scheduler task <code>WireSeal-API</code> (run as SYSTEM)</li>
-            </ul>
-            <p className="font-medium mt-2 mb-1">Manual control (Linux):</p>
-            <pre className="text-[11px]">{`sudo systemctl start  wireseal
-sudo systemctl stop   wireseal
-sudo systemctl status wireseal`}</pre>
           </div>
         </div>
       </div>
