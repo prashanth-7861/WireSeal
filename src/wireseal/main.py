@@ -2432,47 +2432,90 @@ def change_admin_passphrase(admin_id: str) -> None:
 @cli.command("totp-enroll")
 @click.argument("admin_id")
 def totp_enroll(admin_id: str) -> None:
-    """Print the TOTP enrollment URI for ADMIN_ID (open with an authenticator app).
+    """Enroll TOTP 2FA for ADMIN_ID — full flow: confirm → scan → verify → backup codes.
 
-    The vault must already be unlocked (run ``wireseal serve`` first, then
-    authenticate via the dashboard — or unlock via the API).  This CLI
-    command only shows the URI; enrollment must be confirmed via the API
-    (POST /api/totp/enroll/confirm) with the 6-digit code.
+    Prompts for vault passphrase, generates a TOTP secret, prints the QR URI
+    and manual entry secret, then prompts for a 6-digit verification code.
+    On success, stores the secret + backup codes in the vault.
     """
-    owner_pass = click.prompt("Owner passphrase", hide_input=True)
+    passphrase = click.prompt("Vault passphrase", hide_input=True)
 
     from wireseal.security.vault import Vault
     from wireseal.security.secret_types import SecretBytes
     from wireseal.security.secrets_wipe import wipe_string
-    from wireseal.security.totp import generate_totp_secret, totp_uri, secret_to_b32
+    from wireseal.security.totp import (
+        generate_totp_secret, totp_uri, secret_to_b32, b32_to_secret,
+        verify_totp, generate_backup_codes, hash_backup_code,
+    )
 
-    vault      = Vault(DEFAULT_VAULT_PATH)
-    owner_bytes = bytearray(owner_pass.encode())
+    vault = Vault(DEFAULT_VAULT_PATH)
+    pass_bytes = bytearray(passphrase.encode())
     try:
-        with vault.open(SecretBytes(bytearray(owner_bytes)), admin_id="owner") as state:
+        with vault.open(SecretBytes(bytearray(pass_bytes))) as state:
             admins = state.data.get("admins", {})
             if admin_id not in admins:
-                click.echo(f"Error: admin '{admin_id}' not found in vault.", err=True)
+                click.echo(f"Error: admin '{admin_id}' not found.", err=True)
                 raise SystemExit(1)
+
             secret = generate_totp_secret()
-            uri    = totp_uri(secret, admin_id)
-            b32    = secret_to_b32(secret)
-            click.echo(f"\nTOTP enrollment URI for {admin_id!r}:")
-            click.echo(f"  {uri}")
-            click.echo(f"\nManual entry secret: {b32}")
-            click.echo(
-                "\nScan the URI with an authenticator app (Google Authenticator, "
-                "Aegis, etc.), then confirm enrollment via POST /api/totp/enroll/confirm."
+            uri = totp_uri(secret, admin_id)
+            b32 = secret_to_b32(secret)
+
+            click.echo(f"\n{'=' * 60}")
+            click.echo(f"  TOTP Enrollment for {admin_id!r}")
+            click.echo(f"{'=' * 60}")
+            click.echo(f"\n  Scan this URI with your authenticator app:\n")
+            click.echo(f"    {uri}")
+            click.echo(f"\n  Manual entry secret:\n")
+            click.echo(f"    {b32}")
+            click.echo(f"\n  (Scan using Google Authenticator, Duo Mobile, Aegis, etc.)")
+
+            # Prompt for TOTP verification code
+            code = click.prompt("\nEnter the 6-digit code from your authenticator app",
+                                hide_input=False)
+            if not code.isdigit() or len(code) != 6:
+                click.echo("Error: code must be 6 digits.", err=True)
+                raise SystemExit(1)
+
+            if not verify_totp(secret, code):
+                click.echo("Error: invalid code. Check your authenticator app and try again.", err=True)
+                raise SystemExit(1)
+
+            # Store TOTP secret in vault
+            admins[admin_id]["totp_secret_b32"] = b32
+            from datetime import datetime as _dt, timezone as _tz
+            admins[admin_id]["totp_enrolled_at"] = _dt.now(_tz.utc).isoformat()
+
+            # Generate and store backup codes
+            backup_codes = generate_backup_codes()
+            admins[admin_id]["backup_codes"] = [hash_backup_code(c) for c in backup_codes]
+            vault.save(state, SecretBytes(bytearray(pass_bytes)))
+
+            click.echo(f"\n{'=' * 60}")
+            click.echo(f"  SUCCESS: TOTP enrolled for {admin_id!r}")
+            click.echo(f"{'=' * 60}")
+            click.echo(f"\n  Save these 8 backup codes in a secure location.\n")
+            click.echo(f"  Each code can only be used ONCE to unlock your vault\n")
+            click.echo(f"  if you lose access to your authenticator app.\n")
+            for i, code in enumerate(backup_codes, 1):
+                click.echo(f"    {i:2}. {code}")
+            click.echo(f"\n  {'!' * 50}")
+            click.echo(f"  These codes will NOT be shown again!")
+            click.echo(f"  {'!' * 50}")
+
+            from wireseal.security.audit import AuditLog
+            AuditLog(DEFAULT_AUDIT_LOG_PATH).log(
+                "totp-enrolled", {"admin_id": admin_id}, actor=admin_id
             )
-            click.echo("(Secret NOT committed to vault until confirmed via the API.)")
+
     except SystemExit:
         raise
     except Exception as exc:
         click.echo(f"Error: {exc}", err=True)
         raise SystemExit(1)
     finally:
-        owner_bytes[:] = b"\x00" * len(owner_bytes)
-        wipe_string(owner_pass)
+        pass_bytes[:] = b"\x00" * len(pass_bytes)
+        wipe_string(passphrase)
 
 
 @cli.command("totp-disable")
@@ -2512,6 +2555,94 @@ def totp_disable(admin_id: str) -> None:
     finally:
         owner_bytes[:] = b"\x00" * len(owner_bytes)
         wipe_string(owner_pass)
+
+
+@cli.command("totp-status")
+def totp_status() -> None:
+    """Show TOTP enrollment status for all admins."""
+    passphrase = click.prompt("Vault passphrase", hide_input=True)
+
+    from wireseal.security.vault import Vault
+    from wireseal.security.secret_types import SecretBytes
+    from wireseal.security.secrets_wipe import wipe_string
+
+    vault = Vault(DEFAULT_VAULT_PATH)
+    pass_bytes = bytearray(passphrase.encode())
+    try:
+        with vault.open(SecretBytes(bytearray(pass_bytes))) as state:
+            admins = state.data.get("admins", {})
+            if not admins:
+                click.echo("No admins found in vault.")
+                return
+            click.echo(f"\n{'Admin ID':<20} {'TOTP':<8} {'Backup Codes':<14} {'Enrolled At'}")
+            click.echo("-" * 70)
+            for aid, info in sorted(admins.items()):
+                totp = "✅" if info.get("totp_secret_b32") else "❌"
+                bc = len(info.get("backup_codes", []))
+                bc_label = f"{bc} codes" if bc else "—"
+                enrolled = info.get("totp_enrolled_at", "—") or "—"
+                if len(enrolled) > 19:
+                    enrolled = enrolled[:19]
+                click.echo(f"{aid:<20} {totp:<8} {bc_label:<14} {enrolled}")
+    except Exception as exc:
+        click.echo(f"Error: {exc}", err=True)
+        raise SystemExit(1)
+    finally:
+        pass_bytes[:] = b"\x00" * len(pass_bytes)
+        wipe_string(passphrase)
+
+
+@cli.command("totp-backup-codes")
+@click.argument("admin_id")
+def totp_backup_codes(admin_id: str) -> None:
+    """Generate and display new backup codes for ADMIN_ID.
+
+    Replaces existing backup codes with fresh ones. The old codes are invalidated.
+    Requires TOTP to already be enrolled for this admin.
+    """
+    passphrase = click.prompt("Vault passphrase", hide_input=True)
+
+    from wireseal.security.vault import Vault
+    from wireseal.security.secret_types import SecretBytes
+    from wireseal.security.secrets_wipe import wipe_string
+    from wireseal.security.totp import generate_backup_codes, hash_backup_code
+    from wireseal.security.audit import AuditLog
+
+    vault = Vault(DEFAULT_VAULT_PATH)
+    pass_bytes = bytearray(passphrase.encode())
+    try:
+        with vault.open(SecretBytes(bytearray(pass_bytes))) as state:
+            admins = state.data.get("admins", {})
+            if admin_id not in admins:
+                click.echo(f"Error: admin '{admin_id}' not found.", err=True)
+                raise SystemExit(1)
+            if not admins[admin_id].get("totp_secret_b32"):
+                click.echo(f"Error: TOTP is not enrolled for '{admin_id}'.", err=True)
+                raise SystemExit(1)
+
+            codes = generate_backup_codes()
+            admins[admin_id]["backup_codes"] = [hash_backup_code(c) for c in codes]
+            vault.save(state, SecretBytes(bytearray(pass_bytes)))
+
+            click.echo(f"\nNew backup codes for {admin_id!r}:")
+            click.echo("  (Old codes are now invalidated)")
+            click.echo("")
+            for i, c in enumerate(codes, 1):
+                click.echo(f"  {i:2}. {c}")
+            click.echo("")
+            click.echo("  These codes will NOT be shown again. Save them securely.")
+
+            AuditLog(DEFAULT_AUDIT_LOG_PATH).log(
+                "totp-backup-codes-regenerated", {"admin_id": admin_id}, actor=admin_id
+            )
+    except SystemExit:
+        raise
+    except Exception as exc:
+        click.echo(f"Error: {exc}", err=True)
+        raise SystemExit(1)
+    finally:
+        pass_bytes[:] = b"\x00" * len(pass_bytes)
+        wipe_string(passphrase)
 
 
 # ---------------------------------------------------------------------------
