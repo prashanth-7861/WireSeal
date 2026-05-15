@@ -212,8 +212,9 @@ def init(subnet: str, port: int, endpoint: str | None, duckdns_domain: str | Non
             state.integrity["server"] = config_hash
             vault.save(state, passphrase)
 
-        # Step 7: Install WireGuard and start the service
+        # Step 7: Install WireGuard, enable IP forwarding, apply firewall, start service
         adapter.install_wireguard()
+        adapter.enable_ip_forwarding()
         adapter.apply_firewall_rules(port, "wg0", pool.subnet_str)
         # Open port in firewalld and ensure SSH is running (Linux only)
         if hasattr(adapter, "open_firewalld_port"):

@@ -1570,6 +1570,11 @@ def _h_init_locked(req: "_Handler", _groups: tuple = ()) -> dict:
             warnings_list.append("WireGuard install skipped.")
 
         try:
+            adapter.enable_ip_forwarding()
+        except Exception as exc:
+            warnings_list.append("IP forwarding skipped.")
+
+        try:
             adapter.apply_firewall_rules(port, _WG_IFACE, pool.subnet_str)
         except Exception as exc:
             warnings_list.append("Firewall rules skipped.")
@@ -6187,13 +6192,18 @@ def _h_client_tunnel_up(req: "_Handler", groups: tuple) -> dict:
     from wireseal.client.tunnel import apply_dns_override, tunnel_up
     from wireseal.security.audit import AuditLog
 
+    # Load client settings for kill switch + DNS override (inside vault context)
+    ks_enabled = False
+    dns_override = ""
     with vault.open(passphrase) as state:
         try:
-            # wg-quick needs the real PrivateKey to bring the tunnel up.
-            # `get_config_revealed` returns the unredacted text — the only
-            # legitimate reveal sites are tunnel-up, user-confirmed reveal
-            # in the GET endpoint, and QR re-export.
             config = get_config_revealed(state._data, name)
+            try:
+                settings_data = _get_client_settings(state._data if hasattr(state, '_data') else state)
+                ks_enabled = bool(settings_data.get("kill_switch", False))
+                dns_override = settings_data.get("dns_override", "")
+            except Exception:
+                pass
         except KeyError:
             raise _ApiError(f"Profile '{name}' not found", 404)
 
@@ -6206,16 +6216,6 @@ def _h_client_tunnel_up(req: "_Handler", groups: tuple) -> dict:
             {"name": name, "via": "tunnel-up"},
             actor=_session.get("admin_id", "owner"),
         )
-    except Exception:
-        pass
-
-    # Load client settings for kill switch + DNS override
-    ks_enabled = False
-    dns_override = ""
-    try:
-        settings = _get_client_settings(_state)
-        ks_enabled = bool(settings.get("kill_switch"))
-        dns_override = settings.get("dns_override", "")
     except Exception:
         pass
 
