@@ -1745,7 +1745,14 @@ def _h_unlock(req: "_Handler", _groups: tuple) -> dict:
             )
 
         _clear_unlock_failures(client_ip)
-        AuditLog(_AUDIT_PATH).log("unlock-web", {"admin_id": admin_id}, actor=admin_id)
+        audit = AuditLog(_AUDIT_PATH)
+        audit.log("unlock-web", {"admin_id": admin_id}, actor=admin_id)
+        # Start a per-session audit log for this unlock session
+        try:
+            _sessions_dir = _VAULT_DIR / "sessions"
+            audit.session_start(_sessions_dir)
+        except Exception:
+            pass  # session log is best-effort
 
         # Server mode: tunnel is NOT auto-started on unlock. The user
         # controls the WireGuard server via Dashboard Start/Stop buttons.
@@ -1797,6 +1804,11 @@ def _h_lock(req: "_Handler", _groups: tuple) -> dict:
         _totp_used_codes.pop(_lock_actor, None)
         _totp_session_verified.pop(_lock_actor, None)
     AuditLog(_AUDIT_PATH).log("lock", {}, actor=_lock_actor)
+    # End the per-session audit log
+    try:
+        AuditLog(_AUDIT_PATH).session_end()
+    except Exception:
+        pass
     return {"ok": True}
 
 

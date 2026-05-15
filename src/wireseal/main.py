@@ -1988,6 +1988,78 @@ def audit_log(lines: int, action: str | None, actor: str | None,
         click.echo(f"\n-- {len(filtered[:lines])} entries shown ({len(filtered)} matched) --")
 
 
+@cli.command("session-logs")
+@click.option("--list", "list_only", is_flag=True, default=False,
+              help="List available session log files")
+@click.option("--view", default=None,
+              help="View a specific session log by filename")
+@click.option("--lines", default=50, type=int,
+              help="Number of entries to show (default: 50)")
+def session_logs(list_only: bool, view: str | None, lines: int) -> None:
+    """List and view per-session audit logs.
+
+    Each vault unlock creates a session log at ~/.wireseal/sessions/.
+    These logs capture all events during that session.
+
+    Examples:
+      wireseal session-logs --list          # list available session logs
+      wireseal session-logs --view session-20260515-143000-abc123.log
+    """
+    from wireseal.security.audit import AuditLog
+    from wireseal.security.vault import DEFAULT_VAULT_DIR
+    import json as _json
+
+    sessions_dir = DEFAULT_VAULT_DIR / "sessions"
+
+    if list_only or not view:
+        logs = AuditLog.list_session_logs(sessions_dir)
+        if not logs:
+            click.echo("No session logs found.")
+            return
+        click.echo(f"\n{'Session Log':<55} {'Size':<10} {'Created'}")
+        click.echo("-" * 85)
+        for log in logs[:30]:
+            size = f"{log['size']} B" if log['size'] < 1024 else f"{log['size']/1024:.1f} KB"
+            click.echo(f"{log['name']:<55} {size:<10} {log['created']}")
+        click.echo(f"\n-- {len(logs)} session log(s) --")
+        return
+
+    # View a specific session log
+    path = sessions_dir / view
+    if not path.exists() or not path.is_file():
+        click.echo(f"Session log not found: {view}", err=True)
+        raise SystemExit(1)
+
+    click.echo(f"\nSession log: {view}")
+    click.echo("-" * 80)
+    count = 0
+    with open(path, encoding="utf-8") as f:
+        for line in f:
+            if count >= lines:
+                click.echo(f"\n-- truncated at {lines} lines --")
+                break
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                entry = _json.loads(line)
+                ts = entry.get("timestamp", "")[:19]
+                event = entry.get("event") or entry.get("action", "")
+                meta = {k: v for k, v in entry.items()
+                        if k not in ("timestamp", "event", "action", "success", "error")}
+                meta_str = "  ".join(f"{k}={v}" for k, v in meta.items()) if meta else ""
+                status = ""
+                if entry.get("success") is False:
+                    status = " [FAILED]"
+                if entry.get("error"):
+                    status += f"  ERROR: {entry['error']}"
+                click.echo(f"{ts}  [{event}{status}]  {meta_str}")
+                count += 1
+            except (_json.JSONDecodeError, KeyError):
+                click.echo(f"  (parse error) {line[:100]}")
+                continue
+
+
 # ===========================================================================
 # backup-vault / restore-vault
 # ===========================================================================

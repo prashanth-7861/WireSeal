@@ -149,16 +149,98 @@ class AuditLog:
         Unix  → 0o640 (rw-r-----)
         Windows → SYSTEM + Administrators ACL via icacls (set_file_permissions
                   routes automatically; the mode argument is ignored on Windows)
-    - get_recent_entries() is the read API consumed by Phase 4's CLI command.
+    - get_recent_entries() is the read API consumed by the CLI/CLI command.
+    - session_start() creates a per-session log file at ``<sessions_dir>/``
+      that captures all log() calls until session_end() is called.
+    - Session logs are named ``session-YYYYMMDD-HHMMSS-<random>.log``.
 
     Args:
         log_path: Absolute path to the audit log file.
     """
 
     _class_lock = threading.Lock()  # Thread safety for concurrent API requests
+    _session_active = False
+    _session_path: Path | None = None
+    _session_file: object = None  # open file handle for the session log
 
     def __init__(self, log_path: Path) -> None:
         self._log_path = log_path
+
+    # ------------------------------------------------------------------
+    # Session log management
+    # ------------------------------------------------------------------
+
+    def session_start(self, sessions_dir: Path) -> str:
+        """Open a per-session audit log file.
+
+        All subsequent ``log()`` calls will also be written to this file
+        until ``session_end()`` is called.
+
+        Args:
+            sessions_dir: Directory where session logs are stored (e.g.
+                          ``~/.wireseal/sessions/``).
+
+        Returns:
+            The session id string (embedded in the filename).
+        """
+        import secrets as _secrets
+        import time as _time
+        ts = _time.strftime("%Y%m%d-%H%M%S", _time.gmtime())
+        sid = _secrets.token_hex(4)  # 8 hex chars
+        sessions_dir.mkdir(parents=True, exist_ok=True)
+        path = sessions_dir / f"session-{ts}-{sid}.log"
+        self._session_path = path
+        self._session_file = open(path, "a", encoding="utf-8")
+        self._session_file.write(
+            f"{{\"event\": \"session-start\", \"session_id\": \"{sid}\", "
+            f"\"timestamp\": \"{_time.strftime('%Y-%m-%dT%H:%M:%S', _time.gmtime())}Z\"}}\n"
+        )
+        self._session_file.flush()
+        self._session_active = True
+        return sid
+
+    def session_end(self) -> None:
+        """Close the per-session audit log file."""
+        if self._session_file:
+            import time as _time
+            try:
+                self._session_file.write(
+                    f"{{\"event\": \"session-end\", "
+                    f"\"timestamp\": \"{_time.strftime('%Y-%m-%dT%H:%M:%S', _time.gmtime())}Z\"}}\n"
+                )
+                self._session_file.flush()
+                self._session_file.close()
+            except Exception:
+                pass
+        self._session_active = False
+        self._session_path = None
+        self._session_file = None
+
+    @classmethod
+    def list_session_logs(cls, sessions_dir: Path) -> list[dict]:
+        """List all session log files with their metadata.
+
+        Returns a list of dicts with keys: name, path, size, created.
+        Sorted newest first.
+        """
+        import time as _time
+        results = []
+        if not sessions_dir.is_dir():
+            return results
+        for f in sorted(sessions_dir.glob("session-*.log"), reverse=True):
+            try:
+                stat = f.stat()
+                results.append({
+                    "name": f.name,
+                    "path": str(f),
+                    "size": stat.st_size,
+                    "created": _time.strftime(
+                        "%Y-%m-%dT%H:%M:%S", _time.localtime(stat.st_mtime)
+                    ),
+                })
+            except OSError:
+                continue
+        return results
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -349,6 +431,13 @@ class AuditLog:
                 is_new = not self._log_path.exists()
                 with open(self._log_path, mode="a", encoding="utf-8", newline="\n", buffering=1) as fh:
                     fh.write(json.dumps(entry.to_dict()) + "\n")
+                # Also write to the per-session log if active
+                if self._session_active and self._session_file:
+                    try:
+                        self._session_file.write(json.dumps(entry.to_dict()) + "\n")
+                        self._session_file.flush()
+                    except Exception:
+                        pass  # session log write failure must never break audit logging
                 if is_new:
                     self._apply_permissions()
             except OSError as exc:
