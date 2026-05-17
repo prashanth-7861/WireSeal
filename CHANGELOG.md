@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.9.2] — 2026-05-17
+
+### Fixed — WireGuard Client Connection Failures
+
+- **Double-port in endpoint (CRITICAL)** — `_resolve_client_endpoint` now detects when a
+  stored endpoint already contains a port (e.g., `host:51820`) and avoids appending the port
+  again. Previously produced invalid `Endpoint = host:51820:51820` in client configs.
+- **Fallback to VPN IP (CRITICAL)** — when no endpoint is configured and no DuckDNS domain
+  is set, the function now attempts to auto-detect the public IP instead of falling back to
+  the internal VPN IP (e.g., `10.0.0.1`) which is unreachable from outside the tunnel.
+- **Endpoint port stripping** — `_validate_endpoint` now strips the port portion before
+  storing, since `_resolve_client_endpoint` always appends the server's listen port from
+  the vault. Prevents double-port at the source.
+
+### Changed
+
+- **IP consensus relaxed to 2-of-4** — `resolve_public_ip()` now requires only 2 of 4
+  sources to agree (was 3-of-4). More resilient on flaky networks while still safe against
+  single-source spoofing.
+
+---
+
 ## [0.9.1] — 2026-05-15
 
 ### Added — SFTP File Browser (client mode)

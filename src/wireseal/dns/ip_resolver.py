@@ -1,6 +1,6 @@
-"""Public IP resolver with 2-of-3 HTTPS consensus.
+"""Public IP resolver with 2-of-4 HTTPS consensus.
 
-Queries 3 independent HTTPS endpoints concurrently and returns the public IPv4
+Queries 4 independent HTTPS endpoints concurrently and returns the public IPv4
 address that at least 2 sources agree on. Fail-closed: if no consensus is
 reached, IPConsensusError is raised and no address is returned.
 
@@ -123,11 +123,11 @@ def resolve_public_ip() -> ipaddress.IPv4Address:
     wall-clock timeout so a hanging source never blocks indefinitely.
 
     Returns:
-        ipaddress.IPv4Address representing the public IP that at least 3
+        ipaddress.IPv4Address representing the public IP that at least 2
         of the 4 sources agreed on.
 
     Raises:
-        IPConsensusError: Fewer than 3 sources returned the same public IPv4.
+        IPConsensusError: Fewer than 2 sources returned the same public IPv4.
             Callers should treat this as a hard abort for any DNS update
             operation (DNS-01 fail-closed guarantee).
     """
@@ -143,9 +143,9 @@ def resolve_public_ip() -> ipaddress.IPv4Address:
     counts = Counter(results)
     if counts:
         winning_ip, winning_count = counts.most_common(1)[0]
-        if winning_count >= 3:
+        if winning_count >= 2:
             return ipaddress.IPv4Address(winning_ip)
 
     raise IPConsensusError(
-        "No 3-of-4 IP consensus achieved. DNS update aborted."
+        "No 2-of-4 IP consensus achieved. DNS update aborted."
     )

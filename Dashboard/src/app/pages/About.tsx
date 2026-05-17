@@ -59,6 +59,43 @@ interface ChangelogEntry {
 
 const CHANGELOG: ChangelogEntry[] = [
   {
+    version: "0.9.2",
+    date: "2026-05-17",
+    highlights: [
+      "Fixed critical WireGuard connection failure: endpoint resolution no longer produces double-port (host:port:port) in client configs",
+      "Fixed fallback to unreachable VPN IP — now auto-detects public IP when no endpoint is configured",
+      "IP consensus relaxed to 2-of-4 for more resilient public IP detection on flaky networks",
+    ],
+  },
+  {
+    version: "0.9.1",
+    date: "2026-05-15",
+    highlights: [
+      "SFTP file browser with full file manager UI — list/grid views, breadcrumb navigation, upload, download, inline editor",
+      "SFTP session manager with persistent SSH connection caching and 15-minute idle timeout",
+      "Audit log page: category filter pills, text search, actor column",
+    ],
+  },
+  {
+    version: "0.9.0",
+    date: "2026-05-12",
+    highlights: [
+      "Critical security audit: fixed Host header CSRF bypass, schtasks injection, nftables mismatch, UAC bypass, PowerShell injection",
+      "Access control with admin/standard/guest levels, TTL expiration, privilege matrix",
+      "Platform hardening: all subprocess calls now have timeouts, atomic writes for system configs",
+      "420 tests passing with comprehensive security and access control coverage",
+    ],
+  },
+  {
+    version: "0.8.0",
+    date: "2026-05-04",
+    highlights: [
+      "Multi-admin vault with role-based access (owner, admin, standard, guest)",
+      "TOTP two-factor authentication with QR enrollment, backup codes, and per-session enforcement",
+      "Ephemeral client keys with configurable TTL and auto-revocation",
+    ],
+  },
+  {
     version: "0.7.8",
     date: "2026-04-15",
     highlights: [

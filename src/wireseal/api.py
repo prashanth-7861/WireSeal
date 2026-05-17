@@ -1181,14 +1181,45 @@ def _detect_mtu() -> int:
 
 
 def _resolve_client_endpoint(server_state: dict) -> str:
-    """Return the endpoint string clients use to reach the server."""
+    """Return the endpoint string clients use to reach the server.
+
+    Priority: DuckDNS domain → stored endpoint → auto-detect public IP.
+    Never falls back to the internal VPN IP (e.g. 10.0.0.1) because it is
+    unreachable from outside the tunnel.
+    """
     port = server_state["port"]
     duckdns_domain = server_state.get("duckdns_domain")
     if duckdns_domain:
         return f"{duckdns_domain}.duckdns.org:{port}"
     stored_endpoint = server_state.get("endpoint")
     if stored_endpoint:
+        # If the stored endpoint already contains a port, use it as-is.
+        # This avoids producing "host:port:port" when the user configured
+        # an endpoint like "myserver.com:51820".
+        if ":" in stored_endpoint and not stored_endpoint.startswith("["):
+            # Could be IPv4:port or hostname:port — check if last segment is numeric
+            last_colon = stored_endpoint.rfind(":")
+            after_colon = stored_endpoint[last_colon + 1:]
+            if after_colon.isdigit():
+                return stored_endpoint
+        elif stored_endpoint.startswith("[") and "]:" in stored_endpoint:
+            # Bracketed IPv6 with port: [::1]:51820
+            return stored_endpoint
         return f"{stored_endpoint}:{port}"
+    # Last resort: try to auto-detect public IP instead of using VPN IP.
+    try:
+        from wireseal.dns.ip_resolver import resolve_public_ip
+        public_ip = str(resolve_public_ip())
+        return f"{public_ip}:{port}"
+    except Exception:
+        pass
+    # Absolute fallback — VPN IP. Log a warning so the admin notices.
+    import logging
+    logging.getLogger("wireseal").warning(
+        "No endpoint configured and public IP detection failed; "
+        "client config will use internal VPN IP %s which is likely unreachable.",
+        server_state["ip"],
+    )
     return f"{server_state['ip']}:{port}"
 
 
@@ -3682,6 +3713,11 @@ def _validate_endpoint(endpoint: str) -> str:
         port = int(m.group("port"))
         if not (1 <= port <= 65535):
             raise _ApiError("Endpoint port must be 1–65535.", 400)
+        # Strip the port — _resolve_client_endpoint appends the server's
+        # listen port from the vault. Storing "host:port" would produce
+        # "host:port:port" in the generated client config.
+        host_part = endpoint[:endpoint.rfind(":" + m.group("port"))]
+        return host_part
     return endpoint
 
 
