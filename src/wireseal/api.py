@@ -779,13 +779,16 @@ def _require_confirmation(body: dict) -> None:
         _check_totp_rate_limit(admin_id)
         from wireseal.security.totp import verify_totp, b32_to_secret
         from wireseal.security.secret_types import SecretBytes
-        if isinstance(totp_b32, str):
-            secret = SecretBytes(bytearray(b32_to_secret(totp_b32)))
+        # SEC-CC-02: totp_secret_b32 is SecretBytes after _wrap_secrets;
+        # unwrap to str, then decode base32 to raw secret bytes.
+        if isinstance(totp_b32, SecretBytes):
+            totp_b32_str = bytes(totp_b32.expose_secret()).decode("utf-8")
         else:
-            secret = totp_b32
+            totp_b32_str = str(totp_b32)
+        secret_raw = b32_to_secret(totp_b32_str)
         with _lock:
             used_set = _totp_used_codes.setdefault(admin_id, set())
-            ok = verify_totp(secret, str(totp_code), used_codes=used_set)
+            ok = verify_totp(secret_raw, str(totp_code), used_codes=used_set)
         if not ok:
             from wireseal.security.audit import AuditLog
             AuditLog(_AUDIT_PATH).log("totp-failed", {"admin_id": admin_id}, actor=admin_id)
@@ -857,14 +860,17 @@ def _require_totp_for_reveal(req: "_Handler") -> None:
         raise _ApiError("totp_code required to reveal client config.", 401)
 
     _check_totp_rate_limit(admin_id)
-    if isinstance(totp_b32, str):
-        from wireseal.security.secret_types import SecretBytes
-        secret = SecretBytes(bytearray(b32_to_secret(totp_b32)))
+    # SEC-CC-02: totp_secret_b32 is SecretBytes after _wrap_secrets;
+    # unwrap to str, then decode base32 to raw secret bytes.
+    from wireseal.security.secret_types import SecretBytes
+    if isinstance(totp_b32, SecretBytes):
+        totp_b32_str = bytes(totp_b32.expose_secret()).decode("utf-8")
     else:
-        secret = totp_b32
+        totp_b32_str = str(totp_b32)
+    secret_raw = b32_to_secret(totp_b32_str)
     with _lock:
         used_set = _totp_used_codes.setdefault(admin_id, set())
-    ok = verify_totp(secret, str(totp_code), used_codes=used_set)
+    ok = verify_totp(secret_raw, str(totp_code), used_codes=used_set)
     if not ok:
         _record_totp_failure(admin_id)
         raise _ApiError("Invalid TOTP code.", 401)
@@ -1743,7 +1749,14 @@ def _h_unlock(req: "_Handler", _groups: tuple) -> dict:
                     if not totp_code:
                         raise _ApiError("totp_code required", 401)
                     _check_totp_rate_limit(admin_id)
-                    totp_secret = b32_to_secret(totp_b32)
+                    # SEC-CC-02: totp_secret_b32 is SecretBytes after _wrap_secrets;
+                    # unwrap to str before passing to b32_to_secret.
+                    from wireseal.security.secret_types import SecretBytes as _SB
+                    if isinstance(totp_b32, _SB):
+                        totp_b32_str = bytes(totp_b32.expose_secret()).decode("utf-8")
+                    else:
+                        totp_b32_str = str(totp_b32)
+                    totp_secret = b32_to_secret(totp_b32_str)
                     totp_str = str(totp_code)
                     # Hold _lock during check+record to make anti-replay atomic.
                     with _lock:

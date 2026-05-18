@@ -14,7 +14,7 @@ VENV_DIR="$REPO_DIR/.venv"
 WRAPPER="/usr/local/bin/wireseal"
 SYSTEMD_UNIT="/etc/systemd/system/wireseal.service"
 DNS_UPDATER_UNIT="/etc/systemd/system/wireseal-dns.service"
-NFTABLES_TABLE="wireseal"
+NFTABLES_DROPIN="/etc/nftables.d/wireseal.conf"
 
 PURGE=0
 ASSUME_YES=0
@@ -47,7 +47,8 @@ if [[ $ASSUME_YES -ne 1 ]]; then
     echo  "  - System wrapper: $WRAPPER"
     echo  "  - Virtualenv:     $VENV_DIR"
     echo  "  - systemd units:  $SYSTEMD_UNIT, $DNS_UPDATER_UNIT (if present)"
-    echo  "  - nftables table: $NFTABLES_TABLE (if present)"
+    echo  "  - nftables:       wg_filter, wg_nat tables + drop-in conf (if present)"
+    echo  "  - firewalld:      wg-internet policy, zones, masquerade (if present)"
     if [[ $PURGE -eq 1 ]]; then
         warn "  - Vault data:     ~/.config/wireseal  (--purge specified)"
     else
@@ -75,10 +76,28 @@ if command -v systemctl &>/dev/null; then
 fi
 
 # ---------------------------------------------------------------------------
-# Drop nftables rules (table wireseal)
+# Drop nftables rules (tables wg_filter + wg_nat) and drop-in conf
 # ---------------------------------------------------------------------------
 if command -v nft &>/dev/null; then
-    nft delete table inet "$NFTABLES_TABLE" 2>/dev/null || true
+    nft delete table inet wg_filter 2>/dev/null || true
+    nft delete table ip wg_nat 2>/dev/null || true
+fi
+if [[ -f "$NFTABLES_DROPIN" ]]; then
+    rm -f "$NFTABLES_DROPIN"
+    info "Removed nftables drop-in: $NFTABLES_DROPIN"
+fi
+
+# ---------------------------------------------------------------------------
+# Remove firewalld rules (if firewalld is active)
+# ---------------------------------------------------------------------------
+if command -v firewall-cmd &>/dev/null && systemctl is-active --quiet firewalld 2>/dev/null; then
+    firewall-cmd --zone=public --remove-port=51820/udp --permanent 2>/dev/null || true
+    firewall-cmd --zone=public --remove-masquerade --permanent 2>/dev/null || true
+    firewall-cmd --zone=public --remove-service=ssh --permanent 2>/dev/null || true
+    firewall-cmd --zone=trusted --remove-interface=wg0 --permanent 2>/dev/null || true
+    firewall-cmd --permanent --delete-policy=wg-internet 2>/dev/null || true
+    firewall-cmd --reload 2>/dev/null || true
+    info "Removed firewalld rules (zones, policy, masquerade)"
 fi
 
 # ---------------------------------------------------------------------------

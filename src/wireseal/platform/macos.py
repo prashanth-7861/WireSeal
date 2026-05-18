@@ -296,7 +296,7 @@ class MacOSAdapter(AbstractPlatformAdapter):
 
         rules = (
             f"# wireseal managed rules -- DO NOT EDIT\n"
-            f"nat on {outbound} from {subnet} to any -> ({outbound})\n"
+            f"nat from {subnet} to any -> ({outbound})\n"
             f"table <wg_bruteforce> persist\n"
             f"block drop in quick on {outbound} from <wg_bruteforce>\n"
             f"pass in quick on {outbound} proto udp from any to any port {wg_port} "
@@ -306,7 +306,7 @@ class MacOSAdapter(AbstractPlatformAdapter):
 
         # Build template with the same values for FW-03 validation
         template = (
-            f"nat on {outbound} from {subnet} to any -> ({outbound})\n"
+            f"nat from {subnet} to any -> ({outbound})\n"
             f"table <wg_bruteforce> persist\n"
             f"block drop in quick on {outbound} from <wg_bruteforce>\n"
             f"pass in quick on {outbound} proto udp from any to any port {wg_port} "

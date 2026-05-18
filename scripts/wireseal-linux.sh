@@ -468,7 +468,8 @@ case "$FIREWALL_SYSTEM" in
         firewall-cmd --permanent --policy=wg-internet --add-ingress-zone=trusted &>/dev/null
         firewall-cmd --permanent --policy=wg-internet --add-egress-zone=public &>/dev/null
         firewall-cmd --permanent --policy=wg-internet --set-target=ACCEPT &>/dev/null
-        ok "Firewalld: wg-internet policy — trusted→public ACCEPT"
+        firewall-cmd --permanent --policy=wg-internet --add-masquerade &>/dev/null
+        ok "Firewalld: wg-internet policy — trusted→public ACCEPT + masquerade"
 
         # ── Reload ──
         firewall-cmd --reload &>/dev/null
@@ -522,7 +523,7 @@ table inet wg_forward {
 table ip wg_nat {
     chain postrouting {
         type nat hook postrouting priority 100; policy accept;
-        iifname "$WG_IFACE" oifname "$PUB_IFACE" masquerade
+        iifname "$WG_IFACE" masquerade
     }
 }
 NFT_RULES
@@ -686,7 +687,7 @@ if $WG_RUNNING && [[ -n "$PUB_IFACE" ]]; then
         if command -v nft &>/dev/null; then
             nft add table ip wg_nat 2>/dev/null || true
             nft "add chain ip wg_nat postrouting { type nat hook postrouting priority 100; policy accept; }" 2>/dev/null || true
-            nft add rule ip wg_nat postrouting iifname "$WG_IFACE" oifname "$PUB_IFACE" masquerade 2>/dev/null || true
+            nft add rule ip wg_nat postrouting iifname "$WG_IFACE" masquerade 2>/dev/null || true
             fixed "Emergency NAT rule applied via nft."
         elif command -v iptables &>/dev/null; then
             iptables -t nat -A POSTROUTING -o "$PUB_IFACE" -j MASQUERADE 2>/dev/null

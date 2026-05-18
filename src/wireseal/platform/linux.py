@@ -7,7 +7,7 @@ Security properties:
   - All subprocess calls use shell=False with list args (never shell=True)
   - Config files written via atomic_write with correct permissions before rename
   - nftables firewall rules are deny-by-default with rate limiting (FW-01)
-  - NAT masquerade targets only the detected outbound interface (FW-02)
+  - NAT masquerade covers all traffic from the WireGuard interface (FW-02)
   - Generated firewall rules validated against template before application (FW-03)
   - DuckDNS updater runs as non-root wireseal system user (HARD-04)
   - All operations are idempotent (safe to re-run)
@@ -121,7 +121,7 @@ def _build_nftables_ruleset(
             table ip wg_nat {{
                 chain postrouting {{
                     type nat hook postrouting priority 100; policy accept;
-                    iifname "{wg_iface}" oifname "{pub_iface}" masquerade
+                    iifname "{wg_iface}" masquerade
                 }}
             }}
         """)
@@ -426,6 +426,8 @@ class LinuxAdapter(AbstractPlatformAdapter):
               "--add-egress-zone=public"])
         _run(["firewall-cmd", "--permanent", "--policy=wg-internet",
               "--set-target=ACCEPT"])
+        _run(["firewall-cmd", "--permanent", "--policy=wg-internet",
+              "--add-masquerade"])
 
         # ── 4. Reload to apply all permanent rules ──
         _run(["firewall-cmd", "--reload"])

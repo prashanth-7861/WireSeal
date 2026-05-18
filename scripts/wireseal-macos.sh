@@ -206,12 +206,23 @@ setup_network() {
     # Detect outbound interface
     PUB_IFACE=$(route -n get default 2>/dev/null | grep 'interface:' | awk '{print $2}' || echo "")
 
+    # NAT for VPN subnet via pf anchor
+    if [[ -n "$PUB_IFACE" ]]; then
+        info "Configuring pf NAT for VPN subnet..."
+        PF_ANCHOR="com.apple/wireguard"
+        PF_RULES="nat from 10.0.0.0/24 to any -> ($PUB_IFACE)"
+        echo "$PF_RULES" | pfctl -a "$PF_ANCHOR" -f - 2>/dev/null && \
+            ok "pf NAT: 10.0.0.0/24 → $PUB_IFACE" || \
+            warn "pf NAT setup skipped (may be configured during wireseal init)."
+    fi
+
     # Summary
     echo ""
     info "Network Status:"
     echo -e "  IP forwarding: $(sysctl -n net.inet.ip.forwarding 2>/dev/null || echo '?')"
     echo -e "  SSH:           $SSH_STATUS"
     echo -e "  pf firewall:   $(pfctl -s info 2>/dev/null | grep -c 'Enabled' | grep -q '1' && echo 'enabled' || echo 'check')"
+    echo -e "  NAT:           $(pfctl -a com.apple/wireguard -sr 2>/dev/null | grep -q 'nat' && echo 'active' || echo 'not configured')"
     echo -e "  Interface:     ${PUB_IFACE:-not detected}"
     echo ""
 }

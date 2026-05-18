@@ -267,10 +267,12 @@ class WindowsAdapter(AbstractPlatformAdapter):
           1. Allow inbound WireGuard UDP on wg_port only (FW-01)
           2. Block all other inbound on the WG interface (deny-by-default, FW-01)
           3. Set WG interface to Public network profile (most restrictive)
-          4. Enable NAT for VPN subnet on outbound interface only (FW-02)
+          4. Enable NAT for VPN subnet via New-NetNat (FW-02)
+          5. Allow forwarding for VPN subnet in both directions (FW-02)
 
         FW-03: rules are validated against a canonical template before apply.
-        Idempotent: returns immediately if rules already exist.
+        Idempotent: returns immediately if all rules already exist.
+        Upgrade-safe: creates missing NAT/forward rules even if input rules exist.
 
         Args:
             wg_port:       UDP port WireGuard listens on.
@@ -313,7 +315,25 @@ class WindowsAdapter(AbstractPlatformAdapter):
             )
             port_matches = ps_check.stdout.strip() == str(wg_port)
             if port_matches:
-                return  # already correct
+                # Input rules exist — but NAT/forward rules may be missing
+                # (e.g., upgrade from a version that didn't create them).
+                # Check for forward rule; if present, everything is set up.
+                fwd_check = subprocess.run(
+                    [
+                        "netsh", "advfirewall", "firewall", "show", "rule",
+                        f"name=wireseal-{wg_interface}-fwd-in",
+                    ],
+                    capture_output=True, text=True, shell=False,
+                    timeout=30, creationflags=_NO_WIN,
+                )
+                if (fwd_check.returncode == 0
+                        and f"wireseal-{wg_interface}-fwd-in" in fwd_check.stdout):
+                    return  # all rules already correct
+                # Fall through to create missing NAT/forward rules.
+                # Skip input rule creation below by jumping past it.
+                # (The input rules already exist with correct port.)
+                self._apply_nat_and_forward(wg_interface, subnet)
+                return
             # WIN-04: Add new-port rule BEFORE deleting old rules to avoid
             # an unprotected window where no firewall rule exists.
             old_port = ps_check.stdout.strip()  # save for cleanup
@@ -412,7 +432,7 @@ class WindowsAdapter(AbstractPlatformAdapter):
         subprocess.run(
             [
                 "powershell", "-NoProfile", "-Command",
-                f"Set-NetConnectionProfile -InterfaceAlias {wg_interface} "
+                f"Set-NetConnectionProfile -InterfaceAlias '{wg_interface}' "
                 f"-NetworkCategory Public",
             ],
             shell=False,
@@ -422,18 +442,72 @@ class WindowsAdapter(AbstractPlatformAdapter):
             # do not check -- interface may not exist yet when firewall rules are pre-configured
         )
 
-        # FW-02: Enable NAT for VPN subnet on outbound interface only (not all traffic)
-        subprocess.run(
+        # FW-02: NAT + forward rules for VPN subnet
+        self._apply_nat_and_forward(wg_interface, subnet)
+
+    def _apply_nat_and_forward(self, wg_interface: str, subnet: str) -> None:
+        """Create NAT and forwarding rules for the VPN subnet.
+
+        Idempotent: checks if NAT already exists before creating.
+        Called both from apply_firewall_rules() main path and from the
+        idempotency upgrade path (existing input rules, missing NAT/forward).
+        """
+        # NAT — check if it already exists, create if not
+        nat_name = f"wireseal-{wg_interface}-nat"
+        nat_check = subprocess.run(
             [
                 "powershell", "-NoProfile", "-Command",
-                f"New-NetNat -Name 'wireseal-nat' "
-                f"-InternalIPInterfaceAddressPrefix '{subnet}'",
+                f"Get-NetNat -Name '{nat_name}' -ErrorAction SilentlyContinue",
+            ],
+            shell=False,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            creationflags=_NO_WIN,
+        )
+        if nat_name not in (nat_check.stdout or ""):
+            subprocess.run(
+                [
+                    "powershell", "-NoProfile", "-Command",
+                    f"New-NetNat -Name '{nat_name}' "
+                    f"-InternalIPInterfaceAddressPrefix '{subnet}'",
+                ],
+                shell=False,
+                capture_output=True,
+                timeout=30,
+                creationflags=_NO_WIN,
+            )
+
+        # FORWARD rules — allow VPN subnet traffic in both directions
+        subprocess.run(
+            [
+                "netsh", "advfirewall", "firewall", "add", "rule",
+                f"name=wireseal-{wg_interface}-fwd-in",
+                "dir=in",
+                "action=allow",
+                "protocol=any",
+                f"remoteip={subnet}",
+                "enable=yes",
             ],
             shell=False,
             capture_output=True,
             timeout=30,
             creationflags=_NO_WIN,
-            # do not check -- may already exist from a previous run (idempotent)
+        )
+        subprocess.run(
+            [
+                "netsh", "advfirewall", "firewall", "add", "rule",
+                f"name=wireseal-{wg_interface}-fwd-out",
+                "dir=out",
+                "action=allow",
+                "protocol=any",
+                f"remoteip={subnet}",
+                "enable=yes",
+            ],
+            shell=False,
+            capture_output=True,
+            timeout=30,
+            creationflags=_NO_WIN,
         )
 
     def remove_firewall_rules(self, wg_interface: str) -> None:
@@ -461,6 +535,39 @@ class WindowsAdapter(AbstractPlatformAdapter):
             [
                 "netsh", "advfirewall", "firewall", "delete", "rule",
                 f"name=wireseal-{wg_interface}-block",
+            ],
+            shell=False,
+            capture_output=True,
+            timeout=30,
+            creationflags=_NO_WIN,
+        )
+        # Remove FORWARD rules
+        subprocess.run(
+            [
+                "netsh", "advfirewall", "firewall", "delete", "rule",
+                f"name=wireseal-{wg_interface}-fwd-in",
+            ],
+            shell=False,
+            capture_output=True,
+            timeout=30,
+            creationflags=_NO_WIN,
+        )
+        subprocess.run(
+            [
+                "netsh", "advfirewall", "firewall", "delete", "rule",
+                f"name=wireseal-{wg_interface}-fwd-out",
+            ],
+            shell=False,
+            capture_output=True,
+            timeout=30,
+            creationflags=_NO_WIN,
+        )
+        # Remove NAT (per-interface name; also try legacy name for upgrades)
+        nat_name = f"wireseal-{wg_interface}-nat"
+        subprocess.run(
+            [
+                "powershell", "-NoProfile", "-Command",
+                f"Remove-NetNat -Name '{nat_name}' -Confirm:$false",
             ],
             shell=False,
             capture_output=True,
@@ -511,10 +618,12 @@ class WindowsAdapter(AbstractPlatformAdapter):
         ) as key:
             winreg.SetValueEx(key, "IPEnableRouter", 0, winreg.REG_DWORD, 1)
 
-        # Warn user that a reboot is required
+        # Warn user that a reboot is required for IP forwarding
         print(
-            "[!] IP routing enabled in registry. "
-            "A system reboot is required for this to take effect.",
+            "[!] IP routing enabled in registry (IPEnableRouter=1). "
+            "A system reboot is required for this to take effect.\n"
+            "    Without a reboot, split-lan and full tunnel modes will NOT "
+            "route client traffic through this server.",
             file=sys.stderr,
         )
 

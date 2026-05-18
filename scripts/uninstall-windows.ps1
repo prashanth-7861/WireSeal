@@ -8,7 +8,9 @@
       * Wrapper:           C:\Program Files\WireSeal\wireseal.cmd
       * Install dir:       C:\Program Files\WireSeal
       * Virtualenv:        <repo>\.venv
-      * Firewall rule:     WireSeal-WireGuard-UDP-51820
+      * Firewall rules:    wireseal-wg0-in, wireseal-wg0-block, wireseal-wg0-fwd-in/out
+      * NAT:               wireseal-wg0-nat (New-NetNat)
+      * Legacy rule:       WireSeal-WireGuard-UDP-51820
       * Tunnel service:    WireGuardTunnel$wg0 (sc stop + wireguard.exe /uninstalltunnelservice)
       * PATH entry:        C:\Program Files\WireSeal
 
@@ -62,7 +64,8 @@ if (-not $Yes) {
     Write-Host "  - Wrapper:        $WrapperCmd"
     Write-Host "  - Install dir:    $InstallDir"
     Write-Host "  - Virtualenv:     $VenvDir"
-    Write-Host "  - Firewall rule:  $FirewallRule"
+    Write-Host "  - Firewall rules: wireseal-wg0-* + legacy $FirewallRule"
+    Write-Host "  - NAT:            wireseal-wg0-nat (if present)"
     Write-Host "  - Tunnel service: $TunnelService (if registered)"
     Write-Host "  - PATH entry:     $InstallDir"
     if ($Purge) {
@@ -110,11 +113,24 @@ $ApiTaskName = 'WireSeal-API'
 Write-Info "Removed scheduled task: $ApiTaskName (if present)"
 
 # ---------------------------------------------------------------------------
-# Remove firewall rule
+# Remove firewall rules (current wireseal-wg0-* names + legacy name)
 # ---------------------------------------------------------------------------
-if (Get-NetFirewallRule -Name $FirewallRule -ErrorAction SilentlyContinue) {
-    Remove-NetFirewallRule -Name $FirewallRule -ErrorAction SilentlyContinue
-    Write-Info "Removed firewall rule: $FirewallRule"
+foreach ($ruleName in @('wireseal-wg0-in', 'wireseal-wg0-block', 'wireseal-wg0-fwd-in', 'wireseal-wg0-fwd-out', $FirewallRule)) {
+    if (Get-NetFirewallRule -Name $ruleName -ErrorAction SilentlyContinue) {
+        Remove-NetFirewallRule -Name $ruleName -ErrorAction SilentlyContinue
+        Write-Info "Removed firewall rule: $ruleName"
+    }
+}
+
+# ---------------------------------------------------------------------------
+# Remove NAT (current per-interface name + legacy name)
+# ---------------------------------------------------------------------------
+foreach ($natName in @('wireseal-wg0-nat', 'wireseal-nat')) {
+    $existingNat = Get-NetNat -Name $natName -ErrorAction SilentlyContinue
+    if ($existingNat) {
+        Remove-NetNat -Name $natName -Confirm:$false -ErrorAction SilentlyContinue
+        Write-Info "Removed NAT: $natName"
+    }
 }
 
 # ---------------------------------------------------------------------------

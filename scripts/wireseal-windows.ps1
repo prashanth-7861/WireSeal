@@ -237,17 +237,36 @@ if ($sshdStatus) {
 }
 
 # ── NAT for VPN subnet ───────────────────────────────────────────────────
-$existingNat = Get-NetNat -Name 'wireseal-nat' -ErrorAction SilentlyContinue
+$NatName = 'wireseal-wg0-nat'
+$existingNat = Get-NetNat -Name $NatName -ErrorAction SilentlyContinue
 if (-not $existingNat) {
+    # Also remove legacy name if present
+    Remove-NetNat -Name 'wireseal-nat' -Confirm:$false -ErrorAction SilentlyContinue
     Write-Info "Configuring NAT for VPN subnet..."
     try {
-        New-NetNat -Name 'wireseal-nat' -InternalIPInterfaceAddressPrefix '10.0.0.0/24' -ErrorAction Stop | Out-Null
+        New-NetNat -Name $NatName -InternalIPInterfaceAddressPrefix '10.0.0.0/24' -ErrorAction Stop | Out-Null
         Write-Ok "NAT configured for 10.0.0.0/24."
     } catch {
         Write-Warn "NAT setup skipped (may be configured during wireseal init)."
     }
 } else {
     Write-Ok "NAT already configured."
+}
+
+# ── Forward rules for VPN subnet ────────────────────────────────────────
+$FwdIn  = 'wireseal-wg0-fwd-in'
+$FwdOut = 'wireseal-wg0-fwd-out'
+if (-not (Get-NetFirewallRule -Name $FwdIn -ErrorAction SilentlyContinue)) {
+    netsh advfirewall firewall add rule name=$FwdIn dir=in action=allow protocol=any remoteip=10.0.0.0/24 enable=yes | Out-Null
+    Write-Ok "Firewall forward rule added: $FwdIn"
+} else {
+    Write-Ok "Forward rule already exists: $FwdIn"
+}
+if (-not (Get-NetFirewallRule -Name $FwdOut -ErrorAction SilentlyContinue)) {
+    netsh advfirewall firewall add rule name=$FwdOut dir=out action=allow protocol=any remoteip=10.0.0.0/24 enable=yes | Out-Null
+    Write-Ok "Firewall forward rule added: $FwdOut"
+} else {
+    Write-Ok "Forward rule already exists: $FwdOut"
 }
 
 # ── Network Doctor Summary ───────────────────────────────────────────────
@@ -257,7 +276,8 @@ Write-Host "  IP Forwarding: $( if ((Get-ItemProperty 'HKLM:\SYSTEM\CurrentContr
 Write-Host "  Firewall UDP 51820: $( if (Get-NetFirewallRule -Name $RuleName -ErrorAction SilentlyContinue) { 'open' } else { 'CLOSED' } )"
 Write-Host "  Firewall TCP 22: $( if (Get-NetFirewallRule -Name $SshRule -ErrorAction SilentlyContinue) { 'open' } else { 'CLOSED' } )"
 Write-Host "  SSH Server: $( if ($sshdStatus -and $sshdStatus.Status -eq 'Running') { 'running' } else { 'not running' } )"
-Write-Host "  NAT: $( if (Get-NetNat -Name 'wireseal-nat' -ErrorAction SilentlyContinue) { 'active' } else { 'not configured' } )"
+Write-Host "  NAT: $( if (Get-NetNat -Name 'wireseal-wg0-nat' -ErrorAction SilentlyContinue) { 'active' } else { 'not configured' } )"
+Write-Host "  Forward rules: $( if (Get-NetFirewallRule -Name 'wireseal-wg0-fwd-in' -ErrorAction SilentlyContinue) { 'active' } else { 'not configured' } )"
 Write-Host ""
 
 # ── Done ──────────────────────────────────────────────────────────────────
