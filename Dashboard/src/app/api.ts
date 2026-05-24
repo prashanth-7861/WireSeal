@@ -10,7 +10,7 @@ const BASE = "/api";
 export const VAULT_LOCKED_EVENT = "wireseal:vault-locked";
 
 // Tracks the admin_id used on the current unlock. null until successful unlock.
-// Cleared on lock. Used by UI guards (e.g. Admins.tsx self-removal).
+// Cleared on lock. Used by UI guards (e.g. TwoFactor.tsx admin display).
 let _currentAdminId: string | null = null;
 
 // DASH-02: Generate a CSRF token once per page load.

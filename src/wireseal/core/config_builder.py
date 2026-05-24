@@ -137,7 +137,7 @@ class ConfigBuilder:
             server_public_key:  44-char base64 server public key.
             psk:                44-char base64 pre-shared key.
             server_endpoint:    Server endpoint (host:port).
-            mtu:                MTU for the client interface (default 1420).
+            mtu:                MTU for the client interface (default 1420, optimal for standard ethernet).
             allowed_ips:        AllowedIPs for the peer (default "0.0.0.0/0").
 
         Returns:

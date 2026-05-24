@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.9.3] — 2026-05-23
+
+### Changed — VPN Tunnel & Performance
+
+- **All tunnel modes now route internet through VPN** — `split-vpn`, `split-lan`, and `full`
+  all set `AllowedIPs = 0.0.0.0/0`. Internet traffic is always encrypted through the VPN
+  tunnel regardless of mode. VPN exists to protect internet — no mode should bypass that.
+- **MTU optimized for maximum throughput** — auto-detect cap raised from 1380 to 1420
+  (optimal for standard 1500 ethernet minus 80-byte WireGuard overhead). Default fallback
+  raised from 1280 to 1420. CLI and API defaults updated accordingly.
+- **VPN subnet default changed to 192.168.1.0/24** — new setups assign clients LAN-style
+  IPs (192.168.1.2, .3, etc.) so VPN clients appear as local devices. Existing servers
+  keep their stored subnet.
+
+### Changed — Dashboard
+
+- **Admin/Users pages consolidated** — separate Admins.tsx and Users.tsx pages merged into
+  a single Admin.tsx page with unified management interface.
+
+---
+
 ## [0.9.2] — 2026-05-17
 
 ### Fixed — WireGuard Client Connection Failures

@@ -7,7 +7,7 @@ passphrase, no cryptographic material is exposed.
 
 [![CI](https://github.com/prashanth-7861/WireSeal/actions/workflows/build.yml/badge.svg)](https://github.com/prashanth-7861/WireSeal/actions/workflows/build.yml)
 [![Python](https://img.shields.io/badge/python-3.12%20%E2%80%93%203.14-blue)](https://python.org)
-[![Version](https://img.shields.io/badge/version-0.9.0-green)](https://github.com/prashanth-7861/WireSeal/releases)
+[![Version](https://img.shields.io/badge/version-0.9.3-green)](https://github.com/prashanth-7861/WireSeal/releases)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 [![Website](https://img.shields.io/badge/website-wireseal.vercel.app-blue)](https://wireseal.vercel.app)
 
@@ -115,7 +115,8 @@ passphrase, no cryptographic material is exposed.
   platform-native per OS (netsh advfirewall on Windows, iptables on Linux, pf on macOS);
   auto-disengages on intentional disconnect
 - **Tunnel mode selection** — choose per-client routing at provisioning time:
-  `split-vpn` (VPN peers only), `split-lan` (VPN + server LAN), or `full` (all traffic through VPN)
+  `split-vpn`, `split-lan`, or `full` — all modes route internet through VPN for encryption;
+  mode controls LAN device access scope
 - **LAN subnet auto-detection** — server detects its own LAN subnet on init; used to compute
   `AllowedIPs` for `split-lan` clients without manual configuration
 - **Client Settings page** — configure auto-connect profile, auto-lock timeout, kill switch,
@@ -297,7 +298,7 @@ wireseal --help
 
 ```bash
 # Initialize the server (creates ~/.wireseal/vault.enc, generates keys, writes wg0.conf)
-sudo wireseal init --subnet 10.0.0.1/24 --port 51820
+sudo wireseal init --subnet 192.168.1.0/24 --port 51820
 
 # Add a client
 sudo wireseal add-client alice
@@ -354,8 +355,8 @@ sudo wireseal export bob-laptop --output /tmp/bob-laptop.conf
 WireSeal auto-installs OpenSSH during `wireseal init`. Once connected to the VPN, use any
 SFTP client to access the server:
 
-- **Host:** `10.0.0.1` (server VPN IP) · **Port:** `22`
-- Apps: Documents by Readdle (iOS), Termius, FileZilla, or `sftp user@10.0.0.1`
+- **Host:** `192.168.1.1` (server VPN IP) · **Port:** `22`
+- Apps: Documents by Readdle (iOS), Termius, FileZilla, or `sftp user@192.168.1.1`
 
 File operations are logged and visible in the dashboard's **Audit Log → File Activity** tab.
 

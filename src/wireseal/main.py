@@ -94,7 +94,7 @@ def cli(ctx: click.Context) -> None:
 
 
 @cli.command()
-@click.option("--subnet", default="10.0.0.0/24", show_default=True,
+@click.option("--subnet", default="192.168.1.0/24", show_default=True,
               help="VPN subnet (RFC 1918)")
 @click.option("--port", default=51820, type=int, show_default=True,
               help="WireGuard listen port")
@@ -741,8 +741,10 @@ def _extract_secret_str(value: object) -> str:
 @click.option("--tunnel-mode", default=None,
               type=click.Choice(["split-vpn", "split-lan", "full"]),
               help="Tunnel mode for the client config (default: full via CLI, split-vpn via API)")
+@click.option("--mtu", default=None, type=int,
+              help="Client MTU (default: 1420, optimal for standard ethernet; min 1280)")
 def add_client(name: str, access_level: str, ttl: int | None, expires_at: str | None,
-               tunnel_mode: str | None) -> None:
+               tunnel_mode: str | None, mtu: int | None) -> None:
     """Add a new WireGuard client and generate its config.
 
     Access control options:
@@ -808,19 +810,20 @@ def add_client(name: str, access_level: str, ttl: int | None, expires_at: str | 
             server_endpoint = _resolve_client_endpoint(state.server)
 
             # Resolve allowed_ips based on tunnel_mode
-            vpn_subnet = state.ip_pool.get("subnet", "10.0.0.0/24")
-            if tunnel_mode == "full":
-                allowed_ips = "0.0.0.0/0"
-            elif tunnel_mode == "split-lan":
-                lan_subnet = state.server.get("lan_subnet", "")
-                allowed_ips = f"{vpn_subnet}, {lan_subnet}" if lan_subnet else vpn_subnet
-            elif tunnel_mode == "split-vpn":
-                allowed_ips = vpn_subnet
-            else:
-                allowed_ips = "0.0.0.0/0"  # CLI default: full tunnel
+            vpn_subnet = state.ip_pool.get("subnet", "192.168.1.0/24")
+            # All modes route internet through VPN (0.0.0.0/0) for encryption.
+            # VPN exists to protect internet — no mode should bypass that.
+            allowed_ips = "0.0.0.0/0"
 
             builder = ConfigBuilder()
             # Validation is performed inside render_client_config (CONFIG-02)
+            # Resolve MTU: user override → 1420 (optimal for standard 1500 ethernet)
+            client_mtu = mtu if mtu is not None else 1420
+            if client_mtu < 1280 or client_mtu > 1420:
+                raise click.ClickException(
+                    f"MTU must be between 1280 and 1420, got {client_mtu}"
+                )
+
             client_config_str = builder.render_client_config(
                 client_private_key=private_key_str,
                 client_ip=allocated_ip,
@@ -828,6 +831,7 @@ def add_client(name: str, access_level: str, ttl: int | None, expires_at: str | 
                 server_public_key=server_pub_key,
                 psk=psk_str,
                 server_endpoint=server_endpoint,
+                mtu=client_mtu,
                 allowed_ips=allowed_ips,
             )
 
@@ -1339,7 +1343,7 @@ def rotate_keys(name: str) -> None:
             client_ip = client_data["ip"]
             server_port = server_data["port"]
             server_ip_raw = server_data["ip"]
-            subnet = state.ip_pool.get("subnet", "10.0.0.0/24")
+            subnet = state.ip_pool.get("subnet", "192.168.1.0/24")
             dns_server = client_data.get("dns_server", "1.1.1.1")
             server_endpoint = client_data.get("endpoint", f"{server_ip_raw}:{server_port}")
 
@@ -1543,7 +1547,7 @@ def rotate_server_keys() -> None:
             server_data = state.server
             server_port = server_data["port"]
             server_ip_raw = server_data["ip"]
-            subnet = state.ip_pool.get("subnet", "10.0.0.0/24")
+            subnet = state.ip_pool.get("subnet", "192.168.1.0/24")
             prefix_length = int(subnet.split("/")[1])
 
             from wireseal.core.config_builder import ConfigBuilder
@@ -2228,7 +2232,7 @@ def terminate(interface: str) -> None:
               help="WireGuard interface to tear down")
 @click.option("--reinit", is_flag=True, default=False,
               help="Immediately re-initialise after wiping (prompts for new passphrase)")
-@click.option("--subnet", default="10.0.0.0/24", show_default=True,
+@click.option("--subnet", default="192.168.1.0/24", show_default=True,
               help="Subnet to use when --reinit is set")
 @click.option("--port", default=51820, type=int, show_default=True,
               help="Listen port to use when --reinit is set")

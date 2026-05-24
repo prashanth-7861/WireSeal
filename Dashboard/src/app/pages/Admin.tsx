@@ -2,11 +2,13 @@ import { useState, useEffect, useRef } from "react";
 import {
   Terminal, Server, FileText, Play, Square, RotateCcw,
   AlertCircle, CheckCircle, ChevronRight, Loader2,
-  FolderOpen, Save, RefreshCw, Shield,
+  FolderOpen, Save, RefreshCw, Shield, Users, Plus,
+  Trash2, KeyRound, Smartphone, User,
 } from "lucide-react";
-import { api, type ServiceInfo, type ExecResult } from "../api";
+import { api, type AdminInfo, type ServiceInfo, type ExecResult } from "../api";
+import { AdminRoleBadge } from "../components/AdminRoleBadge";
 
-type Tab = "terminal" | "services" | "files";
+type Tab = "accounts" | "terminal" | "services" | "files";
 
 // ─── Terminal Tab ────────────────────────────────────────────────────────────
 
@@ -389,12 +391,349 @@ function FilesTab() {
   );
 }
 
+// ─── Accounts Tab ────────────────────────────────────────────────────────────
+
+function AccountsTab() {
+  const [admins, setAdmins] = useState<AdminInfo[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+  const [success, setSuccess] = useState("");
+
+  const [showAddDialog, setShowAddDialog] = useState(false);
+  const [addId, setAddId] = useState("");
+  const [addPassphrase, setAddPassphrase] = useState("");
+  const [addRole, setAddRole] = useState<"admin" | "readonly">("admin");
+  const [adding, setAdding] = useState(false);
+  const [addError, setAddError] = useState("");
+
+  const [confirmRemove, setConfirmRemove] = useState<string | null>(null);
+  const [removing, setRemoving] = useState(false);
+
+  const [showPassDialog, setShowPassDialog] = useState<string | null>(null);
+  const [newAdminPass, setNewAdminPass] = useState("");
+  const [changingPass, setChangingPass] = useState(false);
+  const [passError, setPassError] = useState("");
+
+  const [showTOTPReset, setShowTOTPReset] = useState<string | null>(null);
+  const [totpResetLoading, setTotpResetLoading] = useState(false);
+
+  const currentId = api.getCurrentAdminId();
+  const isOwner = currentId === "owner";
+
+  const flash = (msg: string) => {
+    setSuccess(msg); setError("");
+    setTimeout(() => setSuccess(""), 4000);
+  };
+  const flashError = (msg: string) => {
+    setError(msg); setSuccess("");
+  };
+
+  const load = () => {
+    setLoading(true); setError("");
+    api.listAdmins()
+      .then(d => setAdmins(d.admins))
+      .catch((e: unknown) => flashError(e instanceof Error ? e.message : "Failed to load admins"))
+      .finally(() => setLoading(false));
+  };
+
+  useEffect(() => { load(); }, []);
+
+  const handleAdd = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!addId || addPassphrase.length < 12) {
+      setAddError("Admin ID required and passphrase must be 12+ characters");
+      return;
+    }
+    setAdding(true); setAddError("");
+    try {
+      await api.addAdmin(addId, addPassphrase, addRole);
+      setShowAddDialog(false);
+      setAddId(""); setAddPassphrase(""); setAddRole("admin");
+      flash(`Admin "${addId}" added`);
+      load();
+    } catch (e: unknown) {
+      setAddError(e instanceof Error ? e.message : "Failed to add admin");
+    } finally { setAdding(false); }
+  };
+
+  const handleRemove = async (id: string) => {
+    setRemoving(true);
+    try {
+      await api.removeAdmin(id);
+      setConfirmRemove(null);
+      flash(`Admin "${id}" removed`);
+      load();
+    } catch (e: unknown) {
+      flashError(e instanceof Error ? e.message : "Failed to remove admin");
+    } finally { setRemoving(false); }
+  };
+
+  const handleChangePassphrase = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!showPassDialog) return;
+    if (newAdminPass.length < 12) { setPassError("Passphrase must be 12+ characters"); return; }
+    setChangingPass(true); setPassError("");
+    try {
+      await api.changeAdminPassphrase(showPassDialog, newAdminPass);
+      setShowPassDialog(null); setNewAdminPass("");
+      flash(`Passphrase changed for "${showPassDialog}"`);
+    } catch (e: unknown) {
+      setPassError(e instanceof Error ? e.message : "Failed");
+    } finally { setChangingPass(false); }
+  };
+
+  const handleTOTPReset = async (id: string) => {
+    setTotpResetLoading(true);
+    try {
+      await api.totpReset(id);
+      setShowTOTPReset(null);
+      flash(`TOTP reset for "${id}"`);
+      load();
+    } catch (e: unknown) {
+      flashError(e instanceof Error ? e.message : "Failed to reset TOTP");
+    } finally { setTotpResetLoading(false); }
+  };
+
+  if (loading) return (
+    <div className="flex items-center gap-3 text-gray-500 py-8 justify-center">
+      <div className="w-5 h-5 border-2 border-indigo-400 border-t-transparent rounded-full animate-spin" />
+      <span>Loading admins...</span>
+    </div>
+  );
+
+  return (
+    <div className="space-y-4">
+      {success && (
+        <div className="bg-green-50 border border-green-200 rounded-lg p-3 flex items-center gap-2">
+          <CheckCircle className="w-4 h-4 text-green-600 flex-shrink-0" />
+          <p className="text-sm text-green-800">{success}</p>
+        </div>
+      )}
+      {error && (
+        <div className="bg-red-50 border border-red-200 rounded-lg p-3 flex items-center gap-2">
+          <AlertCircle className="w-4 h-4 text-red-600 flex-shrink-0" />
+          <p className="text-sm text-red-800">{error}</p>
+        </div>
+      )}
+
+      <div className="flex items-center justify-between">
+        <p className="text-sm text-gray-500">{admins.length} admin account{admins.length !== 1 ? "s" : ""}</p>
+        {isOwner && (
+          <button onClick={() => setShowAddDialog(true)}
+            className="bg-indigo-600 text-white px-3 py-1.5 rounded-lg hover:bg-indigo-700 transition-colors text-sm flex items-center gap-1.5">
+            <Plus className="w-4 h-4" /> Add Admin
+          </button>
+        )}
+      </div>
+
+      <div className="border border-gray-200 rounded-lg overflow-hidden">
+        <table className="w-full text-sm">
+          <thead className="bg-gray-50 border-b border-gray-200">
+            <tr>
+              <th className="text-left px-4 py-2.5 font-medium text-gray-700">Admin ID</th>
+              <th className="text-left px-4 py-2.5 font-medium text-gray-700">Role</th>
+              <th className="text-left px-4 py-2.5 font-medium text-gray-700">TOTP</th>
+              <th className="text-left px-4 py-2.5 font-medium text-gray-700 hidden sm:table-cell">Last Unlock</th>
+              <th className="text-right px-4 py-2.5 font-medium text-gray-700">Actions</th>
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-gray-100">
+            {admins.length === 0 ? (
+              <tr>
+                <td colSpan={5} className="px-4 py-8 text-center text-gray-400 text-sm">
+                  No admin accounts found.
+                </td>
+              </tr>
+            ) : (
+              admins.map((admin) => (
+                <tr key={admin.id} className="hover:bg-gray-50">
+                  <td className="px-4 py-3">
+                    <div className="flex items-center gap-2">
+                      <div className="w-7 h-7 bg-indigo-100 rounded-full flex items-center justify-center">
+                        <User className="w-3.5 h-3.5 text-indigo-600" />
+                      </div>
+                      <span className="font-medium text-gray-900 font-mono text-xs">{admin.id}</span>
+                      {admin.id === currentId && (
+                        <span className="text-[10px] bg-indigo-100 text-indigo-700 px-1.5 py-0.5 rounded font-medium">You</span>
+                      )}
+                    </div>
+                  </td>
+                  <td className="px-4 py-3"><AdminRoleBadge role={admin.role} /></td>
+                  <td className="px-4 py-3">
+                    <span className={`inline-flex items-center gap-1 text-xs font-medium ${admin.totp_enrolled ? "text-green-700" : "text-gray-400"}`}>
+                      <span className={`w-1.5 h-1.5 rounded-full ${admin.totp_enrolled ? "bg-green-500" : "bg-gray-300"}`} />
+                      {admin.totp_enrolled ? "Enrolled" : "Not enrolled"}
+                    </span>
+                  </td>
+                  <td className="px-4 py-3 text-xs text-gray-500 hidden sm:table-cell">
+                    {admin.last_unlock ? new Date(admin.last_unlock).toLocaleString() : "Never"}
+                  </td>
+                  <td className="px-4 py-3 text-right">
+                    <div className="flex items-center justify-end gap-0.5">
+                      <button onClick={() => { setNewAdminPass(""); setPassError(""); setShowPassDialog(admin.id); }}
+                        className="p-1.5 text-gray-400 hover:text-indigo-600 hover:bg-indigo-50 rounded-md transition-colors"
+                        title="Change passphrase">
+                        <KeyRound className="w-3.5 h-3.5" />
+                      </button>
+                      <button onClick={() => setShowTOTPReset(admin.id)}
+                        className="p-1.5 text-gray-400 hover:text-amber-600 hover:bg-amber-50 rounded-md transition-colors"
+                        title="Reset TOTP">
+                        <Smartphone className="w-3.5 h-3.5" />
+                      </button>
+                      {admin.id !== "owner" && admin.id !== currentId && isOwner && (
+                        <button onClick={() => setConfirmRemove(admin.id)}
+                          className="p-1.5 text-gray-400 hover:text-red-600 hover:bg-red-50 rounded-md transition-colors"
+                          title="Remove admin">
+                          <Trash2 className="w-3.5 h-3.5" />
+                        </button>
+                      )}
+                    </div>
+                  </td>
+                </tr>
+              ))
+            )}
+          </tbody>
+        </table>
+      </div>
+
+      {/* Add Admin Dialog */}
+      {showAddDialog && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
+          <div className="bg-white rounded-lg shadow-xl p-6 w-full max-w-md">
+            <h2 className="text-lg font-semibold text-gray-900 mb-4">Add New Admin</h2>
+            <form onSubmit={handleAdd} className="space-y-4">
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Admin ID</label>
+                <input type="text" value={addId}
+                  onChange={e => setAddId(e.target.value)}
+                  className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-indigo-500 font-mono"
+                  placeholder="e.g., alice" required disabled={adding} />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Passphrase (min 12 chars)</label>
+                <input type="password" value={addPassphrase}
+                  onChange={e => setAddPassphrase(e.target.value)}
+                  className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-indigo-500"
+                  placeholder="Min. 12 characters" required disabled={adding} />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Role</label>
+                <div className="flex gap-4">
+                  {(["admin", "readonly"] as const).map(r => (
+                    <label key={r} className="flex items-center gap-1.5 cursor-pointer text-sm">
+                      <input type="radio" name="role" value={r}
+                        checked={addRole === r}
+                        onChange={() => setAddRole(r)}
+                        disabled={adding} />
+                      <span className="capitalize">{r}</span>
+                    </label>
+                  ))}
+                </div>
+              </div>
+              {addError && <p className="text-red-600 text-sm">{addError}</p>}
+              <div className="flex gap-3 pt-1">
+                <button type="button" onClick={() => { setShowAddDialog(false); setAddError(""); }}
+                  className="flex-1 px-3 py-2 border border-gray-300 rounded-lg text-sm hover:bg-gray-50" disabled={adding}>
+                  Cancel
+                </button>
+                <button type="submit" disabled={adding || !addId || addPassphrase.length < 12}
+                  className="flex-1 bg-indigo-600 text-white px-3 py-2 rounded-lg text-sm hover:bg-indigo-700 disabled:opacity-60">
+                  {adding ? "Adding..." : "Add Admin"}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* Remove Confirmation */}
+      {confirmRemove && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
+          <div className="bg-white rounded-lg shadow-xl p-6 w-full max-w-sm">
+            <div className="flex items-center gap-3 mb-3">
+              <AlertCircle className="w-5 h-5 text-red-600" />
+              <h3 className="text-lg font-semibold text-gray-900">Remove Admin</h3>
+            </div>
+            <p className="text-sm text-gray-600 mb-4">
+              Remove admin <strong className="font-mono">{confirmRemove}</strong>? They will no longer be able to unlock the vault.
+            </p>
+            <div className="flex gap-3">
+              <button onClick={() => setConfirmRemove(null)}
+                className="flex-1 px-3 py-2 border border-gray-300 rounded-lg text-sm hover:bg-gray-50" disabled={removing}>
+                Cancel
+              </button>
+              <button onClick={() => handleRemove(confirmRemove)} disabled={removing}
+                className="flex-1 bg-red-600 text-white px-3 py-2 rounded-lg text-sm hover:bg-red-700 disabled:opacity-60">
+                {removing ? "Removing..." : "Remove"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Change Passphrase Dialog */}
+      {showPassDialog && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
+          <div className="bg-white rounded-lg shadow-xl p-6 w-full max-w-md">
+            <h3 className="text-lg font-semibold text-gray-900 mb-1">Change Passphrase</h3>
+            <p className="text-sm text-gray-500 mb-4">for <strong className="font-mono">{showPassDialog}</strong></p>
+            <form onSubmit={handleChangePassphrase}>
+              <input type="password" value={newAdminPass}
+                onChange={e => { setNewAdminPass(e.target.value); setPassError(""); }}
+                className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-indigo-500 mb-3"
+                placeholder="New passphrase (12+ chars)" autoFocus required disabled={changingPass} />
+              {passError && <p className="text-red-600 text-sm mb-2">{passError}</p>}
+              <div className="flex gap-3">
+                <button type="button" onClick={() => { setShowPassDialog(null); setNewAdminPass(""); setPassError(""); }}
+                  className="flex-1 px-3 py-2 border border-gray-300 rounded-lg text-sm hover:bg-gray-50" disabled={changingPass}>
+                  Cancel
+                </button>
+                <button type="submit" disabled={changingPass || newAdminPass.length < 12}
+                  className="flex-1 bg-indigo-600 text-white px-3 py-2 rounded-lg text-sm hover:bg-indigo-700 disabled:opacity-60">
+                  {changingPass ? "Updating..." : "Update"}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* TOTP Reset Confirmation */}
+      {showTOTPReset && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
+          <div className="bg-white rounded-lg shadow-xl p-6 w-full max-w-sm">
+            <div className="flex items-center gap-3 mb-3">
+              <Smartphone className="w-5 h-5 text-amber-600" />
+              <h3 className="text-lg font-semibold text-gray-900">Reset TOTP</h3>
+            </div>
+            <p className="text-sm text-gray-600 mb-4">
+              Reset two-factor authentication for <strong className="font-mono">{showTOTPReset}</strong>?
+              They will need to re-enroll.
+            </p>
+            <div className="flex gap-3">
+              <button onClick={() => setShowTOTPReset(null)}
+                className="flex-1 px-3 py-2 border border-gray-300 rounded-lg text-sm hover:bg-gray-50" disabled={totpResetLoading}>
+                Cancel
+              </button>
+              <button onClick={() => handleTOTPReset(showTOTPReset)} disabled={totpResetLoading}
+                className="flex-1 bg-amber-600 text-white px-3 py-2 rounded-lg text-sm hover:bg-amber-700 disabled:opacity-60">
+                {totpResetLoading ? "Resetting..." : "Reset TOTP"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ─── Admin Panel ─────────────────────────────────────────────────────────────
 
 export function Admin() {
-  const [tab, setTab] = useState<Tab>("terminal");
+  const [tab, setTab] = useState<Tab>("accounts");
 
   const tabs: { id: Tab; label: string; icon: typeof Terminal }[] = [
+    { id: "accounts", label: "Accounts",  icon: Users    },
     { id: "terminal", label: "Terminal",  icon: Terminal },
     { id: "services", label: "Services",  icon: Server   },
     { id: "files",    label: "Files",     icon: FileText  },
@@ -409,7 +748,7 @@ export function Admin() {
         </div>
         <div>
           <h1 className="text-2xl font-bold text-gray-900">Admin Panel</h1>
-          <p className="text-sm text-gray-500">Full system access — commands run as root</p>
+          <p className="text-sm text-gray-500">Manage accounts, run commands, and configure system services</p>
         </div>
       </div>
 
@@ -441,6 +780,7 @@ export function Admin() {
           ))}
         </div>
         <div className="p-6">
+          {tab === "accounts" && <AccountsTab />}
           {tab === "terminal" && <TerminalTab />}
           {tab === "services" && <ServicesTab />}
           {tab === "files"    && <FilesTab />}

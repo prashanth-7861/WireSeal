@@ -365,7 +365,7 @@ class LinuxAdapter(AbstractPlatformAdapter):
             raise SetupError(f"Failed to apply nftables rules: {stderr}") from exc
 
     def _configure_firewalld_full(
-        self, wg_port: int, wg_interface: str, pub_iface: str, subnet: str = "10.0.0.0/24"
+        self, wg_port: int, wg_interface: str, pub_iface: str, subnet: str = "192.168.1.0/24"
     ) -> None:
         """Configure firewalld with all rules needed for WireGuard VPN.
 

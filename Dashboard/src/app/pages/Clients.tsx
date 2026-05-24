@@ -212,7 +212,8 @@ export function Clients() {
   // ── Download config ──────────────────────────────────────────────────────
   const handleDownloadConfig = async (name: string, totpCodeOverride?: string) => {
     try {
-      const url = `/api/clients/${encodeURIComponent(name)}/config/download${totpCodeOverride ? `?code=${encodeURIComponent(totpCodeOverride)}` : ""}`;
+      const params = totpCodeOverride ? `?code=${encodeURIComponent(totpCodeOverride)}` : "";
+      const url = `/api/clients/${encodeURIComponent(name)}/config/download${params}`;
       const res = await fetch(url, { credentials: "same-origin" });
       if (!res.ok) {
         let msg = `Download failed (HTTP ${res.status})`;
@@ -224,30 +225,47 @@ export function Clients() {
         }
         throw new Error(msg);
       }
-      const blob = await res.blob();
-      // Try File System Access API first (shows "Save As" dialog in Chromium/WebView2)
-      try {
-        const handle = await (window as any).showSaveFilePicker({
-          suggestedName: `${name}.conf`,
-          types: [{ description: "WireGuard Config", accept: { "application/octet-stream": [".conf"] } }],
-        });
-        const writable = await handle.createWritable();
-        await writable.write(blob);
-        await writable.close();
-        setSuccess(`Config saved: ${name}.conf`);
-      } catch {
-        // Fallback: showSaveFilePicker cancelled or unavailable — use blob download
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement("a");
-        a.href = url;
-        a.download = `${name}.conf`;
-        document.body.appendChild(a);
-        a.click();
-        document.body.removeChild(a);
-        URL.revokeObjectURL(url);
-        setSuccess(`Config saved: ${name}.conf`);
+
+      // Check if File System Access API is available (Chromium/Edge/WebView2)
+      const canSaveAs = typeof (window as any).showSaveFilePicker === "function";
+
+      if (canSaveAs) {
+        // Method 1: Native "Save As" dialog via File System Access API
+        try {
+          const blob = await res.blob();
+          const handle = await (window as any).showSaveFilePicker({
+            suggestedName: `${name}.conf`,
+            types: [{ description: "WireGuard Config", accept: { "application/octet-stream": [".conf"] } }],
+          });
+          const writable = await handle.createWritable();
+          await writable.write(blob);
+          await writable.close();
+          setSuccess(`Config saved to: ${handle.name}`);
+          setTimeout(() => setSuccess(""), 5000);
+          return;
+        } catch (pickerErr: unknown) {
+          // User cancelled the picker — fall through to direct download
+          if (pickerErr instanceof DOMException && pickerErr.name === "AbortError") {
+            return; // User cancelled, do nothing
+          }
+          // showSaveFilePicker failed for another reason — fall through
+        }
       }
-      setTimeout(() => setSuccess(""), 4000);
+
+      // Method 2: Navigate to backend URL — triggers browser/WebView2 native
+      // download manager. The backend sends Content-Disposition: attachment so
+      // the current page doesn't navigate away. In WebView2 this opens the
+      // native "Save As" dialog; in browsers it downloads to the default folder.
+      const dlUrl = `/api/clients/${encodeURIComponent(name)}/config/download${params}`;
+      // Detour via a temp anchor to avoid fetch preflight + keep the page
+      const a = document.createElement("a");
+      a.href = dlUrl;
+      a.download = `${name}.conf`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      setSuccess(`Downloading ${name}.conf`);
+      setTimeout(() => setSuccess(""), 5000);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to download config");
     }

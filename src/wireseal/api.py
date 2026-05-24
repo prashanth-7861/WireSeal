@@ -1163,7 +1163,7 @@ def _detect_mtu() -> int:
                     if 500 < mtu_val <= 9000:  # reasonable range
                         mtus.append(mtu_val)
             if mtus:
-                return max(mtus) - 80
+                return min(max(mtus) - 80, 1420)
         else:
             import subprocess as _sp
             # Use ip route to find the outbound interface, then get its MTU
@@ -1180,10 +1180,10 @@ def _detect_mtu() -> int:
                     capture_output=True, text=True, timeout=5,
                 )
                 if mtu_result.returncode == 0:
-                    return int(mtu_result.stdout.strip()) - 80
+                    return min(int(mtu_result.stdout.strip()) - 80, 1420)
     except Exception:
         pass
-    return 1420  # safe default
+    return 1420  # optimal default for standard 1500 ethernet — WG overhead is 80 bytes
 
 
 def _resolve_client_endpoint(server_state: dict) -> str:
@@ -1429,7 +1429,7 @@ def _h_init_locked(req: "_Handler", _groups: tuple = ()) -> dict:
     if mode not in ("server", "client"):
         raise _ApiError("mode must be 'server' or 'client'.", 400)
 
-    subnet   = body.get("subnet", "10.0.0.0/24")
+    subnet   = body.get("subnet", "192.168.1.0/24")
     try:
         port = int(body.get("port", 51820))
     except (TypeError, ValueError):
@@ -2622,6 +2622,13 @@ def _h_add_client(req: "_Handler", _groups: tuple) -> dict:
     if tunnel_mode not in ("split-lan", "split-vpn", "full"):
         raise _ApiError("tunnel_mode must be 'split-lan', 'split-vpn', or 'full'.", 400)
 
+    # MTU: user override → server-detected → 1280 safe default
+    req_mtu = body.get("mtu")
+    if req_mtu is not None:
+        req_mtu = int(req_mtu)
+        if req_mtu < 1280 or req_mtu > 1420:
+            raise _ApiError("mtu must be between 1280 and 1420.", 400)
+
     # Access control fields (backward-compatible — all optional)
     access_level = body.get("access_level", "standard")
     from wireseal.security.access_control import (
@@ -2668,16 +2675,25 @@ def _h_add_client(req: "_Handler", _groups: tuple) -> dict:
         server_ip       = state.server["ip"]
         server_pub_key  = _extract(state.server["public_key"])
 
-        vpn_subnet  = state.ip_pool.get("subnet", "10.0.0.0/24")
+        vpn_subnet  = state.ip_pool.get("subnet", "192.168.1.0/24")
         lan_subnet  = state.server.get("lan_subnet", "")
-        if tunnel_mode == "full":
-            allowed_ips = "0.0.0.0/0"
-        elif tunnel_mode == "split-lan" and lan_subnet:
-            allowed_ips = f"{vpn_subnet}, {lan_subnet}"
-        else:
-            allowed_ips = vpn_subnet
+
+        # Re-detect LAN subnet if not stored (server init predates detection)
+        if not lan_subnet and tunnel_mode == "split-lan":
+            try:
+                lan_subnet = adapter.detect_lan_subnet()
+                if lan_subnet:
+                    state.server["lan_subnet"] = lan_subnet
+                    _session["cache"]["server"]["lan_subnet"] = lan_subnet
+            except Exception:
+                pass
+
+        # All modes route internet through VPN (0.0.0.0/0) for encryption.
+        # VPN exists to protect internet — no mode should bypass that.
+        allowed_ips = "0.0.0.0/0"
 
         builder       = ConfigBuilder()
+        client_mtu    = req_mtu if req_mtu is not None else _detect_mtu()
         client_config = builder.render_client_config(
             client_private_key=priv_key_str,
             client_ip=allocated_ip,
@@ -2685,7 +2701,7 @@ def _h_add_client(req: "_Handler", _groups: tuple) -> dict:
             server_public_key=server_pub_key,
             psk=psk_str,
             server_endpoint=server_endpoint,
-            mtu=_detect_mtu(),
+            mtu=client_mtu,
             allowed_ips=allowed_ips,
         )
 
@@ -4698,7 +4714,7 @@ def _h_rotate_client_keys(req: "_Handler", groups: tuple) -> dict:
         client_ip       = client_data["ip"]
         server_port     = server_data["port"]
         server_endpoint = _resolve_client_endpoint(server_data)
-        subnet          = state.ip_pool.get("subnet", "10.0.0.0/24")
+        subnet          = state.ip_pool.get("subnet", "192.168.1.0/24")
         prefix_length   = int(subnet.split("/")[1])
         dns_server      = client_data.get("dns_server", "1.1.1.1, 8.8.8.8")
 
@@ -4845,7 +4861,7 @@ def _h_rotate_server_keys(req: "_Handler", _groups: tuple) -> dict:
         server_data   = state.server
         server_port   = server_data["port"]
         server_ip     = server_data["ip"]
-        subnet        = state.ip_pool.get("subnet", "10.0.0.0/24")
+        subnet        = state.ip_pool.get("subnet", "192.168.1.0/24")
         prefix_length = int(subnet.split("/")[1])
 
         builder     = ConfigBuilder()

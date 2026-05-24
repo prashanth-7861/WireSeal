@@ -7,7 +7,6 @@ import { Security } from "./pages/Security";
 import { Settings } from "./pages/Settings";
 import { About } from "./pages/About";
 import { Admin } from "./pages/Admin";
-import { Admins } from "./pages/Admins";
 import { Dns } from "./pages/Dns";
 import { Backup } from "./pages/Backup";
 import { TwoFactor } from "./pages/TwoFactor";
@@ -28,7 +27,6 @@ export const router = createBrowserRouter([
       { path: "security", Component: Security },
       { path: "settings", Component: Settings },
       { path: "admin", Component: Admin },
-      { path: "admins", Component: Admins },
       { path: "dns", Component: Dns },
       { path: "two-factor", Component: TwoFactor },
       { path: "backup", Component: Backup },
