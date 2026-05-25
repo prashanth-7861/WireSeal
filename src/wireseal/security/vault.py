@@ -45,6 +45,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+# Must import stdlib platform BEFORE argon2 to prevent wireseal.platform from
+# shadowing it. argon2 internally imports "platform" and calls platform.machine();
+# without this pre-import, Python resolves "platform" to wireseal.platform and
+# fails with AttributeError. This pre-import caches the stdlib version so
+# argon2 (and any other transitive dependency) finds the correct module.
+import platform as _stdlib_platform  # noqa: F401 — intentional side-effect
+
 from argon2.low_level import Type, hash_secret_raw
 from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives import hashes

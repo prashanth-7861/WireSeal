@@ -68,6 +68,7 @@ async function _fetch<T>(
 export interface VaultInfo {
   initialized: boolean;
   locked: boolean;
+  admin_id: string | null;
   interface: string;
   pin_set: boolean;
   multi_admin: boolean;
@@ -356,6 +357,9 @@ export const api = {
 
   /** Returns the admin_id from the last successful unlock (null if locked). */
   getCurrentAdminId: (): string | null => _currentAdminId,
+
+  /** Set the current admin ID (used on auto-unlocked vaults). */
+  setCurrentAdminId: (id: string) => { _currentAdminId = id; },
 
   status: () =>
     _fetch<Status>("GET", "/status"),

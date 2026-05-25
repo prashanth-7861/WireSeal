@@ -119,6 +119,10 @@ function LayoutInner() {
         if (info.mode === "server" || info.mode === "client") {
           if (mode !== info.mode) setMode(info.mode);
         }
+        // Initialize admin ID for auto-unlocked vaults (not unlocked via the
+        // frontend unlock dialog, so _currentAdminId was never set).
+        if (info.admin_id) api.setCurrentAdminId(info.admin_id);
+        else if (!info.multi_admin) api.setCurrentAdminId("owner");
       }
       setPinSet(info.pin_set ?? false);
       setUnlockMode(info.pin_set ? "pin" : "passphrase");
