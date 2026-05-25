@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.9.32] — 2026-05-25
+
+### Fixed
+- **TOTP frontend status** — TwoFactor page now correctly reflects `totp_enrolled` after enrollment; `_currentAdminId` was never set on auto-unlocked vaults, causing `me` lookup to fail and status to always show "Not Protected"
+- **stdlib `platform` shadowing** — `wireseal.platform` package shadowed Python's stdlib `platform` module, causing `argon2` to fail with `AttributeError: module 'platform' has no attribute 'machine'` on vault unlock; pre-import forces correct module resolution
+
+### Changed
+- **`/api/vault-info`** — now returns `admin_id: "owner"` when vault is unlocked, allowing the frontend to identify the current admin without an explicit unlock call
+
+---
+
 ## [0.9.31] — 2026-05-25
 
 ### Added — Client Mode

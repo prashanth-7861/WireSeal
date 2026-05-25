@@ -7,7 +7,7 @@ passphrase, no cryptographic material is exposed.
 
 [![CI](https://github.com/prashanth-7861/WireSeal/actions/workflows/build.yml/badge.svg)](https://github.com/prashanth-7861/WireSeal/actions/workflows/build.yml)
 [![Python](https://img.shields.io/badge/python-3.12%20%E2%80%93%203.14-blue)](https://python.org)
-[![Version](https://img.shields.io/badge/version-0.9.31-green)](https://github.com/prashanth-7861/WireSeal/releases)
+[![Version](https://img.shields.io/badge/version-0.9.32-green)](https://github.com/prashanth-7861/WireSeal/releases)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 [![Website](https://img.shields.io/badge/website-wireseal.vercel.app-blue)](https://wireseal.vercel.app)
 
@@ -110,7 +110,7 @@ passphrase, no cryptographic material is exposed.
 - **Keyslot operations** — add, remove, change passphrase; v2→v3 vault upgrade
   happens automatically on first keyslot creation
 
-### Client Mode (v0.8 — enhanced v0.9.31)
+### Client Mode (v0.8 — enhanced v0.9.32)
 - **Kill switch** — blocks all traffic when the WireGuard tunnel drops unexpectedly;
   platform-native per OS (netsh advfirewall on Windows, iptables on Linux, pf on macOS);
   auto-disengages on intentional disconnect
