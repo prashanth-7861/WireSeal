@@ -2,7 +2,7 @@
 
 
 a = Analysis(
-    ['src\\wireseal\\tray.py'],
+    ['src/wireseal/tray.py'],
     pathex=[],
     binaries=[],
     datas=[],
