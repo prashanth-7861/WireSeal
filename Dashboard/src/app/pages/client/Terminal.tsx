@@ -1,10 +1,11 @@
 import { useState, useEffect, useRef, useCallback } from "react";
+import { useSearchParams } from "react-router";
 import { Terminal as XTerm } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { WebLinksAddon } from "@xterm/addon-web-links";
 import "@xterm/xterm/css/xterm.css";
 import { TerminalSquare, Play, Square, AlertTriangle } from "lucide-react";
-import { api, ClientTunnelStatus } from "../../api";
+import { api, ClientTunnelStatus, SshKey } from "../../api";
 
 /**
  * Base64-decode a string to a Uint8Array (binary-safe, unlike atob() for
@@ -41,6 +42,9 @@ export function Terminal() {
     password: "",
   });
   const [connecting, setConnecting] = useState(false);
+  const [authMode, setAuthMode] = useState<"password" | "key">("password");
+  const [selectedKey, setSelectedKey] = useState("");
+  const [sshKeys, setSshKeys] = useState<SshKey[]>([]);
   const [connected, setConnected] = useState(false);
   const [error, setError] = useState("");
   const [tofuPrompt, setTofuPrompt] = useState<{
@@ -57,6 +61,29 @@ export function Terminal() {
       .then(setTunnel)
       .catch(() => setTunnel(null));
   }, []);
+
+  // Load SSH keys on mount
+  useEffect(() => {
+    api.sshKeysList()
+      .then(res => setSshKeys(res.keys))
+      .catch(() => {});
+  }, []);
+
+  // Parse URL params for pre-fill
+  const [searchParams] = useSearchParams();
+  useEffect(() => {
+    const host = searchParams.get("host");
+    const port = searchParams.get("port");
+    const user = searchParams.get("user");
+    if (host || port || user) {
+      setConnectForm(prev => ({
+        ...prev,
+        host: host || prev.host,
+        port: port || prev.port,
+        username: user || prev.username,
+      }));
+    }
+  }, [searchParams]);
 
   // Initialize xterm once
   useEffect(() => {
@@ -193,7 +220,8 @@ export function Terminal() {
         host,
         port,
         username,
-        password,
+        ...(authMode === "password" ? { password } : {}),
+        ...(authMode === "key" && selectedKey ? { key_name: selectedKey } : {}),
         profile_name: tunnel.profile || "unknown",
       });
       wsUrl = tokenRes.ws_url;
@@ -399,15 +427,45 @@ export function Terminal() {
               />
             </div>
             <div className="col-span-10">
-              <label className="block text-xs font-medium text-gray-600 mb-1">Password</label>
-              <input
-                type="password"
-                value={connectForm.password}
-                onChange={(e) => setConnectForm({ ...connectForm, password: e.target.value })}
-                onKeyDown={(e) => { if (e.key === "Enter") handleConnect(); }}
-                className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500"
-                disabled={connecting}
-              />
+              <div className="flex items-center gap-1 mb-1.5 bg-gray-100 rounded-lg p-0.5 w-fit">
+                <button
+                  type="button"
+                  onClick={() => setAuthMode("password")}
+                  className={`px-3 py-1 text-xs rounded-md transition-colors ${authMode === "password" ? "bg-white text-gray-900 shadow-sm font-medium" : "text-gray-500 hover:text-gray-700"}`}
+                >
+                  Password
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setAuthMode("key")}
+                  className={`px-3 py-1 text-xs rounded-md transition-colors ${authMode === "key" ? "bg-white text-gray-900 shadow-sm font-medium" : "text-gray-500 hover:text-gray-700"}`}
+                >
+                  SSH Key
+                </button>
+              </div>
+              {authMode === "password" ? (
+                <input
+                  type="password"
+                  value={connectForm.password}
+                  onChange={(e) => setConnectForm({ ...connectForm, password: e.target.value })}
+                  onKeyDown={(e) => { if (e.key === "Enter") handleConnect(); }}
+                  className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                  disabled={connecting}
+                  placeholder="••••••••"
+                />
+              ) : (
+                <select
+                  value={selectedKey}
+                  onChange={(e) => setSelectedKey(e.target.value)}
+                  className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500 bg-white"
+                  disabled={connecting}
+                >
+                  <option value="">Select an SSH key...</option>
+                  {sshKeys.map(k => (
+                    <option key={k.name} value={k.name}>{k.name} ({k.type})</option>
+                  ))}
+                </select>
+              )}
             </div>
             <div className="col-span-2 flex items-end">
               <button
@@ -444,13 +502,22 @@ export function Terminal() {
             </span>
           </div>
           {connected && (
-            <button
-              onClick={disconnect}
-              className="flex items-center gap-1.5 px-2 py-1 bg-red-500/80 hover:bg-red-500 text-white rounded text-xs"
-            >
-              <Square className="w-3 h-3" />
-              Disconnect
-            </button>
+            <div className="flex items-center gap-2">
+              <button
+                onClick={() => window.location.href = `/client/sftp?host=${connectForm.host}&port=${connectForm.port}&user=${connectForm.username}`}
+                className="flex items-center gap-1.5 px-2 py-1 bg-blue-500/80 hover:bg-blue-500 text-white rounded text-xs"
+              >
+                <TerminalSquare className="w-3 h-3" />
+                File Browser
+              </button>
+              <button
+                onClick={disconnect}
+                className="flex items-center gap-1.5 px-2 py-1 bg-red-500/80 hover:bg-red-500 text-white rounded text-xs"
+              >
+                <Square className="w-3 h-3" />
+                Disconnect
+              </button>
+            </div>
           )}
         </div>
         <div

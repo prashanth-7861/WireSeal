@@ -36,6 +36,7 @@ import re
 import subprocess
 import sys
 import threading
+import time as _time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
@@ -164,6 +165,7 @@ _WG_IFACE   = "wg0"
 # hosts. The allowlist is stored in _VAULT_DIR so it lives alongside the vault
 # and is writable only by the process owner.
 _SSH_TARGETS_CONFIG_PATH = _VAULT_DIR / "ssh_targets.json"
+# SSH keys stored in vault state._data["ssh_keys"] via client.ssh_keys module
 
 # Regex that a valid SSH target hostname must match (no wildcards, no slashes).
 _SSH_HOST_RE = re.compile(r'^[a-zA-Z0-9.\-]{1,253}$')
@@ -208,6 +210,12 @@ _totp_session_verified: dict[str, float] = {}
 # Maps peer public_key → last_handshake_seconds from previous _h_status call.
 # Used to detect new handshake events for the audit log (DASH-06).
 _peer_handshake_cache: dict[str, int] = {}
+
+# SFTP per-session rate limiting: 50ms min interval, 50MB/min transfer
+_sftp_rate_last: dict[str, float] = {}
+_sftp_rate_bytes: dict[str, float] = {}
+_SFTP_MIN_INTERVAL = 0.05  # 50ms
+_SFTP_MAX_BYTES = 50 * 1024 * 1024  # 50MB/min
 
 
 # ---------------------------------------------------------------------------
@@ -742,13 +750,18 @@ def _require_client_mode() -> None:
         )
 
 
-def _require_confirmation(body: dict) -> None:
+def _require_confirmation(body: dict, allow_session_skip: bool = False) -> None:
     """Verify TOTP or passphrase confirmation for sensitive actions.
 
     Checks in order:
-    1. If admin has TOTP enrolled and body contains ``totp_code`` — verify it.
-    2. If body contains ``confirm_passphrase`` — verify against vault.
-    3. Otherwise raise 401.
+    1. If ``allow_session_skip`` is True and a TOTP session is still valid — skip.
+    2. If admin has TOTP enrolled and body contains ``totp_code`` — verify it.
+    3. If body contains ``confirm_passphrase`` — verify against vault.
+    4. Otherwise raise 401.
+
+    Irreversible operations (passphrase change, admin add/remove, key rotation,
+    uninstall, TOTP disable/reset, TOTP re-enrollment) MUST NOT set
+    ``allow_session_skip`` — they require fresh credentials every call.
     """
     _require_unlocked()
     with _lock:
@@ -764,8 +777,9 @@ def _require_confirmation(body: dict) -> None:
     totp_code = body.get("totp_code")
     confirm_pass = body.get("confirm_passphrase")
 
-    # Path 0: TOTP session still valid — skip re-prompt (TOTP-plan §8.2)
-    if totp_b32 is not None:
+    # Path 0: TOTP session still valid — skip re-prompt
+    # Only allowed for low-risk reversible operations (client management).
+    if allow_session_skip and totp_b32 is not None:
         import time as _time
         with _lock:
             verified_at = _totp_session_verified.get(admin_id)
@@ -872,6 +886,8 @@ def _require_totp_for_reveal(req: "_Handler") -> None:
         used_set = _totp_used_codes.setdefault(admin_id, set())
     ok = verify_totp(secret_raw, str(totp_code), used_codes=used_set)
     if not ok:
+        from wireseal.security.audit import AuditLog
+        AuditLog(_AUDIT_PATH).log("totp-failed", {"admin_id": admin_id}, actor=admin_id)
         _record_totp_failure(admin_id)
         raise _ApiError("Invalid TOTP code.", 401)
     import time as _time
@@ -2249,7 +2265,7 @@ def _h_edit_client(req: "_Handler", groups: tuple) -> dict:
         raise _ApiError("client name is required", 400)
 
     body = req._json()
-    _require_confirmation(body)
+    _require_confirmation(body, allow_session_skip=True)
 
     from wireseal.security.access_control import (
         VALID_ACCESS_LEVELS, validate_access_level_change,
@@ -2257,72 +2273,16 @@ def _h_edit_client(req: "_Handler", groups: tuple) -> dict:
     )
     from wireseal.security.audit import AuditLog
 
-    new_level = body.get("access_level")
-    new_privs = body.get("privileges")
-    new_desc = body.get("description")
 
-    if new_level is not None and new_level not in VALID_ACCESS_LEVELS:
-        raise _ApiError(
-            f"access_level must be one of: {', '.join(VALID_ACCESS_LEVELS)}", 400
-        )
-
-    actor_level = _get_actor_access_level()
-
-    with _lock:
-        vault      = _session["vault"]
-        passphrase = _session["passphrase"]
-        _actor_id  = _session.get("admin_id", "owner")
-        cache      = _session.get("cache") or {}
-
-    if name not in cache.get("clients", {}):
-        raise _ApiError(f"Client '{name}' not found.", 404)
-
-    changes: dict = {}
-    with vault.open(passphrase, admin_id=_actor_id) as state:
-        if name not in state.clients:
-            raise _ApiError(f"Client '{name}' not found.", 404)
-        client = state.clients[name]
-
-        # Access level change
-        if new_level is not None:
-            old_level = client.get("access_level", "standard")
-            err = validate_access_level_change(actor_level, old_level, new_level)
-            if err:
-                raise _ApiError(err, 403)
-            client["access_level"] = new_level
-            # Reset privileges to defaults for new level
-            client["privileges"] = default_privileges(
-                __import__("wireseal.security.access_control", fromlist=["AccessLevel"])
-                .AccessLevel.from_str(new_level)
-            )
-            changes["access_level"] = {"old": old_level, "new": new_level}
-
-        # Privilege overrides (only for custom level)
-        if new_privs is not None:
-            current_level = client.get("access_level", "standard")
-            if current_level == "custom":
-                old_privs = dict(client.get("privileges", {}))
-                client["privileges"] = merge_privileges(
-                    client.get("privileges", {}), new_privs
-                )
-                changes["privileges"] = {"old": old_privs, "new": client["privileges"]}
-            else:
-                raise _ApiError(
-                    "Privileges can only be customized for 'custom' access level.", 400
-                )
-
-        # Description
-        if new_desc is not None:
-            client["description"] = new_desc
-            changes["description"] = new_desc
-
-        vault.save(state, passphrase)
-
-    _refresh_cache_unlocked(vault, passphrase, _actor_id)
-    AuditLog(_AUDIT_PATH).log(
-        "client-edited", {"name": name, "changes": changes}, actor=_actor_id
-    )
-    return {"ok": True, "name": name, "changes": changes}
+def _h_server_status(req: "_Handler", _groups: tuple) -> dict:
+    """GET /api/server/status — return server runtime status."""
+    _require_unlocked()
+    _require_server_mode()
+    wireguard = _get_wireguard_adapter()
+    return {
+        "server_running": wireguard.is_running(),
+        "interface": _WIREGUARD_INTERFACE,
+    }
 
 
 def _h_extend_client(req: "_Handler", groups: tuple) -> dict:
@@ -2339,7 +2299,7 @@ def _h_extend_client(req: "_Handler", groups: tuple) -> dict:
         raise _ApiError("client name is required", 400)
 
     body = req._json()
-    _require_confirmation(body)
+    _require_confirmation(body, allow_session_skip=True)
 
     from wireseal.security.audit import AuditLog
     import time as _time
@@ -2425,7 +2385,7 @@ def _h_revoke_client(req: "_Handler", groups: tuple) -> dict:
         raise _ApiError("client name is required", 400)
 
     body = req._json()
-    _require_confirmation(body)
+    _require_confirmation(body, allow_session_skip=True)
 
     from wireseal.security.audit import AuditLog
 
@@ -2492,7 +2452,7 @@ def _h_suspend_client(req: "_Handler", groups: tuple) -> dict:
         raise _ApiError("client name is required", 400)
 
     body = req._json()
-    _require_confirmation(body)
+    _require_confirmation(body, allow_session_skip=True)
 
     action = body.get("action", "suspend")
     if action not in ("suspend", "unsuspend"):
@@ -2957,6 +2917,80 @@ def _h_client_qr(req: "_Handler", groups: tuple) -> dict:
     return {"name": name, "qr_png_b64": png_b64, "format": img_format}
 
 
+def _h_client_self_config(req: "_Handler", _groups: tuple) -> dict:
+    """GET /api/client/self/config — Client fetches its own config using heartbeat token.
+
+    Authenticated by the per-client heartbeat token (``X-WireSeal-Heartbeat``
+    header). Does NOT require vault unlock, server mode, or TOTP — intended
+    for machine-to-machine use where the client already holds its secret token.
+
+    Rate-limited to 1 request per 60 seconds per token to prevent brute-force
+    enumeration of heartbeat tokens.
+    """
+    import time as _time
+    import hmac as _hmac
+
+    presented = req.headers.get("X-WireSeal-Heartbeat", "") if hasattr(req, "headers") else ""
+    if not presented:
+        raise _ApiError("X-WireSeal-Heartbeat header is required.", 401)
+
+    # Rate limit per token
+    now = _time.time()
+    token_hash = hashlib.sha256(presented.encode()).hexdigest()[:16]
+    with _lock:
+        last = _heartbeat_cooldown.get(f"_self_config_{token_hash}", 0)
+        if now - last < 60.0:
+            raise _ApiError("Rate limit exceeded. Try again later.", 429)
+
+    with _lock:
+        vault = _session.get("vault")
+        passphrase = _session.get("passphrase")
+
+    if vault is None or passphrase is None:
+        raise _ApiError("Server vault is locked.", 503)
+
+    from wireseal.core.config_builder import ConfigBuilder
+
+    with vault.open(passphrase) as state:
+        client_name = None
+        cdata = None
+        for cname, cdata_raw in state.clients.items():
+            stored_token = cdata_raw.get("heartbeat_token", "")
+            if stored_token and _hmac.compare_digest(presented, stored_token):
+                client_name = cname
+                cdata = cdata_raw
+                break
+
+        if not client_name or cdata is None:
+            raise _ApiError("Client not found or heartbeat token mismatch.", 404)
+
+        _heartbeat_cooldown[f"_self_config_{token_hash}"] = now
+
+        heartbeat_token = cdata.get("heartbeat_token", "")
+        config_str = ConfigBuilder().render_client_config(
+            client_private_key=_extract(cdata["private_key"]),
+            client_ip=cdata["ip"],
+            dns_server="1.1.1.1, 8.8.8.8",
+            server_public_key=_extract(state.server["public_key"]),
+            psk=_extract(cdata["psk"]),
+            server_endpoint=_resolve_client_endpoint(state.server),
+            mtu=_detect_mtu(),
+            allowed_ips=cdata.get("allowed_ips", "0.0.0.0/0"),
+        )
+
+    from wireseal.security.audit import AuditLog
+    try:
+        AuditLog(_AUDIT_PATH).log(
+            "client-self-config",
+            {"name": client_name},
+            actor="system",
+        )
+    except Exception:
+        pass
+
+    return {"name": client_name, "config": config_str, "heartbeat_token": heartbeat_token}
+
+
 def _h_client_config(req: "_Handler", groups: tuple) -> dict:
     """Return the client WireGuard config as text for download."""
     _require_unlocked()
@@ -3294,7 +3328,12 @@ def _parse_sftp_log_line(line: str) -> dict | None:
 
 def _h_change_passphrase(req: "_Handler", _groups: tuple) -> dict:
     _require_unlocked()
-    body        = req._json()
+    body = req._json()
+    # SEC-TOTP-01: require TOTP or passphrase re-confirmation before allowing
+    # passphrase change. An attacker with an unlocked session (walked-away
+    # terminal, XSS in dashboard, compromised same-origin tab) must still
+    # prove possession of TOTP to escalate to permanent control.
+    _require_confirmation(body)
     current_str = body.get("current", "")
     new_str     = body.get("new", "")
 
@@ -4071,6 +4110,10 @@ def _h_service_stop(req: "_Handler", _groups: tuple) -> dict:
 def _h_uninstall(req: "_Handler", _groups: tuple) -> dict:
     _require_unlocked()
     body = req._json()
+    # SEC-TOTP-08: require TOTP confirmation before uninstall. This operation
+    # destroys the entire WireSeal installation — vault, configs, and service.
+    # An unlocked session alone is insufficient authority.
+    _require_confirmation(body)
     if body.get("confirm") != "UNINSTALL":
         raise _ApiError(
             "POST body must include {\"confirm\": \"UNINSTALL\"} to proceed.",
@@ -4678,6 +4721,10 @@ def _h_rotate_client_keys(req: "_Handler", groups: tuple) -> dict:
     """
     _require_unlocked()
     _require_server_mode()
+    # SEC-TOTP-07: require TOTP confirmation before rotating client keys.
+    # Client key rotation invalidates the existing config — all connected
+    # sessions for this client are terminated until the new config is deployed.
+    _require_confirmation(req._json())
     name = (groups[0] if groups else "").strip()
     if not name:
         raise _ApiError("client name is required", 400)
@@ -4836,6 +4883,10 @@ def _h_rotate_server_keys(req: "_Handler", _groups: tuple) -> dict:
     """
     _require_unlocked()
     _require_server_mode()
+    # SEC-TOTP-05: require TOTP before rotating server keys. This operation
+    # disrupts ALL connected clients — an attacker with an unlocked session
+    # must still prove TOTP possession to trigger mass-eviction.
+    _require_confirmation(req._json())
 
     with _lock:
         vault      = _session["vault"]
@@ -4998,7 +5049,11 @@ def _h_add_admin(req: "_Handler", _groups: tuple) -> dict:
     """POST /api/admins — add a new admin keyslot."""
     _require_unlocked()
     _require_owner()
-    body       = req._json()
+    body = req._json()
+    # SEC-TOTP-02: require TOTP confirmation before adding admin keyslots.
+    # Adding a new admin is permanent privilege escalation — an attacker
+    # with an unlocked session must still prove TOTP possession.
+    _require_confirmation(body)
     admin_id   = body.get("admin_id", "").strip()
     passphrase = body.get("passphrase", "")
     role       = body.get("role", "admin")
@@ -5067,6 +5122,39 @@ def _h_remove_admin(req: "_Handler", groups: tuple) -> dict:
     if target_id in owners and len(owners) == 1:
         raise _ApiError("cannot remove the last owner", 409)
 
+    # SEC-TOTP-04: require TOTP for admin removal (DELETE has no body, read
+    # totp_code from query string). This prevents admin deletion via CSRF or
+    # unattended unlocked session.
+    from wireseal.security.totp import verify_totp, b32_to_secret
+    from wireseal.security.secret_types import SecretBytes
+    with _lock:
+        cache = _session.get("cache") or {}
+    admin_info = (cache.get("admins", {}) or {}).get(acting_id, {})
+    totp_b32 = admin_info.get("totp_secret_b32")
+    if totp_b32 is not None:
+        try:
+            from urllib.parse import urlsplit, parse_qs as _parse_qs_del
+            q = urlsplit(getattr(req, "path", "") or "").query
+            totp_code = (_parse_qs_del(q).get("totp_code") or [None])[0]
+        except Exception:
+            totp_code = None
+        if not totp_code:
+            raise _ApiError("totp_code required to remove admin. Add ?totp_code=... to the URL.", 401)
+        _check_totp_rate_limit(acting_id)
+        if isinstance(totp_b32, SecretBytes):
+            totp_b32_str = bytes(totp_b32.expose_secret()).decode("utf-8")
+        else:
+            totp_b32_str = str(totp_b32)
+        secret_raw = b32_to_secret(totp_b32_str)
+        with _lock:
+            used_set = _totp_used_codes.setdefault(acting_id, set())
+        ok = verify_totp(secret_raw, str(totp_code), used_codes=used_set)
+        if not ok:
+            from wireseal.security.audit import AuditLog
+            AuditLog(_AUDIT_PATH).log("totp-failed", {"admin_id": acting_id}, actor=acting_id)
+            _record_totp_failure(acting_id)
+            raise _ApiError("Invalid TOTP code.", 401)
+
     try:
         with vault.open(sess_pass, admin_id=acting_id) as state:
             vault.remove_keyslot(target_id)
@@ -5106,7 +5194,12 @@ def _h_change_admin_passphrase(req: "_Handler", groups: tuple) -> dict:
     if acting_role != "owner" and acting_id != target_id:
         raise _ApiError("may only change your own passphrase", 403)
 
-    body           = req._json()
+    body = req._json()
+    # SEC-TOTP-03: require TOTP before changing any admin passphrase.
+    # Owner changing another admin's passphrase bypasses the old-passphrase
+    # check — this must be gated by TOTP to prevent lateral movement from
+    # an unattended unlocked session.
+    _require_confirmation(body)
     new_passphrase = body.get("new_passphrase", "")
     old_passphrase = body.get("old_passphrase", "")
     if not new_passphrase:
@@ -6355,6 +6448,7 @@ _CLIENT_SETTINGS_DEFAULTS: dict = {
     "kill_switch": False,
     "dns_override": "",
     "ssh_saved_hosts": [],
+    "sftp_saved_connections": [],
 }
 
 
@@ -6459,6 +6553,44 @@ def _h_client_settings_put(req: "_Handler", _groups: tuple) -> dict:
                 "label": label_val[:64],
             })
         body["ssh_saved_hosts"] = validated
+
+    if "sftp_saved_connections" in body:
+        conns = body["sftp_saved_connections"]
+        if not isinstance(conns, list):
+            raise _ApiError("sftp_saved_connections must be a list", 400)
+        if len(conns) > 50:
+            raise _ApiError("Maximum 50 saved SFTP connections", 400)
+        validated_conns: list[dict] = []
+        for c in conns:
+            if not isinstance(c, dict):
+                raise _ApiError("Each SFTP connection must be an object", 400)
+            label_val = str(c.get("label", "")).strip()[:64]
+            host_val = str(c.get("host", "")).strip()
+            port_val = int(c.get("port", 22))
+            user_val = str(c.get("username", "")).strip()
+            auth_val = str(c.get("auth_mode", "password")).strip()
+            key_val = str(c.get("key_name", "")).strip()
+            if not host_val:
+                raise _ApiError("SFTP connection host is required", 400)
+            if port_val < 1 or port_val > 65535:
+                raise _ApiError("SFTP port must be 1-65535", 400)
+            if not user_val:
+                raise _ApiError("SFTP username is required", 400)
+            if not re.fullmatch(r"[a-zA-Z0-9.\-:]+", host_val):
+                raise _ApiError(f"Invalid SFTP host: {host_val}", 400)
+            if not re.fullmatch(r"[a-zA-Z0-9._\-]+", user_val):
+                raise _ApiError(f"Invalid SFTP username: {user_val}", 400)
+            if auth_val not in ("password", "key"):
+                raise _ApiError("auth_mode must be 'password' or 'key'", 400)
+            validated_conns.append({
+                "label": label_val,
+                "host": host_val,
+                "port": port_val,
+                "username": user_val,
+                "auth_mode": auth_val,
+                "key_name": key_val,
+            })
+        body["sftp_saved_connections"] = validated_conns
 
     # Only allow known keys
     allowed_keys = set(_CLIENT_SETTINGS_DEFAULTS.keys())
@@ -6592,6 +6724,7 @@ def _h_ssh_token(req: "_Handler", _groups: tuple) -> dict:
     password = body.get("password")  # Optional — None means try key auth (not yet supported)
     profile_name = str(body.get("profile_name", "")).strip()
     term = str(body.get("term", "xterm-256color")).strip() or "xterm-256color"
+    key_name = str(body.get("key_name", "")).strip() or None
 
     if not host:
         raise _ApiError("host is required", 400)
@@ -6619,6 +6752,23 @@ def _h_ssh_token(req: "_Handler", _groups: tuple) -> dict:
             409,
         )
 
+     # If key_name is set, resolve it to PEM from the vault state
+    key_pem: str | None = None
+    if key_name:
+        vault = _session.get("vault")
+        passphrase = _session.get("passphrase")
+        if vault and passphrase:
+            try:
+                with vault.open(passphrase) as state:
+                    from wireseal.client.ssh_keys import get_private_key
+                    try:
+                        key = get_private_key(state._data, key_name)
+                        key_pem = key.export_private_key().decode("utf-8")
+                    except KeyError:
+                        raise _ApiError(f"SSH key '{key_name}' not found", 404)
+            except Exception as exc:
+                raise _ApiError(f"Failed to load SSH key: {exc}", 500)
+
     from wireseal.ssh.session_manager import get_manager
     from wireseal.ssh.ws_bridge import DEFAULT_PATH, DEFAULT_PORT
     from wireseal.security.audit import AuditLog
@@ -6633,6 +6783,8 @@ def _h_ssh_token(req: "_Handler", _groups: tuple) -> dict:
         profile_name=profile_name,
         actor_id=actor_id,
         term=term,
+        key_name=key_name,
+        key_pem=key_pem,
     )
 
     AuditLog(_AUDIT_PATH).log(
@@ -6654,10 +6806,38 @@ def _h_ssh_token(req: "_Handler", _groups: tuple) -> dict:
     }
 
 
+def _validate_sftp_path(path: str) -> str:
+    """Validate and normalize an SFTP path. Raise _ApiError on traversal."""
+    import posixpath as _posixpath
+    normalized = _posixpath.normpath(path)
+    if normalized.startswith("..") or ".." in normalized.split("/"):
+        raise _ApiError("Path traversal not allowed", 400)
+    if "\x00" in normalized:
+        raise _ApiError("Invalid path", 400)
+    return normalized
+
+
+def _check_sftp_rate(session_id: str, bytes_transferred: int = 0) -> None:
+    now = _time.monotonic()
+    last = _sftp_rate_last.get(session_id, 0)
+    if now - last < _SFTP_MIN_INTERVAL:
+        raise _ApiError("Too many requests", 429)
+    _sftp_rate_last[session_id] = now
+
+    if bytes_transferred > 0:
+        byte_budget = _sftp_rate_bytes.get(session_id, _SFTP_MAX_BYTES)
+        if now - _sftp_rate_bytes.get(f"{session_id}_reset", 0) > 60:
+            byte_budget = _SFTP_MAX_BYTES
+            _sftp_rate_bytes[f"{session_id}_reset"] = now
+        if bytes_transferred > byte_budget:
+            raise _ApiError("Transfer rate limit exceeded", 429)
+        _sftp_rate_bytes[session_id] = byte_budget - bytes_transferred
+
+
 def _h_sftp_connect(req: "_Handler", _groups: tuple) -> dict:
     """POST /api/sftp/connect — Open an SFTP session.
 
-    Body: {host, port, username, password}
+    Body: {host, port, username, password, key_name}
     Returns: {session_id, host, port, username}
     """
     _require_unlocked()
@@ -6668,23 +6848,65 @@ def _h_sftp_connect(req: "_Handler", _groups: tuple) -> dict:
     port = int(body.get("port", 22))
     username = str(body.get("username", "")).strip()
     password = str(body.get("password", ""))
+    key_name = str(body.get("key_name", "")).strip() or None
     if not host or not username:
         raise _ApiError("host and username are required", 400)
     if port < 1 or port > 65535:
         raise _ApiError("port out of range", 400)
 
+    # If key_name is set, resolve it to PEM from the vault state
+    key_pem: str | None = None
+    if key_name:
+        vault = _session.get("vault")
+        passphrase = _session.get("passphrase")
+        if vault and passphrase:
+            try:
+                with vault.open(passphrase) as state:
+                    from wireseal.client.ssh_keys import get_private_key
+                    try:
+                        key = get_private_key(state._data, key_name)
+                        key_pem = key.export_private_key().decode("utf-8")
+                    except KeyError:
+                        raise _ApiError(f"SSH key '{key_name}' not found", 404)
+            except Exception as exc:
+                raise _ApiError(f"Failed to load SSH key: {exc}", 500)
+
     from wireseal.sftp.bridge import get_manager as _sftp_mgr
     from wireseal.security.audit import AuditLog
 
     try:
-        session_id = _sftp_mgr().connect(host, port, username, password)
+        session_id = _sftp_mgr().connect(host, port, username, password, key_name=key_name, key_pem=key_pem or "")
         with _lock:
             _actor = _session.get("admin_id", "unknown")
         AuditLog(_AUDIT_PATH).log("sftp-connect", {"host": host, "port": port, "username": username},
                                   actor=_actor)
+
+        # Auto-save to recent connections in client settings
+        try:
+            if _session.get("vault") and _session.get("passphrase"):
+                v = _session["vault"]
+                pp = _session["passphrase"]
+                with v.open(pp) as _st:
+                    _settings = _st.data.get("client_settings", {})
+                    _saved = _settings.get("sftp_saved_connections", [])
+                    _saved = [c for c in _saved if not (c["host"] == host and c["username"] == username)]
+                    _saved.insert(0, {
+                        "label": "",
+                        "host": host,
+                        "port": port,
+                        "username": username,
+                        "auth_mode": "key" if key_name else "password",
+                        "key_name": key_name or "",
+                    })
+                    _saved = _saved[:50]
+                    _settings["sftp_saved_connections"] = _saved
+                    _st.data["client_settings"] = _settings
+                    v.save(_st, pp)
+        except Exception:
+            pass
+
         return {"session_id": session_id, "host": host, "port": port, "username": username}
     except OSError as e:
-        # Translation: asyncssh "Error connecting" includes auth failures
         err_msg = str(e)
         if "authentication" in err_msg.lower() or "auth" in err_msg.lower():
             raise _ApiError("Authentication failed. Check username and password.", 502)
@@ -6701,6 +6923,7 @@ def _h_sftp_disconnect(req: "_Handler", _groups: tuple) -> dict:
     session_id = str(body.get("session_id", "")).strip() if isinstance(body, dict) else ""
     if not session_id:
         raise _ApiError("session_id is required", 400)
+    _check_sftp_rate(session_id)
     from wireseal.sftp.bridge import get_manager as _sftp_mgr
     _sftp_mgr().disconnect(session_id)
     return {"ok": True}
@@ -6716,9 +6939,10 @@ def _h_sftp_list(req: "_Handler", _groups: tuple) -> dict:
     if not isinstance(body, dict):
         raise _ApiError("Invalid JSON body", 400)
     session_id = str(body.get("session_id", "")).strip()
-    path = str(body.get("path", "/")).strip()
+    path = _validate_sftp_path(str(body.get("path", "/")).strip())
     if not session_id:
         raise _ApiError("session_id is required", 400)
+    _check_sftp_rate(session_id)
 
     from wireseal.sftp.bridge import get_manager as _sftp_mgr
     import asyncssh as _asyncssh
@@ -6729,8 +6953,10 @@ def _h_sftp_list(req: "_Handler", _groups: tuple) -> dict:
         async for entry in session.sftp.scandir(path):
             attrs = entry.attributes
             is_dir = False
+            perm_str = ""
             if hasattr(attrs, 'permissions') and attrs.permissions:
                 is_dir = bool(attrs.permissions & 0o40000)
+                perm_str = oct(attrs.permissions)[2:]
             elif hasattr(attrs, 'type'):
                 is_dir = attrs.type == 2
             entries.append({
@@ -6738,6 +6964,7 @@ def _h_sftp_list(req: "_Handler", _groups: tuple) -> dict:
                 "size": attrs.size if hasattr(attrs, 'size') else 0,
                 "type": "dir" if is_dir else "file",
                 "modified": attrs.mtime if hasattr(attrs, 'mtime') and attrs.mtime else 0,
+                "permissions": perm_str,
             })
         entries.sort(key=lambda e: (0 if e["type"] == "dir" else 1, e["name"].lower()))
         return {"path": path, "entries": entries}
@@ -6758,7 +6985,7 @@ def _h_sftp_read(req: "_Handler", _groups: tuple) -> dict:
     if not isinstance(body, dict):
         raise _ApiError("Invalid JSON body", 400)
     session_id = str(body.get("session_id", "")).strip()
-    path = str(body.get("path", "")).strip()
+    path = _validate_sftp_path(str(body.get("path", "")).strip())
     if not session_id or not path:
         raise _ApiError("session_id and path are required", 400)
 
@@ -6771,6 +6998,7 @@ def _h_sftp_read(req: "_Handler", _groups: tuple) -> dict:
         session = _sftp_mgr().get(session_id)
         stat = await session.sftp.stat(path)
         size = stat.size if hasattr(stat, 'size') else 0
+        _check_sftp_rate(session_id, size)
         if size > MAX_READ:
             raise _ApiError("File too large (max 10 MB)", 413)
         data = await session.sftp.readbytes(path)
@@ -6796,10 +7024,11 @@ def _h_sftp_write(req: "_Handler", _groups: tuple) -> dict:
     if not isinstance(body, dict):
         raise _ApiError("Invalid JSON body", 400)
     session_id = str(body.get("session_id", "")).strip()
-    path = str(body.get("path", "")).strip()
+    path = _validate_sftp_path(str(body.get("path", "")).strip())
     content_b64 = str(body.get("content_b64", "")).strip()
     if not session_id or not path or not content_b64:
         raise _ApiError("session_id, path, and content_b64 are required", 400)
+    _check_sftp_rate(session_id)
 
     from wireseal.sftp.bridge import get_manager as _sftp_mgr
     import asyncssh as _asyncssh
@@ -6813,6 +7042,7 @@ def _h_sftp_write(req: "_Handler", _groups: tuple) -> dict:
         raise _ApiError("Invalid base64 content", 400)
     if len(data) > MAX_WRITE:
         raise _ApiError("File too large (max 50 MB)", 413)
+    _check_sftp_rate(session_id, len(data))
 
     async def _write():
         session = _sftp_mgr().get(session_id)
@@ -6841,9 +7071,10 @@ def _h_sftp_delete(req: "_Handler", _groups: tuple) -> dict:
     if not isinstance(body, dict):
         raise _ApiError("Invalid JSON body", 400)
     session_id = str(body.get("session_id", "")).strip()
-    path = str(body.get("path", "")).strip()
+    path = _validate_sftp_path(str(body.get("path", "")).strip())
     if not session_id or not path:
         raise _ApiError("session_id and path are required", 400)
+    _check_sftp_rate(session_id)
 
     from wireseal.sftp.bridge import get_manager as _sftp_mgr
     import asyncssh as _asyncssh
@@ -6878,10 +7109,11 @@ def _h_sftp_rename(req: "_Handler", _groups: tuple) -> dict:
     if not isinstance(body, dict):
         raise _ApiError("Invalid JSON body", 400)
     session_id = str(body.get("session_id", "")).strip()
-    path = str(body.get("path", "")).strip()
-    new_path = str(body.get("new_path", "")).strip()
+    path = _validate_sftp_path(str(body.get("path", "")).strip())
+    new_path = _validate_sftp_path(str(body.get("new_path", "")).strip())
     if not session_id or not path or not new_path:
         raise _ApiError("session_id, path, and new_path are required", 400)
+    _check_sftp_rate(session_id)
 
     from wireseal.sftp.bridge import get_manager as _sftp_mgr
     import asyncssh as _asyncssh
@@ -6914,9 +7146,10 @@ def _h_sftp_mkdir(req: "_Handler", _groups: tuple) -> dict:
     if not isinstance(body, dict):
         raise _ApiError("Invalid JSON body", 400)
     session_id = str(body.get("session_id", "")).strip()
-    path = str(body.get("path", "")).strip()
+    path = _validate_sftp_path(str(body.get("path", "")).strip())
     if not session_id or not path:
         raise _ApiError("session_id and path are required", 400)
+    _check_sftp_rate(session_id)
 
     from wireseal.sftp.bridge import get_manager as _sftp_mgr
     import asyncssh as _asyncssh
@@ -6948,10 +7181,11 @@ def _h_sftp_copy(req: "_Handler", _groups: tuple) -> dict:
     if not isinstance(body, dict):
         raise _ApiError("Invalid JSON body", 400)
     session_id = str(body.get("session_id", "")).strip()
-    path = str(body.get("path", "")).strip()
-    new_path = str(body.get("new_path", "")).strip()
+    path = _validate_sftp_path(str(body.get("path", "")).strip())
+    new_path = _validate_sftp_path(str(body.get("new_path", "")).strip())
     if not session_id or not path or not new_path:
         raise _ApiError("session_id, path, and new_path are required", 400)
+    _check_sftp_rate(session_id)
 
     from wireseal.sftp.bridge import get_manager as _sftp_mgr
     import asyncssh as _asyncssh
@@ -7020,6 +7254,98 @@ def _h_ssh_sessions(req: "_Handler", _groups: tuple) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# SSH Key Management (Phase 2)
+# ---------------------------------------------------------------------------
+
+def _h_ssh_keys_list(req: "_Handler", _groups: tuple) -> dict:
+    """GET /api/ssh/keys — List all stored SSH keys (metadata only)."""
+    _require_unlocked()
+    vault = _session.get("vault")
+    passphrase = _session.get("passphrase")
+    if not vault or not passphrase:
+        raise _ApiError("Vault not unlocked", 401)
+    with vault.open(passphrase) as state:
+        from wireseal.client.ssh_keys import list_keys
+        result = list_keys(state._data)
+    return {"keys": result}
+
+
+def _h_ssh_keys_generate(req: "_Handler", _groups: tuple) -> dict:
+    """POST /api/ssh/keys — Generate a new SSH key pair.
+
+    Body: {name, key_type}
+    key_type: "ed25519" | "rsa-2048" | "rsa-4096"
+    """
+    _require_unlocked()
+    vault = _session.get("vault")
+    passphrase = _session.get("passphrase")
+    if not vault or not passphrase:
+        raise _ApiError("Vault not unlocked", 401)
+    body = req._json()
+    name = str(body.get("name", "")).strip()
+    key_type = str(body.get("key_type", "")).strip()
+    if not name:
+        raise _ApiError("name is required", 400)
+    if key_type not in ("ed25519", "rsa-2048", "rsa-4096"):
+        raise _ApiError("key_type must be 'ed25519', 'rsa-2048', or 'rsa-4096'", 400)
+
+    from wireseal.client.ssh_keys import generate_keypair
+    with vault.open(passphrase) as state:
+        if name in state._data.get("ssh_keys", {}):
+            raise _ApiError(f"Key '{name}' already exists", 409)
+        entry = generate_keypair(state._data, name, key_type)
+        vault.save(state, passphrase)
+    return {
+        "name": name,
+        "type": entry["type"],
+        "fingerprint": entry["fingerprint"],
+        "created_at": entry["created_at"],
+    }
+
+
+def _h_ssh_keys_delete(req: "_Handler", _groups: tuple) -> dict:
+    """DELETE /api/ssh/keys/<name> — Delete an SSH key from the vault."""
+    _require_unlocked()
+    vault = _session.get("vault")
+    passphrase = _session.get("passphrase")
+    if not vault or not passphrase:
+        raise _ApiError("Vault not unlocked", 401)
+    name = _groups[0] if _groups else ""
+    if not name:
+        raise _ApiError("Key name is required", 400)
+    from wireseal.client.ssh_keys import delete_key
+    with vault.open(passphrase) as state:
+        try:
+            delete_key(state._data, name)
+        except KeyError:
+            raise _ApiError(f"Key '{name}' not found", 404)
+        vault.save(state, passphrase)
+    return {"ok": True}
+
+
+def _h_ssh_keys_public(req: "_Handler", _groups: tuple) -> dict:
+    """GET /api/ssh/keys/<name>/public — Return the public key string."""
+    _require_unlocked()
+    vault = _session.get("vault")
+    passphrase = _session.get("passphrase")
+    if not vault or not passphrase:
+        raise _ApiError("Vault not unlocked", 401)
+    name = _groups[0] if _groups else ""
+    if not name:
+        raise _ApiError("Key name is required", 400)
+    from wireseal.client.ssh_keys import export_public_key
+    with vault.open(passphrase) as state:
+        try:
+            public_key = export_public_key(state._data, name)
+        except KeyError:
+            raise _ApiError(f"Key '{name}' not found", 404)
+    return {
+        "name": name,
+        "public_key": public_key,
+    }
+
+
+# ---------------------------------------------------------------------------
 # Routing table  — order matters for overlapping patterns
 # ---------------------------------------------------------------------------
 
@@ -7050,6 +7376,8 @@ _ROUTES: list[tuple[str, re.Pattern, Any]] = [
     ("POST",   re.compile(r"^/api/clients/([^/]+)/suspend$"), _h_suspend_client),
     ("DELETE", re.compile(r"^/api/clients/([^/]+)$"),         _h_remove_client),
     ("POST",   re.compile(r"^/api/heartbeat/([^/]+)$"),      _h_heartbeat),
+    # Self-service: client fetches its own config using heartbeat token (no TOTP required)
+    ("GET",    re.compile(r"^/api/client/self/config$"),     _h_client_self_config),
     ("GET",    re.compile(r"^/api/audit-log$"),              _h_audit_log),
     ("GET",    re.compile(r"^/api/session-summary$"),         _h_session_summary),
     ("GET",    re.compile(r"^/api/file-activity$"),           _h_file_activity),
@@ -7122,6 +7450,11 @@ _ROUTES: list[tuple[str, re.Pattern, Any]] = [
     ("POST",   re.compile(r"^/api/ssh/token$"),                         _h_ssh_token),
     ("POST",   re.compile(r"^/api/ssh/accept-host-key$"),               _h_ssh_accept_host_key),
     ("GET",    re.compile(r"^/api/ssh/sessions$"),                      _h_ssh_sessions),
+    # SSH key management (Phase 2)
+    ("GET",    re.compile(r"^/api/ssh/keys$"),                          _h_ssh_keys_list),
+    ("POST",   re.compile(r"^/api/ssh/keys$"),                          _h_ssh_keys_generate),
+    ("GET",    re.compile(r"^/api/ssh/keys/([^/]+)/public$"),           _h_ssh_keys_public),
+    ("DELETE", re.compile(r"^/api/ssh/keys/([^/]+)$"),                  _h_ssh_keys_delete),
     # SFTP file browser
     ("POST",   re.compile(r"^/api/sftp/connect$"),                        _h_sftp_connect),
     ("POST",   re.compile(r"^/api/sftp/disconnect$"),                     _h_sftp_disconnect),

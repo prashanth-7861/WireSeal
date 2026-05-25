@@ -61,4 +61,16 @@ master
 Result
 SecretBytes
 verify
-"Sftp_temp.tsx"  
+"Sftp_temp.tsx"
+
+# Agent skills
+.agents/
+
+# Temp files
+server.pid
+bootstrap_*.py
+*.md
+!README.md
+!CHANGELOG.md
+skills-lock.json
+graphify-out/  

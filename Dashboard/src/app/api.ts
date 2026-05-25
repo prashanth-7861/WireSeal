@@ -138,6 +138,7 @@ export interface SftpEntry {
   size: number;
   type: "file" | "dir";
   modified: number;
+  permissions?: string;
 }
 
 export interface SftpListResponse { path: string; entries: SftpEntry[]; }
@@ -288,13 +289,23 @@ export interface ClientSettings {
   kill_switch: boolean;
   dns_override: string;
   ssh_saved_hosts: SshSavedHost[];
+  sftp_saved_connections: SftpSavedConnection[];
 }
 
-export interface SshSavedHost {
+export interface SftpSavedConnection {
+  label: string;
   host: string;
   port: number;
   username: string;
-  label: string;
+  auth_mode: "password" | "key";
+  key_name: string;
+}
+
+export interface SshKey {
+  name: string;
+  type: string;
+  fingerprint: string;
+  created_at: string;
 }
 
 export interface SshSessionInfo {
@@ -663,6 +674,7 @@ export const api = {
     port: number;
     username: string;
     password?: string;
+    key_name?: string;
     profile_name: string;
     term?: string;
   }) =>
@@ -676,9 +688,22 @@ export const api = {
   sshSessions: () =>
     _fetch<{ sessions: SshSessionInfo[] }>("GET", "/ssh/sessions"),
 
+  // ── SSH key management ──────────────────────────────────────────────────
+  sshKeysList: () =>
+    _fetch<{ keys: SshKey[] }>("GET", "/ssh/keys"),
+
+  sshKeysGenerate: (name: string, key_type: string = "ed25519") =>
+    _fetch<SshKey>("POST", "/ssh/keys", { name, key_type }),
+
+  sshKeysDelete: (name: string) =>
+    _fetch<{ ok: boolean }>("DELETE", `/ssh/keys/${encodeURIComponent(name)}`),
+
+  sshKeysPublic: (name: string) =>
+    _fetch<{ public_key: string }>("GET", `/ssh/keys/${encodeURIComponent(name)}/public`),
+
   // ── SFTP file browser ──────────────────────────────────────────────────
-  sftpConnect: (host: string, port: number, username: string, password: string) =>
-    _fetch<{ session_id: string; host: string; port: number; username: string }>("POST", "/sftp/connect", { host, port, username, password }),
+  sftpConnect: (host: string, port: number, username: string, password: string, key_name?: string) =>
+    _fetch<{ session_id: string; host: string; port: number; username: string }>("POST", "/sftp/connect", { host, port, username, password, ...(key_name ? { key_name } : {}) }),
 
   sftpDisconnect: (sessionId: string) =>
     _fetch<{ ok: boolean }>("POST", "/sftp/disconnect", { session_id: sessionId }),

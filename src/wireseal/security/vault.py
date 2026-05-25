@@ -699,6 +699,8 @@ class VaultState:
             self._data["backup_config"] = self._wrap_secrets(dict(data["backup_config"]))
         if "client_configs" in data:
             self._data["client_configs"] = data["client_configs"]
+        if "ssh_keys" in data:
+            self._data["ssh_keys"] = data["ssh_keys"]
         self._wiped = False
         # Reference back to the owning Vault instance (for keyslot management)
         self.vault: Vault | None = vault
@@ -807,6 +809,8 @@ class VaultState:
             d["backup_config"] = self._unwrap_secrets(self._data["backup_config"])
         if "client_configs" in self._data:
             d["client_configs"] = self._data["client_configs"]
+        if "ssh_keys" in self._data:
+            d["ssh_keys"] = self._data["ssh_keys"]
         return d
 
     def wipe(self) -> None:

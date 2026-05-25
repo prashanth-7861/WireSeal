@@ -29,6 +29,7 @@ import asyncio
 import base64
 import json
 import logging
+import os
 import secrets
 import threading
 from pathlib import Path
@@ -288,6 +289,16 @@ async def _handle_session(
             _password_str = bytes(ticket.password.expose_secret()).decode("utf-8")
         except Exception:
             _password_str = None
+
+    _client_keys: list[asyncssh.SSHKey] = []
+    if ticket.key_pem:
+        try:
+            key = asyncssh.import_private_key(ticket.key_pem.encode("utf-8"))
+            _client_keys = [key]
+            log.info("Loaded SSH key '%s' for session", ticket.key_name or "?")
+        except Exception as exc:
+            log.warning("Error loading SSH key: %s", exc)
+
     try:
         _known_hosts_path = _get_known_hosts_path(log_dir)
         tofu_client = _TofuCapturingClient()
@@ -297,6 +308,7 @@ async def _handle_session(
                 port=ticket.port,
                 username=ticket.username,
                 password=_password_str,
+                client_keys=_client_keys,
                 known_hosts=str(_known_hosts_path),
                 keepalive_interval=30,
                 client_factory=lambda: tofu_client,

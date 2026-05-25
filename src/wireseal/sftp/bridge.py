@@ -12,9 +12,11 @@ Thread-safe via a reentrant lock.
 from __future__ import annotations
 
 import asyncio
+import os
 import secrets
 import threading
 import time
+from pathlib import Path
 
 import asyncssh
 
@@ -86,7 +88,8 @@ class SftpSessionManager:
         return loop.run_until_complete(coro)
 
     def connect(self, host: str, port: int = 22,
-                username: str = "root", password: str = "") -> str:
+                username: str = "root", password: str = "",
+                key_name: str = "", key_pem: str = "") -> str:
         """Open an SSH connection, start SFTP, return a session token.
 
         Blocks the calling thread until the async operation completes.
@@ -95,11 +98,30 @@ class SftpSessionManager:
         token = secrets.token_urlsafe(32)
         loop = self._get_loop()
 
+        _known_hosts_path = (
+            Path.home() / ".wireseal" / "ssh-sessions" / "ssh_known_hosts"
+        )
+        _known_hosts_path.parent.mkdir(parents=True, exist_ok=True)
+        if not _known_hosts_path.exists():
+            _known_hosts_path.touch()
+
         async def _open() -> SftpSession:
-            conn = await asyncssh.connect(
-                host, port=port, username=username, password=password,
-                known_hosts=None,
-            )
+            connect_kwargs = {
+                "host": host,
+                "port": port,
+                "username": username,
+                "known_hosts": str(_known_hosts_path),
+            }
+            if password:
+                connect_kwargs["password"] = password
+            if key_pem:
+                try:
+                    key = asyncssh.import_private_key(key_pem.encode("utf-8"))
+                    connect_kwargs["client_keys"] = [key]
+                except Exception:
+                    pass
+
+            conn = await asyncssh.connect(**connect_kwargs)
             sftp = await conn.start_sftp_client()
             return SftpSession(conn, sftp, host, port, username)
 

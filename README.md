@@ -7,7 +7,7 @@ passphrase, no cryptographic material is exposed.
 
 [![CI](https://github.com/prashanth-7861/WireSeal/actions/workflows/build.yml/badge.svg)](https://github.com/prashanth-7861/WireSeal/actions/workflows/build.yml)
 [![Python](https://img.shields.io/badge/python-3.12%20%E2%80%93%203.14-blue)](https://python.org)
-[![Version](https://img.shields.io/badge/version-0.9.3-green)](https://github.com/prashanth-7861/WireSeal/releases)
+[![Version](https://img.shields.io/badge/version-0.9.31-green)](https://github.com/prashanth-7861/WireSeal/releases)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 [![Website](https://img.shields.io/badge/website-wireseal.vercel.app-blue)](https://wireseal.vercel.app)
 
@@ -110,7 +110,7 @@ passphrase, no cryptographic material is exposed.
 - **Keyslot operations** — add, remove, change passphrase; v2→v3 vault upgrade
   happens automatically on first keyslot creation
 
-### Client Mode & Kill Switch (v0.8)
+### Client Mode (v0.8 — enhanced v0.9.31)
 - **Kill switch** — blocks all traffic when the WireGuard tunnel drops unexpectedly;
   platform-native per OS (netsh advfirewall on Windows, iptables on Linux, pf on macOS);
   auto-disengages on intentional disconnect
@@ -125,6 +125,11 @@ passphrase, no cryptographic material is exposed.
   re-provisioning the peer
 - **Auto-connect on unlock** — client mode connects to a configured profile automatically
   after passphrase unlock (honours kill switch and DNS override settings)
+- **Standalone client CLI** — `wireseal client` subcommand group for enroll, config, connect,
+  disconnect, status, and kill-switch operations
+- **SSH key management** — import, list, and select SSH keys for SFTP connections from CLI
+- **Client enrollment** — `wireseal client enroll` generates a PIN and registers with the
+  server for TOTP-gated client administration
 
 ### Access Control & Expiry (v0.9)
 - **Role-based access levels** — `admin`, `standard`, `guest` with granular privilege
@@ -159,6 +164,10 @@ passphrase, no cryptographic material is exposed.
 - **PIN management** — set, remove, and use PIN from the lock screen and sidebar
 - **Enhanced audit log** — Events, Sessions, and File Activity (SFTP) tabs
 - **System tray icon** — Open Dashboard, Stop Server, peer count, and Quit
+- **SFTP connection manager** — saved connections with card UI, auto-save on connect,
+  quick-connect form with password/key toggle
+- **Enhanced file browser** — image preview lightbox, upload progress bar, file-type color
+  icons, grid/list view, right-click context menu, keyboard shortcuts, drag-and-drop upload
 
 ### General
 - **QR code output** — terminal QR codes (auto-clears after 60 s) or PNG download
@@ -352,13 +361,24 @@ sudo wireseal export bob-laptop --output /tmp/bob-laptop.conf
 
 ## File Access over VPN (SFTP)
 
-WireSeal auto-installs OpenSSH during `wireseal init`. Once connected to the VPN, use any
-SFTP client to access the server:
+WireSeal auto-installs OpenSSH during `wireseal init`. Once connected to the VPN, you can
+access files via the **built-in Dashboard SFTP browser** or any SFTP client.
 
+### Dashboard SFTP Browser
+- **Connection manager** — save frequently-used connections with card UI; auto-saves on
+  successful connect (up to 50 saved connections)
+- **File browser** — list/grid views, breadcrumb navigation, search filter
+- **Image preview** — click image files for a side-panel lightbox
+- **Upload/Download** — drag-and-drop upload with progress bar, Save As download
+- **File operations** — create, rename, copy, delete files and folders
+- **Context menu** — right-click for Preview, Edit, Rename, Copy, Delete
+- **Keyboard shortcuts** — Home, Delete, Ctrl+A, Escape
+
+### External Clients
 - **Host:** `192.168.1.1` (server VPN IP) · **Port:** `22`
 - Apps: Documents by Readdle (iOS), Termius, FileZilla, or `sftp user@192.168.1.1`
 
-File operations are logged and visible in the dashboard's **Audit Log → File Activity** tab.
+All file operations are logged and visible in the dashboard's **Audit Log → File Activity** tab.
 
 ---
 
@@ -396,11 +416,16 @@ File operations are logged and visible in the dashboard's **Audit Log → File A
 | `restore` | Restore vault from a backup file (verifies decryptable first) |
 | `service` | Manage the WireSeal background service (install/uninstall/start/stop/status) |
 | `uninstall` | Remove WireSeal from the system (platform uninstall script) |
+| `client` | Client mode subcommands — enroll, config, connect, disconnect, status, kill-switch |
+| `totp-backup-codes` | Generate and display new backup codes for an admin |
+| `session-logs` | List and view per-session audit logs |
 
 **Client creation options (`add-client`):**
 - `--access-level <admin|standard|guest>` — set role at creation time (default: standard)
 - `--ttl <seconds>` — time-to-live (e.g., `86400` for 1 day)
 - `--expires-at <ISO8601>` — absolute expiry (e.g., `2026-07-01T00:00:00Z`)
+- `--mtu <1280-1420>` — client MTU override (default: 1420, optimal for standard ethernet)
+- `--tunnel-mode <split-vpn|split-lan|full>` — tunnel mode (default: full, encrypts all traffic)
 
 > **Forgot your passphrase?** There is no recovery. Run `sudo wireseal fresh-start` to wipe everything and re-initialise.
 

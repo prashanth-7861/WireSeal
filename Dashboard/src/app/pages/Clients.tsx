@@ -43,6 +43,7 @@ export function Clients() {
   const [totpCode, setTotpCode] = useState("");
   const [totpError, setTotpError] = useState("");
   const [totpLoading, setTotpLoading] = useState(false);
+  const [totpFromAdd, setTotpFromAdd] = useState(false);
 
   // QR side panel
   const [qrPanel, setQrPanel] = useState<QrPanel | null>(null);
@@ -112,6 +113,7 @@ export function Clients() {
       if (msg.includes("totp_code required")) {
         setTotpAction("qr");
         setTotpRequiredName(name);
+        setTotpFromAdd(false);
       } else {
         setError(msg || "Failed to load QR code");
       }
@@ -147,6 +149,8 @@ export function Clients() {
       });
       if (res.totp_required) {
         setTotpRequiredName(newName.trim());
+        setTotpFromAdd(true);
+        setTotpAction("qr");
         setShowAddDialog(false);
         return;
       }
@@ -177,6 +181,7 @@ export function Clients() {
     if (code.length !== 6) return;
     setTotpLoading(true);
     setTotpError("");
+    const wasFromAdd = totpFromAdd;
     try {
       if (totpAction === "download") {
         await handleDownloadConfig(totpRequiredName, code);
@@ -186,8 +191,16 @@ export function Clients() {
         setQrPanel({ name: qrRes.name, qr: qrRes.qr_png_b64, format: qrRes.format || "png", expiresAt });
         startCountdown(expiresAt);
       }
+      if (wasFromAdd) {
+        const data = await api.listClients();
+        _clientsCache = data;
+        setClients(data);
+        setSuccess(`Client "${totpRequiredName}" added — scan the QR code to connect`);
+        setTimeout(() => setSuccess(""), 5000);
+      }
       setTotpRequiredName(null);
       setTotpCode("");
+      setTotpFromAdd(false);
     } catch (err: unknown) {
       setTotpError(err instanceof Error ? err.message : "Invalid code");
     } finally {

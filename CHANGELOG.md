@@ -7,6 +7,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.9.31] — 2026-05-25
+
+### Added — Client Mode
+- **Standalone client CLI** — `wireseal client` subcommand group with enroll, config, connect, disconnect, status, and kill-switch operations
+- **SSH key management** — `client/ssh_keys.py` for importing, listing, and selecting SSH keys for SFTP connections
+- **Terminal raw mode** — `client/term_raw.py` for raw terminal I/O over SSH WebSocket bridge
+- **Client enrollment flow** — new `wireseal client enroll` command generates a PIN and registers with the server for TOTP-gated client administration
+
+### Added — SFTP Enhancements
+- **Connection manager** — saved SFTP connections with card-based UI; auto-save on successful connect (max 50)
+- **Image preview lightbox** — click image files to open a side-panel lightbox with navigation
+- **Upload progress bar** — real-time upload progress indicator during file transfers
+- **File-type color icons** — 19 extension categories with distinct colors (code, image, archive, spreadsheet, audio, video)
+- **Grid view** — toggle between list and grid layouts in the file browser
+- **Keyboard shortcuts** — Home (scroll to top), Delete (delete selected), Ctrl+A (select all), Escape (close modals)
+- **Drag-and-drop upload** — drag files onto the browser with overlay feedback
+- **Inline new-file creation** — create empty files directly in the browser
+- **Status bar** — connection info panel with terminal-here link
+- **Context menu** — right-click file actions: Preview, Edit, Rename, Copy, Delete
+
+### Changed — SFTP
+- **Saved connections in vault** — `sftp_saved_connections` stored in `client_settings` vault data; validated in `_h_client_settings_put`
+- **Auto-save on connect** — `_h_sftp_connect` silently saves connection details on success
+
+### Fixed — TOTP Security
+- **Session-skip bypass** — `_require_confirmation` now has `allow_session_skip=False` by default; 9 irreversible operations (passphrase change, admin add/change/remove, key rotation, uninstall, TOTP enroll/disable/reset) always require fresh TOTP; 4 low-risk client ops accept session skip
+- **Audit log on TOTP failure** — `_require_totp_for_reveal` now logs failed TOTP attempts to audit trail
+- **TOTP gate on config reveal** — client config export, QR code display, and config download require fresh TOTP from enrolled admins
+- **Frontend auto-refresh** — client list auto-refreshes after TOTP-gated client add completes
+
+### Fixed — SSH
+- **Event loop reuse** — all SFTP operations run on the session's event loop instead of creating new ones via `asyncio.run()`, fixing cross-thread event loop conflicts
+- **Session manager thread safety** — RLock guarding on `SftpSessionManager` for concurrent access
+
+### Changed — CLI
+- **`wireseal-gui.spec`** — new PyInstaller spec file for GUI binary builds
+- **`wireseal-cli.spec`** — updated for client module inclusion
+
+---
+
 ## [0.9.3] — 2026-05-23
 
 ### Changed — VPN Tunnel & Performance

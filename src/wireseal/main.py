@@ -50,6 +50,7 @@ if sys.platform == "win32":
 import click
 
 from wireseal import __version__ as _WIRESEAL_VERSION
+from wireseal.client.cli import client
 
 # ---------------------------------------------------------------------------
 # Process hardening — apply before any secrets are loaded.
@@ -3127,4 +3128,5 @@ def service_status() -> None:
 
 
 if __name__ == "__main__":
+    cli.add_command(client)
     cli()

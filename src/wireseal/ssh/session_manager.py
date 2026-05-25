@@ -47,6 +47,8 @@ class SshTicket:
     actor_id: str
     created_at: float
     term: str = "xterm-256color"
+    key_name: Optional[str] = None
+    key_pem: Optional[str] = None  # PEM text, set by API handler when key_name provided
 
     def expired(self) -> bool:
         return time.monotonic() - self.created_at > TOKEN_TTL_SECONDS
@@ -81,6 +83,8 @@ class SshSessionManager:
         profile_name: str,
         actor_id: str,
         term: str = "xterm-256color",
+        key_name: Optional[str] = None,
+        key_pem: Optional[str] = None,
     ) -> str:
         """Create a one-time ticket and return its token.
 
@@ -104,6 +108,8 @@ class SshSessionManager:
             actor_id=actor_id,
             created_at=time.monotonic(),
             term=term,
+            key_name=key_name,
+            key_pem=key_pem,
         )
         with self._lock:
             self._prune_expired()
