@@ -4,6 +4,7 @@ import {
   Server, Globe, Clock, AlertTriangle, CheckCircle, Pencil, X,
 } from "lucide-react";
 import { api, ClientConfig, ClientTunnelStatus } from "../../api";
+import { useEscapeKey } from "../../hooks/useEscapeKey";
 
 // Pretty-print byte counts for the status banner.
 function formatBytes(n: number): string {
@@ -462,10 +463,11 @@ export function Connect() {
       )}
 
       {/* Import dialog */}
+      {useEscapeKey(showImport, () => { setShowImport(false); setImportName(""); setImportText(""); setImportError(""); })}
       {showImport && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
+        <div role="dialog" aria-modal="true" aria-labelledby="import-config-title" className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
           <div className="bg-white rounded-xl shadow-2xl w-full max-w-lg mx-4 p-6">
-            <h2 className="text-lg font-semibold text-gray-900 mb-4">
+            <h2 id="import-config-title" className="text-lg font-semibold text-gray-900 mb-4">
               Import WireGuard Config
             </h2>
 
@@ -543,8 +545,10 @@ export function Connect() {
       )}
 
       {/* Edit dialog — paste new .conf when server endpoint/port/keys change. */}
+      {useEscapeKey(!!editName, () => { if (!editing) closeEdit(); })}
       {editName && (
         <div
+          role="dialog" aria-modal="true" aria-labelledby="edit-profile-title"
           className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4"
           onClick={(e) => {
             if (e.target === e.currentTarget && !editing) closeEdit();
@@ -557,7 +561,7 @@ export function Connect() {
                   <Pencil className="w-5 h-5 text-blue-700" />
                 </div>
                 <div>
-                  <h2 className="text-lg font-semibold text-gray-900">Edit profile: {editName}</h2>
+                  <h2 id="edit-profile-title" className="text-lg font-semibold text-gray-900">Edit profile: {editName}</h2>
                   <p className="text-xs text-gray-500">
                     Paste the fresh <code>.conf</code> received from your server admin.
                   </p>

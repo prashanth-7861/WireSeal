@@ -21,7 +21,7 @@ import pytest
 
 from wireseal.security.exceptions import VaultTamperedError, VaultUnlockError
 from wireseal.security.secret_types import SecretBytes
-from wireseal.security.vault import Vault, _HEADER_SIZE
+from wireseal.security.vault import Vault, _HEADER_SIZE, _PAYLOAD_HASH_KEY
 
 
 class TestVaultRoundTrip:
@@ -181,3 +181,125 @@ class TestVaultPassphraseMinLength:
         short = SecretBytes(bytearray(b"tooshort"))
         with pytest.raises(ValueError, match="12"):
             Vault.create(vault_path, short, initial_vault_state)
+
+
+class TestVaultPayloadIntegrity:
+    """Phase 5.2: SHA-256 payload integrity hash — verifies decrypted payload
+    has not been silently corrupted (bit-rot, memory corruption, serialisation
+    bugs that AEAD cannot catch because the ciphertext was never touched).
+    """
+
+    def test_payload_hash_round_trip(self, vault_path, passphrase, initial_vault_state):
+        """Create then open — no error means the hash was added on first save
+        and verified on decrypt. The hash is popped after verification so it
+        does not appear in the public state."""
+        Vault.create(vault_path, passphrase, initial_vault_state)
+        vault = Vault(vault_path)
+        with vault.open(passphrase):
+            pass  # No exception = hash was added and verified
+
+    def test_payload_hash_verified_on_every_open(self, vault_path, passphrase, initial_vault_state):
+        """Opening a vault multiple times must succeed each time — the hash
+        is added on first save and verified on every subsequent open."""
+        Vault.create(vault_path, passphrase, initial_vault_state)
+        vault = Vault(vault_path)
+        for _ in range(3):
+            with vault.open(passphrase):
+                pass
+
+    def test_payload_hash_survives_save(self, vault_path, passphrase, initial_vault_state):
+        """After modifying state and saving, the hash must be updated and
+        verified correctly on the next open."""
+        Vault.create(vault_path, passphrase, initial_vault_state)
+        vault = Vault(vault_path)
+        with vault.open(passphrase) as state:
+            state._data["server"]["test"] = "value"
+            vault.save(state, passphrase)
+        with vault.open(passphrase) as state:
+            assert state._data["server"]["test"] == "value"
+
+    def test_payload_hash_backward_compat(self, vault_path, passphrase, initial_vault_state, mocker):
+        """A vault saved WITHOUT a payload_hash (pre-Phase 5.2) must still
+        open successfully — the verification is skipped when the key is absent.
+        We intercept _encrypt_payload with a wrapper that skips the hash step."""
+        import json
+        import os
+        from cryptography.hazmat.primitives.ciphers.aead import (
+            AESGCMSIV, ChaCha20Poly1305,
+        )
+        from wireseal.security import vault as vault_mod
+
+        vault_mod.Vault.create(vault_path, passphrase, initial_vault_state)
+
+        def _no_hash_encrypt(plaintext_dict, master_key, salt, nonce1, nonce2, header):
+            """Encrypt WITHOUT adding payload_hash."""
+            kc, ka = vault_mod._derive_subkeys(master_key, salt)
+            pt_bytes = json.dumps(plaintext_dict, separators=(",", ":")).encode("utf-8")
+            try:
+                l1 = ChaCha20Poly1305(bytes(kc)).encrypt(nonce1, pt_bytes, header)
+                l2 = AESGCMSIV(bytes(ka)).encrypt(nonce2, l1, header)
+            finally:
+                vault_mod.wipe_bytes(kc)
+                vault_mod.wipe_bytes(ka)
+            return l2
+
+        # Open, save again with NO hash
+        vault = vault_mod.Vault(vault_path)
+        with vault.open(passphrase) as state:
+            # Re-save using the no-hash encrypt
+            mocker.patch.object(vault_mod, "_encrypt_payload", _no_hash_encrypt)
+            vault.save(state, passphrase)
+
+        mocker.stopall()
+
+        # Now open — must succeed (backward compat skips verification when
+        # payload_hash is absent).  We verify by checking the blob directly.
+        vault2 = vault_mod.Vault(vault_path)
+        with vault2.open(passphrase):
+            pass  # No exception = backward compat works
+
+    def test_payload_hash_mismatch_detected(self, vault_path, passphrase, mocker):
+        """If the payload_hash does not match the decrypted JSON, open must
+        raise VaultTamperedError with a clear corruption message.
+
+        We bypass the normal hash computation by monkeypatching
+        ``_encrypt_payload`` to use a wrapper that serialises the dict with a
+        pre-set wrong hash and encrypts WITHOUT the hash-recomputation step.
+        """
+        import json
+        import os
+        from cryptography.hazmat.primitives.ciphers.aead import (
+            AESGCMSIV, ChaCha20Poly1305,
+        )
+        from wireseal.security import vault as vault_mod
+
+        # Create the vault normally first so the file exists
+        vault_mod.Vault.create(vault_path, passphrase, {"schema_version":1,"server":{},"clients":{},"ip_pool":{},"integrity":{}})
+
+        def _encrypt_with_wrong_hash(plaintext_dict, master_key, salt, nonce1, nonce2, header):
+            """Encrypt without computing a payload_hash — uses whatever is in
+            integrity.payload_hash (which we pre-set to a deliberately wrong value)."""
+            kc, ka = vault_mod._derive_subkeys(master_key, salt)
+            pt_bytes = json.dumps(plaintext_dict, separators=(",", ":")).encode("utf-8")
+            try:
+                l1 = ChaCha20Poly1305(bytes(kc)).encrypt(nonce1, pt_bytes, header)
+                l2 = AESGCMSIV(bytes(ka)).encrypt(nonce2, l1, header)
+            finally:
+                vault_mod.wipe_bytes(kc)
+                vault_mod.wipe_bytes(ka)
+            return l2
+
+        mocker.patch.object(vault_mod, "_encrypt_payload", _encrypt_with_wrong_hash)
+
+        # Open vault, inject a wrong hash, then save
+        vault = vault_mod.Vault(vault_path)
+        with vault.open(passphrase) as state:
+            state.integrity[_PAYLOAD_HASH_KEY] = "0" * 64
+            vault.save(state, passphrase)
+
+        mocker.stopall()
+
+        # Now open — the hash '0'*64 won't match the actual payload
+        vault2 = vault_mod.Vault(vault_path)
+        with pytest.raises(VaultTamperedError, match="integrity check failed"):
+            vault2.open(passphrase)

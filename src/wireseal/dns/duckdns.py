@@ -107,9 +107,10 @@ def update_dns(domain: str, token: "SecretBytes", ip: str) -> dict:
                       error occurs. The result dict is always populated
                       before raising so callers can pass it to audit.log().
     """
-    # DNS-03: extract raw token bytes in memory only; never store or log
-    # SecretBytes exposes the bytearray via expose_secret(); decode to str.
-    token_str = bytes(token.expose_secret()).decode("ascii")
+    # DNS-03: extract raw token bytes in memory only; never store or log.
+    # P3-M2: decode the bytearray directly — no immutable bytes() copy that
+    # cannot be wiped.
+    token_str = token.expose_secret().decode("ascii")
 
     params = urllib.parse.urlencode({
         "domains": domain,

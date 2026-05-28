@@ -26,8 +26,15 @@ function _getCsrfToken(): string {
 async function _fetch<T>(
   method: string,
   path: string,
-  body?: unknown
+  body?: unknown,
+  signal?: AbortSignal
 ): Promise<T> {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 15000);
+  if (signal) {
+    signal.addEventListener("abort", () => controller.abort());
+  }
+
   let res: Response;
   try {
     res = await fetch(`${BASE}${path}`, {
@@ -37,10 +44,13 @@ async function _fetch<T>(
         "X-CSRF-Token": _getCsrfToken(),
       },
       body: body !== undefined ? JSON.stringify(body) : undefined,
+      signal: controller.signal,
     });
   } catch {
+    clearTimeout(timeoutId);
     throw new Error("Cannot reach WireSeal server — is `wireseal serve` running?");
   }
+  clearTimeout(timeoutId);
 
   let data: unknown;
   try {
@@ -61,6 +71,30 @@ async function _fetch<T>(
     throw new Error(err);
   }
   return data as T;
+}
+
+async function _fetchRetry<T>(
+  method: string,
+  path: string,
+  body?: unknown,
+  signal?: AbortSignal
+): Promise<T> {
+  let lastErr: Error | null = null;
+  for (let attempt = 0; attempt <= 3; attempt++) {
+    try {
+      return await _fetch<T>(method, path, body, signal);
+    } catch (err) {
+      lastErr = err as Error;
+      const msg = lastErr.message;
+      const isServerErr = /HTTP (5\d\d)/.test(msg);
+      const isNetworkErr = msg.includes("Cannot reach");
+      if (!isServerErr && !isNetworkErr) throw lastErr;
+      if (attempt < 3) {
+        await new Promise(r => setTimeout(r, Math.pow(2, attempt) * 1000));
+      }
+    }
+  }
+  throw lastErr ?? new Error("Request failed after 3 retries");
 }
 
 // ─── Types ───────────────────────────────────────────────────────────────────
@@ -317,6 +351,20 @@ export interface SshSessionInfo {
   username: string;
   actor_id: string;
   started_at: number;
+}
+
+export function fetchWithRetry<T>(
+  method: string,
+  path: string,
+  body?: unknown,
+  signal?: AbortSignal
+): Promise<T> {
+  return _fetchRetry<T>(method, path, body, signal);
+}
+
+export function cancelSignal(): { signal: AbortSignal; cancel: () => void } {
+  const controller = new AbortController();
+  return { signal: controller.signal, cancel: () => controller.abort() };
 }
 
 export const api = {
@@ -739,4 +787,8 @@ export const api = {
 
   clientSettingsPut: (settings: Partial<ClientSettings>) =>
     _fetch<ClientSettings>("PUT", "/client/settings", settings),
+
+  // ── Client-side error reporting ──────────────────────────────────────────
+  logClientError: (error: { message: string; stack?: string; url?: string; line?: number }) =>
+    _fetch<{ ok: boolean }>("POST", "/client-error", error),
 };

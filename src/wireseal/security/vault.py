@@ -34,6 +34,8 @@ unlock the same vault using their own passphrase. Each keyslot wraps the shared
 32-byte master key under an Argon2id-derived AES-256-GCM key.
 """
 
+import hashlib
+import hmac
 import json
 import os
 import struct
@@ -126,6 +128,8 @@ def _validate_argon2_params(memory_cost: int, time_cost: int, parallelism: int) 
 
 NONCE_LEN = 12         # 96-bit nonce for both ChaCha20 and AES-GCM-SIV
 
+_PAYLOAD_HASH_KEY = "payload_hash"  # stored in integrity section for payload verification
+
 # HKDF domain separation labels -- different info strings guarantee the two
 # subkeys are cryptographically independent even if master_key is known.
 _HKDF_INFO_CHACHA = b"wireseal-v2-chacha20-poly1305"
@@ -189,6 +193,7 @@ def _migrate_v1_to_v2(data: dict) -> dict:
             "totp_secret_b32": None,
             "totp_enrolled_at": None,
             "backup_codes": [],
+            "totp_used_codes": [],
             "last_unlock": None,
         }
     }
@@ -228,6 +233,7 @@ def _canonical_v2_initial_state() -> dict[str, Any]:
                 "totp_secret_b32": None,
                 "totp_enrolled_at": None,
                 "backup_codes": [],
+                "totp_used_codes": [],
                 "last_unlock": None,
             }
         },
@@ -360,8 +366,26 @@ def _encrypt_payload(plaintext_dict: dict[str, Any], master_key: bytearray,
     """Inner payload encryption: ChaCha20-Poly1305 + AES-256-GCM-SIV.
 
     Derives subkeys from master_key via HKDF. Wipes subkeys in finally.
+
+    Adds a SHA-256 payload integrity hash into the JSON ``integrity`` section
+    before encryption.  The hash covers the canonical (sort_keys) JSON of all
+    other fields, so payload corruption after decryption is detected on the
+    next read.
+
     Returns just the double-ciphertext (without header prefix).
     """
+    # ---- Phase 5.2: payload integrity hash ----
+    # Pop any existing payload_hash (defensive), compute hash on remaining data,
+    # then store the new hash so AEAD authenticates it alongside the rest.
+    _existing_integrity = plaintext_dict.get("integrity")
+    if isinstance(_existing_integrity, dict):
+        _existing_integrity.pop(_PAYLOAD_HASH_KEY, None)
+    _hash_hex = hashlib.sha256(
+        json.dumps(plaintext_dict, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    ).hexdigest()
+    plaintext_dict.setdefault("integrity", {})[_PAYLOAD_HASH_KEY] = _hash_hex
+    # --------------------------------------------
+
     key_chacha, key_aes = _derive_subkeys(master_key, salt)
     try:
         plaintext_bytes = json.dumps(plaintext_dict, separators=(",", ":")).encode("utf-8")
@@ -383,6 +407,10 @@ def _decrypt_payload(ciphertext: bytes, master_key: bytearray,
     """Inner payload decryption: AES-256-GCM-SIV (outer) then ChaCha20-Poly1305 (inner).
 
     Wipes subkeys in finally. Raises VaultUnlockError on GCM tag failure.
+
+    After decryption, verifies the SHA-256 payload integrity hash (Phase 5.2).
+    Raises VaultTamperedError if the hash does not match (silent corruption).
+    Vaults saved before Phase 5.2 have no hash and are accepted as-is.
     """
     key_chacha, key_aes = _derive_subkeys(master_key, salt)
     try:
@@ -397,7 +425,24 @@ def _decrypt_payload(ciphertext: bytes, master_key: bytearray,
     finally:
         wipe_bytes(key_chacha)
         wipe_bytes(key_aes)
-    return json.loads(plaintext.decode("utf-8"))
+
+    data = json.loads(plaintext.decode("utf-8"))
+
+    # ---- Phase 5.2: verify payload integrity hash ----
+    stored_hex = data.get("integrity", {}).pop(_PAYLOAD_HASH_KEY, None)
+    if stored_hex is not None:
+        computed_hex = hashlib.sha256(
+            json.dumps(data, separators=(",", ":"), sort_keys=True).encode("utf-8")
+        ).hexdigest()
+        if not hmac.compare_digest(computed_hex, stored_hex):
+            raise VaultTamperedError(
+                "Vault payload integrity check failed. The decrypted vault "
+                "state does not match its stored checksum. This indicates "
+                "data corruption — restore from backup if available."
+            )
+    # ---------------------------------------------------
+
+    return data
 
 
 def _encrypt_vault(plaintext_dict: dict[str, Any], passphrase: bytearray) -> bytes:

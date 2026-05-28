@@ -3,8 +3,9 @@ import {
   Plus, Monitor, Trash2, QrCode, X, AlertTriangle, CheckCircle, RefreshCw,
   Download,
 } from "lucide-react";
-import { api, type Client, type Status, type TunnelMode } from "../api";
+import { api, cancelSignal, type Client, type Status, type TunnelMode } from "../api";
 import { ClientTtlBadge } from "../components/ClientTtlBadge";
+import { useEscapeKey } from "../hooks/useEscapeKey";
 
 const QR_TTL = 60; // seconds before QR auto-dismisses
 
@@ -44,6 +45,7 @@ export function Clients() {
   const [totpError, setTotpError] = useState("");
   const [totpLoading, setTotpLoading] = useState(false);
   const [totpFromAdd, setTotpFromAdd] = useState(false);
+  const addAbortRef = useRef<AbortController | null>(null);
 
   // QR side panel
   const [qrPanel, setQrPanel] = useState<QrPanel | null>(null);
@@ -130,9 +132,13 @@ export function Clients() {
   // ── Add client ────────────────────────────────────────────────────────────
   const handleAddClient = async (e: React.FormEvent) => {
     e.preventDefault();
+    addAbortRef.current?.abort();
+    const { signal, cancel } = cancelSignal();
+    addAbortRef.current = { abort: cancel } as AbortController;
     setAddError("");
     setAdding(true);
     try {
+      if (signal.aborted) return;
       let ttlSeconds: number | undefined = undefined;
       let expiresAt: number | undefined = undefined;
       if (expiryType === "ttl") {
@@ -147,6 +153,7 @@ export function Clients() {
         ttl_seconds: ttlSeconds,
         expires_at: expiresAt,
       });
+      if (signal.aborted) return;
       if (res.totp_required) {
         setTotpRequiredName(newName.trim());
         setTotpFromAdd(true);
@@ -179,6 +186,9 @@ export function Clients() {
     if (!totpRequiredName) return;
     const code = codeOverride || totpCode;
     if (code.length !== 6) return;
+    addAbortRef.current?.abort();
+    const { signal, cancel } = cancelSignal();
+    addAbortRef.current = { abort: cancel } as AbortController;
     setTotpLoading(true);
     setTotpError("");
     const wasFromAdd = totpFromAdd;
@@ -187,24 +197,29 @@ export function Clients() {
         await handleDownloadConfig(totpRequiredName, code);
       } else {
         const qrRes = await api.clientQr(totpRequiredName, code);
+        if (signal.aborted) return;
         const expiresAt = Date.now() + QR_TTL * 1000;
         setQrPanel({ name: qrRes.name, qr: qrRes.qr_png_b64, format: qrRes.format || "png", expiresAt });
         startCountdown(expiresAt);
       }
+      if (signal.aborted) return;
       if (wasFromAdd) {
         const data = await api.listClients();
+        if (signal.aborted) return;
         _clientsCache = data;
         setClients(data);
         setSuccess(`Client "${totpRequiredName}" added — scan the QR code to connect`);
         setTimeout(() => setSuccess(""), 5000);
       }
+      if (signal.aborted) return;
       setTotpRequiredName(null);
       setTotpCode("");
       setTotpFromAdd(false);
     } catch (err: unknown) {
+      if (signal.aborted) return;
       setTotpError(err instanceof Error ? err.message : "Invalid code");
     } finally {
-      setTotpLoading(false);
+      if (!signal.aborted) setTotpLoading(false);
     }
   };
 
@@ -531,10 +546,11 @@ export function Clients() {
       </div>
 
       {/* ── Add Client Dialog ─────────────────────────────────────────────── */}
+      {useEscapeKey(showAddDialog, () => { addAbortRef.current?.abort(); setShowAddDialog(false); setAddError(""); setNewName(""); setTunnelMode("split-vpn"); setNewClientAccessLevel("standard"); setExpiryType("permanent"); setTtlValue(""); setCustomTtl(""); setExpiryDate(""); })}
       {showAddDialog && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
+        <div role="dialog" aria-modal="true" aria-labelledby="add-client-title" className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
           <div className="bg-white rounded-xl shadow-xl p-6 w-full max-w-md">
-            <h2 className="text-xl font-semibold text-gray-900 mb-1">Add New Client</h2>
+            <h2 id="add-client-title" className="text-xl font-semibold text-gray-900 mb-1">Add New Client</h2>
             <p className="text-sm text-gray-500 mb-5">
               A WireGuard keypair and config will be generated automatically.
             </p>
@@ -702,7 +718,7 @@ export function Clients() {
               <div className="flex gap-3 pt-1">
                 <button
                   type="button"
-                  onClick={() => { setShowAddDialog(false); setAddError(""); setNewName(""); setTunnelMode("split-vpn"); setNewClientAccessLevel("standard"); setExpiryType("permanent"); setTtlValue(""); setCustomTtl(""); setExpiryDate(""); }}
+                  onClick={() => { addAbortRef.current?.abort(); setShowAddDialog(false); setAddError(""); setNewName(""); setTunnelMode("split-vpn"); setNewClientAccessLevel("standard"); setExpiryType("permanent"); setTtlValue(""); setCustomTtl(""); setExpiryDate(""); }}
                   className="flex-1 px-4 py-2.5 border border-gray-300 rounded-lg hover:bg-gray-50 transition-colors"
                   disabled={adding}
                 >
@@ -722,10 +738,11 @@ export function Clients() {
       )}
 
       {/* ── TOTP confirmation dialog ───────────────────────────────────── */}
+      {useEscapeKey(!!totpRequiredName, () => { addAbortRef.current?.abort(); setTotpRequiredName(null); setTotpCode(""); setTotpError(""); })}
       {totpRequiredName && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
+        <div role="dialog" aria-modal="true" aria-labelledby="totp-confirm-title" className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
           <div className="bg-white rounded-lg shadow-xl p-6 w-full max-w-sm">
-            <h3 className="text-lg font-semibold mb-2">Two-Factor Required</h3>
+            <h3 id="totp-confirm-title" className="text-lg font-semibold mb-2">Two-Factor Required</h3>
             <p className="text-sm text-gray-600 mb-4">
               Enter your authenticator code to reveal the client config.
             </p>
@@ -748,7 +765,7 @@ export function Clients() {
               <div className="flex gap-2 justify-end">
                 <button
                   type="button"
-                  onClick={() => { setTotpRequiredName(null); setTotpCode(""); setTotpError(""); }}
+                  onClick={() => { addAbortRef.current?.abort(); setTotpRequiredName(null); setTotpCode(""); setTotpError(""); }}
                   className="px-4 py-2 text-sm text-gray-600 hover:text-gray-800"
                 >
                   Cancel

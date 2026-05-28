@@ -7,6 +7,7 @@ import { api } from "../api";
 import type { AdminInfo } from "../api";
 import { AdminRoleBadge } from "../components/AdminRoleBadge";
 import { TotpEnrollDialog } from "../components/TotpEnrollDialog";
+import { useEscapeKey } from "../hooks/useEscapeKey";
 
 let _cache: AdminInfo[] | null = null;
 
@@ -212,6 +213,7 @@ export function TwoFactor() {
         </>
       )}
 
+      {useEscapeKey(enrolling, () => { setEnrolling(false); setEnrollingId(null); })}
       {enrolling && (
         <TotpEnrollDialog
           adminId={enrollingId ?? currentId}
@@ -221,10 +223,11 @@ export function TwoFactor() {
       )}
 
       {/* Disable confirmation modal */}
+      {useEscapeKey(confirmingDisable, () => { setConfirmingDisable(false); setDisablePass(""); setDisableError(""); })}
       {confirmingDisable && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
+        <div role="dialog" aria-modal="true" aria-labelledby="disable-totp-title" className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
           <div className="bg-white rounded-lg shadow-xl p-6 w-full max-w-sm">
-            <h3 className="text-lg font-semibold text-gray-900 mb-2">Disable Two-Factor Auth</h3>
+            <h3 id="disable-totp-title" className="text-lg font-semibold text-gray-900 mb-2">Disable Two-Factor Auth</h3>
             <p className="text-sm text-gray-600 mb-4">Enter your vault passphrase to confirm.</p>
             <form onSubmit={handleDisable}>
               <input type="password" value={disablePass}

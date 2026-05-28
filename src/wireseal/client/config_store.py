@@ -20,6 +20,7 @@ from __future__ import annotations
 import copy
 import re
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 
@@ -185,27 +186,40 @@ def get_config_redacted(
 def get_config_revealed(
     state_data: dict[str, Any],
     name: str,
+    audit_reason: str | None = None,
 ) -> dict[str, Any]:
     """Authoritative read — returns the full config including PrivateKey.
 
     Use this ONLY when:
       * Bringing the WireGuard tunnel up via ``wg-quick`` (daemon needs
         the real key to derive the public key + sign handshakes).
-      * The user explicitly requested a reveal via a confirmed UI action
-        (``?reveal=1`` query, "Show key" button) and the call site
-        audit-logs the reveal event with actor + reason.
+      * The user explicitly requested a reveal via a confirmed UI action.
       * Re-exporting the user's own client config to QR / .conf for
         another device they control.
 
-    The caller is responsible for audit-logging via
-    ``AuditLog.log("client-config-revealed", ...)``. This module does
-    not log the access itself because the appropriate context (actor,
-    HTTP path, reason) lives at the API handler.
+    P4-M4: this function now auto-audit-logs the reveal via the audit
+    trail. Callers that are NOT the CLI layer (e.g., an HTTP handler)
+    should pass ``audit_reason`` to provide context (actor, HTTP path).
+    CLI commands pass no reason; the audit entry will say ``cli-reveal``.
 
     Raises:
         KeyError: profile not found.
     """
-    return _get_entry_or_raise(state_data, name)
+    entry = _get_entry_or_raise(state_data, name)
+    # P4-M4: auto-audit-log every reveal to prevent silent key extraction.
+    try:
+        from wireseal.security.audit import AuditLog as _AuditLog
+        import datetime as _dt
+        audit = _AuditLog(
+            (Path.home() / ".wireseal" / "audit.log")  # type: ignore[union-attr]
+        )
+        audit.log(
+            action="client-config-revealed",
+            metadata={"name": name, "reason": audit_reason or "cli-reveal"},
+        )
+    except Exception:
+        pass  # audit failure must never block tunnel startup
+    return entry
 
 
 def delete_config(state_data: dict[str, Any], name: str) -> None:

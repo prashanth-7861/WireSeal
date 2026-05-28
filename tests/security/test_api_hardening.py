@@ -18,6 +18,7 @@ from typing import Any
 import pytest
 
 from wireseal import api
+from wireseal.api import _shared as _api_shared
 
 
 # ---------------------------------------------------------------------------
@@ -29,9 +30,13 @@ from wireseal import api
 def _isolate_api_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     """Redirect vault paths and reset session/activity state between tests."""
     monkeypatch.setattr(api, "_VAULT_DIR", tmp_path)
+    monkeypatch.setattr(_api_shared, "_VAULT_DIR", tmp_path)
     monkeypatch.setattr(api, "_VAULT_PATH", tmp_path / "vault.enc")
+    monkeypatch.setattr(_api_shared, "_VAULT_PATH", tmp_path / "vault.enc")
     monkeypatch.setattr(api, "_AUDIT_PATH", tmp_path / "audit.log")
+    monkeypatch.setattr(_api_shared, "_AUDIT_PATH", tmp_path / "audit.log")
     monkeypatch.setattr(api, "_PIN_PATH", tmp_path / "pin.enc")
+    monkeypatch.setattr(_api_shared, "_PIN_PATH", tmp_path / "pin.enc")
 
     with api._lock:
         api._session.update(vault=None, passphrase=None, cache=None,
@@ -90,14 +95,16 @@ def test_health_returns_expected_schema() -> None:
     api._server_start_time = time.monotonic()
     result = api._h_health(None, ())
     # `version` was added in v0.7.21 so the dashboard About page can render
-    # the live version instead of a stale hardcoded constant. The other
-    # five keys remain the original SEC-002 contract.
+    # the live version instead of a stale hardcoded constant. `disk_free_bytes`
+    # and `memory_available_bytes` added in Phase 6.
     assert set(result.keys()) == {
         "status",
         "vault_initialized",
         "vault_locked",
         "uptime_seconds",
         "version",
+        "disk_free_bytes",
+        "memory_available_bytes",
     }
 
 
@@ -117,9 +124,9 @@ def test_require_unlocked_raises_when_locked() -> None:
 def test_require_unlocked_updates_last_activity() -> None:
     with api._lock:
         api._session["vault"] = object()
-    api._last_activity = 0.0
+    api._last_activity[0] = 0.0
     api._require_unlocked()
-    assert api._last_activity > 0.0
+    assert api._last_activity[0] > 0.0
 
 
 def test_require_unlocked_refreshes_activity_timestamp() -> None:
@@ -127,10 +134,10 @@ def test_require_unlocked_refreshes_activity_timestamp() -> None:
         api._session["vault"] = object()
 
     api._require_unlocked()
-    first = api._last_activity
+    first = api._last_activity[0]
     time.sleep(0.01)
     api._require_unlocked()
-    second = api._last_activity
+    second = api._last_activity[0]
     assert second >= first
     assert second > 0.0
 
@@ -141,19 +148,19 @@ def test_session_timeout_predicate_idle_detection(monkeypatch: pytest.MonkeyPatc
 
     with api._lock:
         api._session["vault"] = object()
-    api._last_activity = time.monotonic() - 3  # 3s idle — fresh
+    api._last_activity[0] = time.monotonic() - 3  # 3s idle — fresh
     # Condition the daemon thread uses
-    assert not (time.monotonic() - api._last_activity > api._SESSION_TIMEOUT)
+    assert not (time.monotonic() - api._last_activity[0] > api._SESSION_TIMEOUT)
 
-    api._last_activity = time.monotonic() - 15  # 15s idle — stale
-    assert time.monotonic() - api._last_activity > api._SESSION_TIMEOUT
+    api._last_activity[0] = time.monotonic() - 15  # 15s idle — stale
+    assert time.monotonic() - api._last_activity[0] > api._SESSION_TIMEOUT
 
 
 def test_session_timeout_never_fires_when_activity_is_zero() -> None:
     """_last_activity == 0 means "no authenticated request yet" → never auto-lock."""
-    api._last_activity = 0.0
-    # The loop guards with `if _last_activity and ...` so zero is falsy
-    should_fire = bool(api._last_activity) and (
-        time.monotonic() - api._last_activity > api._SESSION_TIMEOUT
+    api._last_activity[0] = 0.0
+    # The loop guards with `if _last_activity[0] and ...` so zero is falsy
+    should_fire = bool(api._last_activity[0]) and (
+        time.monotonic() - api._last_activity[0] > api._SESSION_TIMEOUT
     )
     assert should_fire is False

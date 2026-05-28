@@ -94,16 +94,27 @@ const CHANGELOG: ChangelogEntry[] = [
       "TOTP two-factor authentication with QR enrollment, backup codes, and per-session enforcement",
       "Ephemeral client keys with configurable TTL and auto-revocation",
     ],
-  },
-  {
-    version: "0.7.8",
-    date: "2026-04-15",
-    highlights: [
-      "Fixed WireSeal.exe --version crash: click.version_option now uses an explicit version string so frozen binaries no longer raise 'Could not determine the version for None'",
-      "Fixed audit log tail-skip: AuditLog.get_recent_entries() now walks rotated archives newest-first, so recent entries are no longer dropped once audit.log.1 exists",
-      "Added 44 new security unit tests covering rate limiting, audit rotation, backup/restore CLI, health endpoint, session timeout, and key rotation API wiring (test suite now 217 passing)",
-    ],
-  },
+    },
+    {
+        version: "0.9.32",
+        date: "2026-05-28",
+        highlights: [
+            "Added accessibility improvements: ARIA labels and Escape key handling on all modal dialogs",
+            "Enhanced health check endpoint with disk space and memory metrics",
+            "Added /api/ready endpoint for readiness probing",
+            "Improved graceful shutdown: WireGuard, SFTP sessions, and DNS config cleanup",
+            "Synced Dashboard version to match backend (0.9.32)",
+        ],
+    },
+    {
+        version: "0.9.2",
+        date: "2026-05-17",
+        highlights: [
+            "Fixed critical WireGuard connection failure: endpoint resolution no longer produces double-port (host:port:port) in client configs",
+            "Fixed fallback to unreachable VPN IP — now auto-detects public IP when no endpoint is configured",
+            "IP consensus relaxed to 2-of-4 for more resilient public IP detection on flaky networks",
+        ],
+    },
   {
     version: "0.7.7",
     date: "2026-04-13",
@@ -402,6 +413,7 @@ export function About() {
             <h2 className="text-2xl font-bold">WireSeal</h2>
             <p className="text-blue-200 text-sm">Secure · Automated · Cross-platform</p>
             <p className="text-blue-300/70 text-xs mt-0.5 font-mono">v{currentVersion}</p>
+            <p className="text-blue-300/40 text-[11px] mt-0.5 font-mono">Dashboard v{typeof __APP_VERSION__ !== "undefined" ? __APP_VERSION__ : "built"}</p>
           </div>
         </div>
         <p className="text-blue-100 leading-relaxed max-w-xl">

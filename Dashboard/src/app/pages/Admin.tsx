@@ -7,6 +7,7 @@ import {
 } from "lucide-react";
 import { api, type AdminInfo, type ServiceInfo, type ExecResult } from "../api";
 import { AdminRoleBadge } from "../components/AdminRoleBadge";
+import { useEscapeKey } from "../hooks/useEscapeKey";
 
 type Tab = "accounts" | "terminal" | "services" | "files";
 
@@ -597,10 +598,11 @@ function AccountsTab() {
       </div>
 
       {/* Add Admin Dialog */}
+      {useEscapeKey(showAddDialog, () => { setShowAddDialog(false); setAddError(""); })}
       {showAddDialog && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
+        <div role="dialog" aria-modal="true" aria-labelledby="add-admin-title" className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
           <div className="bg-white rounded-lg shadow-xl p-6 w-full max-w-md">
-            <h2 className="text-lg font-semibold text-gray-900 mb-4">Add New Admin</h2>
+            <h2 id="add-admin-title" className="text-lg font-semibold text-gray-900 mb-4">Add New Admin</h2>
             <form onSubmit={handleAdd} className="space-y-4">
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-1">Admin ID</label>
@@ -647,12 +649,13 @@ function AccountsTab() {
       )}
 
       {/* Remove Confirmation */}
+      {useEscapeKey(!!confirmRemove, () => setConfirmRemove(null))}
       {confirmRemove && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
+        <div role="dialog" aria-modal="true" aria-labelledby="remove-admin-title" className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
           <div className="bg-white rounded-lg shadow-xl p-6 w-full max-w-sm">
             <div className="flex items-center gap-3 mb-3">
               <AlertCircle className="w-5 h-5 text-red-600" />
-              <h3 className="text-lg font-semibold text-gray-900">Remove Admin</h3>
+              <h3 id="remove-admin-title" className="text-lg font-semibold text-gray-900">Remove Admin</h3>
             </div>
             <p className="text-sm text-gray-600 mb-4">
               Remove admin <strong className="font-mono">{confirmRemove}</strong>? They will no longer be able to unlock the vault.
@@ -672,10 +675,11 @@ function AccountsTab() {
       )}
 
       {/* Change Passphrase Dialog */}
+      {useEscapeKey(!!showPassDialog, () => { setShowPassDialog(null); setNewAdminPass(""); setPassError(""); })}
       {showPassDialog && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
+        <div role="dialog" aria-modal="true" aria-labelledby="change-pass-title" className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
           <div className="bg-white rounded-lg shadow-xl p-6 w-full max-w-md">
-            <h3 className="text-lg font-semibold text-gray-900 mb-1">Change Passphrase</h3>
+            <h3 id="change-pass-title" className="text-lg font-semibold text-gray-900 mb-1">Change Passphrase</h3>
             <p className="text-sm text-gray-500 mb-4">for <strong className="font-mono">{showPassDialog}</strong></p>
             <form onSubmit={handleChangePassphrase}>
               <input type="password" value={newAdminPass}
@@ -699,12 +703,13 @@ function AccountsTab() {
       )}
 
       {/* TOTP Reset Confirmation */}
+      {useEscapeKey(!!showTOTPReset, () => setShowTOTPReset(null))}
       {showTOTPReset && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
+        <div role="dialog" aria-modal="true" aria-labelledby="totp-reset-title" className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
           <div className="bg-white rounded-lg shadow-xl p-6 w-full max-w-sm">
             <div className="flex items-center gap-3 mb-3">
               <Smartphone className="w-5 h-5 text-amber-600" />
-              <h3 className="text-lg font-semibold text-gray-900">Reset TOTP</h3>
+              <h3 id="totp-reset-title" className="text-lg font-semibold text-gray-900">Reset TOTP</h3>
             </div>
             <p className="text-sm text-gray-600 mb-4">
               Reset two-factor authentication for <strong className="font-mono">{showTOTPReset}</strong>?

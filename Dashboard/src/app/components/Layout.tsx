@@ -1,17 +1,18 @@
 import { useState, useEffect, useCallback, useRef } from "react";
-import { NavLink, Outlet, useNavigate, useLocation } from "react-router";
+import { useEscapeKey } from "../hooks/useEscapeKey";
+import { Outlet, useNavigate, useLocation } from "react-router";
 import {
-  Server, ScrollText, Monitor, Settings, LogOut, Info,
-  Lock, Play, Eye, EyeOff, AlertCircle, CheckCircle,
-  Shield, Sparkles, Wifi, WifiOff, Circle, RotateCcw,
-  KeyRound, Hash, ArrowLeft, Trash2, ShieldAlert, Timer,
-  Globe, HardDrive, ArrowLeftRight,
+  Server, ScrollText, Monitor, Settings, Lock, Play, Eye,
+  EyeOff, AlertCircle, CheckCircle, Shield, Sparkles, RotateCcw,
+  KeyRound, ArrowLeft, ShieldAlert, Timer, Globe, HardDrive,
   ShieldCheck, Smartphone,
 } from "lucide-react";
 import { api, VAULT_LOCKED_EVENT, type Status } from "../api";
 import { AppModeProvider, useAppMode } from "../context/AppModeContext";
 import { ModeSelector } from "./ModeSelector";
 import { ClientLayout } from "./ClientLayout";
+import { ErrorBoundary } from "./ErrorBoundary";
+import { ServerSidebar } from "./ServerSidebar";
 
 type VaultState = "loading" | "uninitialized" | "locked" | "unlocked";
 
@@ -513,6 +514,9 @@ function LayoutInner() {
 
   // ── Locked / Uninitialized — full-screen welcome screen ──────────────────
   if (vaultState === "locked" || vaultState === "uninitialized") {
+    useEscapeKey(showFreshStart, () => { setShowFreshStart(false); setFreshStartPassphrase(""); setFreshStartError(""); });
+    useEscapeKey(showPassphrase, () => { setShowPassphrase(false); setAuthError(""); setPin(["", "", "", "", "", ""]); });
+    useEscapeKey(showPinSetup, () => { setShowPinSetup(false); setNewPin(["", "", "", "", "", ""]); setConfirmPin(["", "", "", "", "", ""]); setPinError(""); });
     return (
       <div className="min-h-screen bg-gradient-to-br from-slate-900 via-blue-950 to-slate-900 flex items-center justify-center">
         <div className="flex flex-col items-center text-center gap-8 max-w-lg w-full mx-4 animate-fade-in">
@@ -577,14 +581,14 @@ function LayoutInner() {
 
         {/* Fresh Start confirmation dialog */}
         {showFreshStart && (
-          <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
+          <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50" role="dialog" aria-modal="true" aria-labelledby="dialog-title-freshstart">
             <div className="bg-white rounded-xl shadow-2xl p-8 w-full max-w-md mx-4">
               <div className="flex items-center gap-3 mb-4">
                 <div className="w-12 h-12 bg-red-100 rounded-full flex items-center justify-center">
                   <RotateCcw className="w-6 h-6 text-red-600" />
                 </div>
                 <div>
-                  <h2 className="text-xl font-semibold text-gray-900">Fresh Start</h2>
+                  <h2 id="dialog-title-freshstart" className="text-xl font-semibold text-gray-900">Fresh Start</h2>
                   <p className="text-sm text-gray-500">This action cannot be undone</p>
                 </div>
               </div>
@@ -625,7 +629,7 @@ function LayoutInner() {
 
         {/* Unlock dialog — PIN or Passphrase */}
         {showPassphrase && (
-          <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
+          <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50" role="dialog" aria-modal="true" aria-labelledby="dialog-title-unlock">
             <div className="bg-white rounded-xl shadow-2xl p-8 w-full max-w-md mx-4">
               {/* PIN unlock mode */}
               {unlockMode === "pin" && vaultState === "locked" && (
@@ -635,7 +639,7 @@ function LayoutInner() {
                       <KeyRound className="w-6 h-6 text-blue-700" />
                     </div>
                     <div>
-                      <h2 className="text-xl font-semibold text-gray-900">Quick Unlock</h2>
+                      <h2 id="dialog-title-unlock" className="text-xl font-semibold text-gray-900">Quick Unlock</h2>
                       <p className="text-sm text-gray-500">Enter your PIN to unlock</p>
                     </div>
                   </div>
@@ -893,14 +897,14 @@ function LayoutInner() {
 
         {/* PIN setup dialog (after successful passphrase unlock, if no PIN set) */}
         {showPinSetup && (
-          <div className="fixed inset-0 bg-black/30 flex items-center justify-center z-50">
+          <div className="fixed inset-0 bg-black/30 flex items-center justify-center z-50" role="dialog" aria-modal="true" aria-labelledby="dialog-title-pinsetup">
             <div className="bg-white rounded-xl shadow-2xl p-8 w-full max-w-md mx-4">
               <div className="flex items-center gap-3 mb-6">
                 <div className="w-12 h-12 bg-green-100 rounded-full flex items-center justify-center">
                   <KeyRound className="w-6 h-6 text-green-700" />
                 </div>
                 <div>
-                  <h2 className="text-xl font-semibold text-gray-900">Set a Quick Unlock PIN</h2>
+                  <h2 id="dialog-title-pinsetup" className="text-xl font-semibold text-gray-900">Set a Quick Unlock PIN</h2>
                   <p className="text-sm text-gray-500">Skip the passphrase next time</p>
                 </div>
               </div>
@@ -985,129 +989,23 @@ function LayoutInner() {
   }
 
   // ── Server mode — show sidebar + page content ──────────────────────────
+  useEscapeKey(showAdminAuth, () => { setShowAdminAuth(false); setAdminAuthCode(""); setAdminAuthError(""); });
+  useEscapeKey(showPinSetup, () => { setShowPinSetup(false); setNewPin(["", "", "", "", "", ""]); setConfirmPin(["", "", "", "", "", ""]); setPinError(""); });
   return (
     <div className="min-h-screen bg-gray-50">
-      {/* Sidebar */}
-      <aside className="fixed left-0 top-0 h-full w-60 bg-white border-r border-gray-200 flex flex-col">
-        <div className="p-5 border-b border-gray-100">
-          <h1 className="font-bold text-lg text-gray-900 tracking-tight">WireSeal</h1>
-          <p className="text-xs text-blue-600 mt-0.5 font-medium">Server Mode</p>
-        </div>
-
-        <nav className="px-2 py-3 flex-1">
-          {navItems.map(({ to, label, icon: Icon, end }) => (
-            <NavLink
-              key={to}
-              to={to}
-              end={end}
-              className={({ isActive }) =>
-                `flex items-center gap-3 px-3 py-2.5 rounded-lg mb-0.5 transition-colors text-sm ${
-                  isActive
-                    ? "bg-blue-50 text-blue-700 font-medium"
-                    : "text-gray-600 hover:bg-gray-100 hover:text-gray-900"
-                }`
-              }
-            >
-              <Icon className="w-4 h-4 flex-shrink-0" />
-              <span>{label}</span>
-            </NavLink>
-          ))}
-        </nav>
-
-        {/* Status indicators */}
-        <div className="px-4 py-3 border-t border-gray-100 space-y-2">
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-2">
-              <Circle className={`w-2.5 h-2.5 fill-current ${apiOnline ? "text-green-500" : "text-red-500"}`} />
-              <span className="text-xs text-gray-500">API Server</span>
-            </div>
-            <span className={`text-xs font-medium ${apiOnline ? "text-green-600" : "text-red-500"}`}>
-              {apiOnline ? "Online" : "Offline"}
-            </span>
-          </div>
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-2">
-              {serverStatus?.running
-                ? <Wifi className="w-3 h-3 text-green-500" />
-                : <WifiOff className="w-3 h-3 text-gray-400" />}
-              <span className="text-xs text-gray-500">WireGuard</span>
-            </div>
-            <span className={`text-xs font-medium ${serverStatus?.running ? "text-green-600" : "text-gray-400"}`}>
-              {serverStatus?.running ? "Running" : "Stopped"}
-            </span>
-          </div>
-          {/* PIN indicator */}
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-2">
-              <KeyRound className={`w-3 h-3 ${pinSet ? "text-green-500" : "text-gray-400"}`} />
-              <span className="text-xs text-gray-500">Quick PIN</span>
-            </div>
-            {pinSet ? (
-              <button
-                onClick={async () => { await api.removePin(); setPinSet(false); }}
-                className="text-xs text-red-500 hover:text-red-600 flex items-center gap-1 transition-colors"
-                title="Remove PIN"
-              >
-                <Trash2 className="w-3 h-3" />
-                Remove
-              </button>
-            ) : (
-              <button
-                onClick={() => setShowPinSetup(true)}
-                className="text-xs text-blue-500 hover:text-blue-600 transition-colors"
-              >
-                Set PIN
-              </button>
-            )}
-          </div>
-
-          {/* Admin mode indicator */}
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-2">
-              <ShieldAlert className={`w-3 h-3 ${adminActive ? "text-red-500" : "text-gray-400"}`} />
-              <span className="text-xs text-gray-500">Admin Mode</span>
-            </div>
-            {adminActive ? (
-              <div className="flex items-center gap-1">
-                <span className="text-xs text-red-500 flex items-center gap-0.5">
-                  <Timer className="w-3 h-3" />
-                  {Math.ceil(adminExpiresIn / 60)}m
-                </span>
-                <button
-                  onClick={handleAdminDeactivate}
-                  className="text-xs text-gray-400 hover:text-gray-600 ml-1 transition-colors"
-                  title="Deactivate admin mode"
-                >
-                  ×
-                </button>
-              </div>
-            ) : (
-              <button
-                onClick={() => { setAdminAuthError(""); setAdminPassword(""); setShowAdminAuth(true); }}
-                className="text-xs text-red-500 hover:text-red-600 transition-colors"
-              >
-                Activate
-              </button>
-            )}
-          </div>
-        </div>
-
-        <div className="p-2 border-t border-gray-100 space-y-1">
-          {/* Removed "Switch to Client" — server vs client roles are locked
-              to the vault at init. clearing localStorage mode would just
-              re-sync to vault.mode and flip back, leaving the user stuck.
-              To switch roles, the user must Fresh-Start (Settings → Danger
-              Zone) which destroys the vault and lets them re-init in the
-              other mode. */}
-          <button
-            onClick={handleLock}
-            className="flex items-center gap-3 px-3 py-2.5 rounded-lg w-full text-gray-500 hover:bg-gray-100 hover:text-gray-700 transition-colors text-sm"
-          >
-            <LogOut className="w-4 h-4" />
-            <span>Lock Vault</span>
-          </button>
-        </div>
-      </aside>
+      <ServerSidebar
+        navItems={navItems}
+        apiOnline={apiOnline}
+        serverStatus={serverStatus}
+        pinSet={pinSet}
+        adminActive={adminActive}
+        adminExpiresIn={adminExpiresIn}
+        onLock={handleLock}
+        onAdminDeactivate={handleAdminDeactivate}
+        onShowPinSetup={() => setShowPinSetup(true)}
+        onShowAdminAuth={() => { setAdminAuthError(""); setAdminPassword(""); setShowAdminAuth(true); }}
+        onRemovePin={async () => { await api.removePin(); setPinSet(false); }}
+      />
 
       {/* Main content */}
       <main className="ml-60 p-8">
@@ -1162,19 +1060,19 @@ function LayoutInner() {
             </div>
           </div>
         )}
-        <Outlet />
+        <ErrorBoundary><Outlet /></ErrorBoundary>
       </main>
 
       {/* Admin mode authentication dialog */}
       {showAdminAuth && (
-        <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50">
+        <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50" role="dialog" aria-modal="true" aria-labelledby="dialog-title-adminauth">
           <div className="bg-white rounded-xl shadow-2xl p-8 w-full max-w-md mx-4">
             <div className="flex items-center gap-3 mb-2">
               <div className="w-12 h-12 bg-red-100 rounded-full flex items-center justify-center">
                 <ShieldAlert className="w-6 h-6 text-red-600" />
               </div>
               <div>
-                <h2 className="text-xl font-semibold text-gray-900">Activate Admin Mode</h2>
+                <h2 id="dialog-title-adminauth" className="text-xl font-semibold text-gray-900">Activate Admin Mode</h2>
                 <p className="text-sm text-gray-500">Enter your root / sudo password</p>
               </div>
             </div>
@@ -1236,14 +1134,14 @@ function LayoutInner() {
 
       {/* PIN setup dialog (available while unlocked) */}
       {showPinSetup && (
-        <div className="fixed inset-0 bg-black/30 flex items-center justify-center z-50">
+        <div className="fixed inset-0 bg-black/30 flex items-center justify-center z-50" role="dialog" aria-modal="true" aria-labelledby="dialog-title-pinsetup-settings">
           <div className="bg-white rounded-xl shadow-2xl p-8 w-full max-w-md mx-4">
             <div className="flex items-center gap-3 mb-6">
               <div className="w-12 h-12 bg-green-100 rounded-full flex items-center justify-center">
                 <KeyRound className="w-6 h-6 text-green-700" />
               </div>
               <div>
-                <h2 className="text-xl font-semibold text-gray-900">Set a Quick Unlock PIN</h2>
+                <h2 id="dialog-title-pinsetup-settings" className="text-xl font-semibold text-gray-900">Set a Quick Unlock PIN</h2>
                 <p className="text-sm text-gray-500">Skip the passphrase next time</p>
               </div>
             </div>

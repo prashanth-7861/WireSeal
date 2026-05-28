@@ -262,27 +262,31 @@ def client_delete(profile: str) -> None:
 @client.command("enroll")
 @click.option("--server", required=True, help="WireSeal server address (host:port)")
 @click.option("--name", "-n", required=True, help="Client name on the server")
-@click.option("--token", "-t", required=True, help="Heartbeat token for the client")
 @click.option("--connect", is_flag=True, help="Auto-connect after enrollment")
-def client_enroll(server: str, name: str, token: str, connect: bool) -> None:
+def client_enroll(server: str, name: str, connect: bool) -> None:
     """Fetch config from a WireSeal server and import it into the local vault.
 
-    Uses the heartbeat token to authenticate. The server must be running
+    Uses the heartbeat token to authenticate (prompted via hidden input).
+    The server must be running
     \b
     Examples:
-      wireseal client enroll --server vpn.example.com:8080 --name my-laptop --token <hb-token>
-      wireseal client enroll -s 10.0.0.1:8080 -n laptop -t <token> --connect
+      wireseal client enroll --server vpn.example.com:8080 --name my-laptop
+      wireseal client enroll -s 10.0.0.1:8080 -n laptop --connect
     """
+    token: str = click.prompt("Heartbeat token", hide_input=True)
+
     import json
     import urllib.request as _req
     import urllib.error as _err
+    import ssl as _ssl
 
-    url = f"http://{server}/api/client/self/config"
+    url = f"https://{server}/api/client/self/config"
     click.echo(f"Enrolling with server at {url} ...")
 
+    ctx = _ssl.create_default_context()
     try:
         r = _req.Request(url, method="GET", headers={"X-WireSeal-Heartbeat": token})
-        with _req.urlopen(r, timeout=15) as resp:
+        with _req.urlopen(r, timeout=15, context=ctx) as resp:
             body = json.loads(resp.read().decode("utf-8"))
     except _err.HTTPError as exc:
         detail = ""

@@ -18,7 +18,7 @@ import ipaddress
 import ssl
 import urllib.request
 from collections import Counter
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, TimeoutError, as_completed
 from typing import TYPE_CHECKING
 
 # ---------------------------------------------------------------------------
@@ -135,10 +135,16 @@ def resolve_public_ip() -> ipaddress.IPv4Address:
 
     with ThreadPoolExecutor(max_workers=4) as executor:
         futures = {executor.submit(_fetch_ip, url): url for url in _IP_SOURCES}
-        for future in as_completed(futures, timeout=10):
-            ip_str = future.result()
-            if ip_str is not None and _is_public_ipv4(ip_str):
-                results.append(ip_str)
+        try:
+            for future in as_completed(futures, timeout=10):
+                ip_str = future.result()
+                if ip_str is not None and _is_public_ipv4(ip_str):
+                    results.append(ip_str)
+        except TimeoutError:
+            # P3-M1: as_completed timeout must degrade to IPConsensusError,
+            # not propagate a raw TimeoutError to callers. Continue with
+            # whatever results we have — if no consensus, we raise below.
+            pass
 
     counts = Counter(results)
     if counts:

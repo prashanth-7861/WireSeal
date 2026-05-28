@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { Lock, Eye, EyeOff, AlertCircle } from "lucide-react";
+import { useEscapeKey } from "../hooks/useEscapeKey";
 
 interface PassphraseDialogProps {
   mode: "setup" | "unlock";
@@ -40,14 +41,14 @@ export function PassphraseDialog({ mode, error: externalError, onSuccess }: Pass
   };
 
   return (
-    <div className="fixed inset-0 bg-gray-50 flex items-center justify-center z-50">
+    <div className="fixed inset-0 bg-gray-50 flex items-center justify-center z-50" role="dialog" aria-modal="true" aria-labelledby="passphrase-dialog-title">
       <div className="bg-white rounded-lg shadow-xl p-8 w-full max-w-md">
         <div className="flex items-center gap-3 mb-6">
           <div className="w-12 h-12 bg-blue-100 rounded-full flex items-center justify-center">
             <Lock className="w-6 h-6 text-blue-700" />
           </div>
           <div>
-            <h2 className="text-xl font-semibold text-gray-900">
+            <h2 id="passphrase-dialog-title" className="text-xl font-semibold text-gray-900">
               {mode === "setup" ? "Initialize WireSeal Vault" : "Unlock Vault"}
             </h2>
             <p className="text-sm text-gray-500">

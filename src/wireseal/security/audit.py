@@ -543,8 +543,18 @@ class AuditLog:
                 chain_hash = d.get("chain_hash")
                 prev_hash = d.get("prev_hash")
                 if chain_hash is None or prev_hash is None:
+                    # P3-M3: entries without chain_hash are pre-upgrade legacy
+                    # records, not tampered. Count but skip validation.
                     count += 1
                     continue
+
+                # P3-M3: ensure neither field is empty — empty prev_hash on a
+                # non-first entry means intentional corruption to hide entries.
+                if not chain_hash or not prev_hash:
+                    return False, count, (
+                        f"line {global_line} ({file_path.name}): "
+                        f"empty chain_hash or prev_hash (possible tampering)"
+                    )
                 if prev_hash != expected_prev:
                     return False, count, (
                         f"line {global_line} ({file_path.name}): "

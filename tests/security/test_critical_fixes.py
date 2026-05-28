@@ -24,6 +24,9 @@ from unittest.mock import MagicMock
 import pytest
 
 from wireseal import api
+from wireseal.api import _shared as _api_shared
+from wireseal.api import admin as _api_admin
+from wireseal.api import update as _api_update
 
 
 # ---------------------------------------------------------------------------
@@ -34,9 +37,13 @@ from wireseal import api
 @pytest.fixture(autouse=True)
 def _isolate_api_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(api, "_VAULT_DIR", tmp_path)
+    monkeypatch.setattr(_api_shared, "_VAULT_DIR", tmp_path)
     monkeypatch.setattr(api, "_VAULT_PATH", tmp_path / "vault.enc")
+    monkeypatch.setattr(_api_shared, "_VAULT_PATH", tmp_path / "vault.enc")
     monkeypatch.setattr(api, "_AUDIT_PATH", tmp_path / "audit.log")
+    monkeypatch.setattr(_api_shared, "_AUDIT_PATH", tmp_path / "audit.log")
     monkeypatch.setattr(api, "_PIN_PATH", tmp_path / "pin.enc")
+    monkeypatch.setattr(_api_shared, "_PIN_PATH", tmp_path / "pin.enc")
     with api._lock:
         api._session.update(vault=None, passphrase=None, cache=None,
                             admin_id=None, admin_role=None)
@@ -155,6 +162,7 @@ class TestAdminPathAllowlist:
     def test_path_inside_vault_dir_accepted(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         # Reconfigure the allowlist to include the test tmp_path.
         monkeypatch.setattr(api, "_ADMIN_FILE_ROOTS", (tmp_path.resolve(),))
+        monkeypatch.setattr(_api_shared, "_ADMIN_FILE_ROOTS", (tmp_path.resolve(),))
         target = tmp_path / "vault.enc"
         target.write_bytes(b"x")
         out = api._validate_admin_path(str(target))
@@ -162,6 +170,7 @@ class TestAdminPathAllowlist:
 
     def test_path_outside_allowlist_rejected(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(api, "_ADMIN_FILE_ROOTS", (tmp_path.resolve(),))
+        monkeypatch.setattr(_api_shared, "_ADMIN_FILE_ROOTS", (tmp_path.resolve(),))
         import sys
         outside = "C:\\Windows\\System32\\drivers\\etc\\hosts" if sys.platform == "win32" else "/etc/shadow"
         with pytest.raises(api._ApiError) as exc:
@@ -178,7 +187,11 @@ class TestAdminExecRemoved:
     def test_endpoint_returns_410(self, monkeypatch: pytest.MonkeyPatch) -> None:
         # Bypass the normal gatekeepers so we land on the 410 branch.
         monkeypatch.setattr(api, "_require_unlocked", lambda: None)
+        monkeypatch.setattr(_api_shared, "_require_unlocked", lambda: None)
+        monkeypatch.setattr(_api_admin, "_require_unlocked", lambda: None)
         monkeypatch.setattr(api, "_require_admin_active", lambda: None)
+        monkeypatch.setattr(_api_shared, "_require_admin_active", lambda: None)
+        monkeypatch.setattr(_api_admin, "_require_admin_active", lambda: None)
         with pytest.raises(api._ApiError) as exc:
             api._h_admin_exec(_req({"cmd": ["rm", "-rf", "/"]}), ())
         assert exc.value.status == 410
@@ -205,6 +218,8 @@ class TestUpdateInstallAuth:
     def test_rejects_when_unlocked_but_not_admin(self, monkeypatch: pytest.MonkeyPatch) -> None:
         # Simulate unlocked but admin-mode inactive.
         monkeypatch.setattr(api, "_require_unlocked", lambda: None)
+        monkeypatch.setattr(_api_shared, "_require_unlocked", lambda: None)
+        monkeypatch.setattr(_api_update, "_require_unlocked", lambda: None)
         with pytest.raises(api._ApiError) as exc:
             api._h_update_install(_req(), ())
         # _require_admin_active raises 403 when admin mode isn't active.
@@ -212,7 +227,11 @@ class TestUpdateInstallAuth:
 
     def test_rejects_cross_origin(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(api, "_require_unlocked", lambda: None)
+        monkeypatch.setattr(_api_shared, "_require_unlocked", lambda: None)
+        monkeypatch.setattr(_api_update, "_require_unlocked", lambda: None)
         monkeypatch.setattr(api, "_require_admin_active", lambda: None)
+        monkeypatch.setattr(_api_shared, "_require_admin_active", lambda: None)
+        monkeypatch.setattr(_api_update, "_require_admin_active", lambda: None)
         with pytest.raises(api._ApiError) as exc:
             api._h_update_install(_req(headers={"Origin": "https://evil.com"}), ())
         assert exc.value.status == 403

@@ -204,14 +204,9 @@ def init(subnet: str, port: int, endpoint: str | None, duckdns_domain: str | Non
         )
         config_path = adapter.deploy_config(config_content)
 
-        # Store config hash in vault for integrity tracking
-        import hashlib
-        config_hash = hashlib.sha256(config_content.encode("utf-8")).hexdigest()
-
-        # Re-open vault to store the config hash
-        with vault.open(passphrase) as state:
-            state.integrity["server"] = config_hash
-            vault.save(state, passphrase)
+        # Store config hash in initial_state so it's in the vault from the
+        # first write — no need for a second vault.open (P4-M5 fix).
+        initial_state.setdefault("integrity", {})["server"] = hashlib.sha256(config_content.encode("utf-8")).hexdigest()
 
         # Step 7: Install WireGuard, enable IP forwarding, apply firewall, start service
         adapter.install_wireguard()
@@ -679,12 +674,14 @@ def _reload_wireguard(interface: str = "wg0") -> None:
     # wg syncconf requires a filename argument — write stripped config to a
     # temp file (mode 600) then pass its path.  Using /dev/stdin is unreliable
     # when capture_output=True closes the fd before wg reads it.
+    # P4-M1: use delete=True so the file is unlinked immediately on close,
+    # preventing private-key persistence if the process crashes after write.
     with tempfile.NamedTemporaryFile(
-        suffix=".conf", mode="wb", delete=False
+        suffix=".conf", mode="wb", delete=True
     ) as tmp:
         tmp.write(strip_result.stdout)
+        tmp.flush()
         tmp_path = tmp.name
-    try:
         os.chmod(tmp_path, 0o600)
         subprocess.run(
             ["wg", "syncconf", interface, tmp_path],
@@ -692,11 +689,34 @@ def _reload_wireguard(interface: str = "wg0") -> None:
             check=True,
             capture_output=True,
         )
-    finally:
+
+
+def _clear_scrollback() -> None:
+    """Clear terminal scrollback buffer after QR display.
+
+    P4-M2: click.clear() only clears the visible viewport, leaving the QR
+    (containing the client private key) accessible by scrolling up. This
+    function emits the DECSCA sequence to erase the scrollback as well.
+    """
+    import sys as _sys
+    if _sys.platform == "win32" and _sys.stdout and _sys.stdout.isatty():
         try:
-            os.unlink(tmp_path)
-        except OSError:
-            pass
+            import ctypes
+            STD_OUTPUT_HANDLE = -11
+            ENABLE_VIRTUAL_TERMINAL_PROCESSING = 0x0004
+            kernel32 = ctypes.windll.kernel32
+            h = kernel32.GetStdHandle(STD_OUTPUT_HANDLE)
+            mode = ctypes.c_uint32(0)
+            kernel32.GetConsoleMode(h, ctypes.byref(mode))
+            kernel32.SetConsoleMode(h, mode.value | ENABLE_VIRTUAL_TERMINAL_PROCESSING)
+            _sys.stdout.write("\x1b[3J")
+            _sys.stdout.flush()
+        except Exception:
+            _sys.stdout.write("\n" * 80)
+            _sys.stdout.flush()
+    elif _sys.stdout and _sys.stdout.isatty():
+        _sys.stdout.write("\x1b[3J")
+        _sys.stdout.flush()
 
 
 def _not_implemented(name: str) -> None:
@@ -790,13 +810,13 @@ def add_client(name: str, access_level: str, ttl: int | None, expires_at: str | 
                 raise click.ClickException(f"Client '{name}' already exists.")
 
             # Step 5: Generate client keypair
+            # P4-C1: keep SecretBytes as long as possible; decode to str only
+            # at the render boundary. Named str variables are hard to wipe.
             private_key_secret, public_key_bytes = generate_keypair()
             public_key_str = public_key_bytes.decode("ascii")
-            private_key_str = private_key_secret.expose_secret().decode("ascii")
 
             # Step 6: Generate PSK
             psk_secret = generate_psk()
-            psk_str = psk_secret.expose_secret().decode("ascii")
 
             # Step 7: Allocate next available IP from pool
             pool = IPPool(state.ip_pool["subnet"])
@@ -825,12 +845,15 @@ def add_client(name: str, access_level: str, ttl: int | None, expires_at: str | 
                     f"MTU must be between 1280 and 1420, got {client_mtu}"
                 )
 
+            # P4-C1: decode SecretBytes to str at the exact render boundary,
+            # not 70 lines earlier. The str argument lives only for the
+            # duration of render_client_config.
             client_config_str = builder.render_client_config(
-                client_private_key=private_key_str,
+                client_private_key=private_key_secret.expose_secret().decode("ascii"),
                 client_ip=allocated_ip,
                 dns_server=server_ip,  # use server VPN IP as DNS
                 server_public_key=server_pub_key,
-                psk=psk_str,
+                psk=psk_secret.expose_secret().decode("ascii"),
                 server_endpoint=server_endpoint,
                 mtu=client_mtu,
                 allowed_ips=allowed_ips,
@@ -857,7 +880,7 @@ def add_client(name: str, access_level: str, ttl: int | None, expires_at: str | 
             peers.append({
                 "name": name,
                 "public_key": public_key_str,
-                "psk": psk_str,
+                "psk": psk_secret.expose_secret().decode("ascii"),
                 "ip": allocated_ip,
             })
 
@@ -873,14 +896,17 @@ def add_client(name: str, access_level: str, ttl: int | None, expires_at: str | 
             adapter = get_adapter()
             adapter.deploy_config(server_config_content)
 
-            # Step 13: Reload WireGuard — CLIENT-01 atomic revocation boundary
-            _reload_wireguard()
-
-            # Persist client in vault AFTER successful syncconf
+            # Persist client in vault BEFORE reloading WireGuard.
+            # If vault.save() fails, no WG state change occurred — command is
+            # safely retried. This ordering prevents P4-H1: a WG reload before
+            # vault commit creates unrecoverable state inconsistency.
+            # P4-C1: decode SecretBytes inline when building the vault dict —
+            # these strs will be re-wrapped in SecretBytes by _wrap_secrets
+            # on next vault.open().
             state.clients[name] = {
-                "private_key": private_key_str,
+                "private_key": private_key_secret.expose_secret().decode("ascii"),
                 "public_key": public_key_str,
-                "psk": psk_str,
+                "psk": psk_secret.expose_secret().decode("ascii"),
                 "ip": allocated_ip,
                 "config_hash": config_hash,
                 "access_level": access_level,
@@ -896,6 +922,9 @@ def add_client(name: str, access_level: str, ttl: int | None, expires_at: str | 
             state.integrity[f"client-{name}"] = config_hash
             vault.save(state, passphrase)
 
+            # Step 13: Reload WireGuard — after vault commit (P4-H1 fix)
+            _reload_wireguard()
+
             # Step 14: Audit log — no key material
             audit = AuditLog(DEFAULT_AUDIT_LOG_PATH)
             audit.log(
@@ -910,7 +939,10 @@ def add_client(name: str, access_level: str, ttl: int | None, expires_at: str | 
         click.echo(generate_qr_terminal(client_config_str))
         click.echo(f"QR will clear in {QR_DISPLAY_TIMEOUT} seconds...")
         time.sleep(QR_DISPLAY_TIMEOUT)
+        # P4-M2: clear visible screen AND scrollback buffer so private key
+        # does not persist in terminal history.
         click.clear()
+        _clear_scrollback()
 
     except (click.ClickException, click.BadParameter):
         raise
@@ -978,9 +1010,6 @@ def remove_client(name: str) -> None:
             adapter = get_adapter()
             adapter.deploy_config(server_config_content)
 
-            # Step 5: Reload WireGuard — revocation moment (CLIENT-02: no grace period)
-            _reload_wireguard()
-
             # Step 6: Release IP in pool
             pool = IPPool(state.ip_pool["subnet"])
             pool.load_state(state.ip_pool.get("allocated", {}))
@@ -1001,6 +1030,9 @@ def remove_client(name: str) -> None:
                     pass
 
             vault.save(state, passphrase)
+
+            # Step 5: Reload WireGuard — after vault commit (P4-H1 fix)
+            _reload_wireguard()
 
             # Step 9: Audit log — no key material
             audit = AuditLog(DEFAULT_AUDIT_LOG_PATH)
@@ -1281,6 +1313,7 @@ def show_qr(name: str, save_path: str | None, auto_delete: bool) -> None:
         click.echo("Terminal will clear in 60 seconds...")
         time.sleep(60)
         click.clear()
+        _clear_scrollback()
 
         # Audit log — no key material
         audit = AuditLog(DEFAULT_AUDIT_LOG_PATH)
@@ -1332,10 +1365,9 @@ def rotate_keys(name: str) -> None:
             new_psk = generate_psk()
 
             new_pub_str = new_keypair_pub.decode("ascii")
-            new_priv_str = new_keypair_priv.expose_secret().decode("ascii")
-            new_psk_str = new_psk.expose_secret().decode("ascii")
 
             # Step 5: Build and validate new configs
+            # P4-C1: keep SecretBytes; decode to str only at render boundaries.
             from wireseal.core.config_builder import ConfigBuilder
             from wireseal.security.validator import validate_client_config, validate_server_config
 
@@ -1349,11 +1381,11 @@ def rotate_keys(name: str) -> None:
             server_endpoint = client_data.get("endpoint", f"{server_ip_raw}:{server_port}")
 
             new_client_config_str = ConfigBuilder().render_client_config(
-                client_private_key=new_priv_str,
+                client_private_key=new_keypair_priv.expose_secret().decode("ascii"),
                 client_ip=client_ip,
                 dns_server=dns_server,
                 server_public_key=server_pub_key,
-                psk=new_psk_str,
+                psk=new_psk.expose_secret().decode("ascii"),
                 server_endpoint=server_endpoint,
             )
 
@@ -1361,9 +1393,8 @@ def rotate_keys(name: str) -> None:
             clients_for_render = []
             for cname, cdata in state.clients.items():
                 if cname == name:
-                    # Use new public key and new PSK for the rotated client
                     cpub = new_pub_str
-                    cpsk = new_psk_str
+                    cpsk = new_psk.expose_secret().decode("ascii")
                 else:
                     cpub_raw = cdata.get("public_key", "")
                     cpub = cpub_raw if isinstance(cpub_raw, str) else cpub_raw.decode("ascii")
@@ -1391,8 +1422,8 @@ def rotate_keys(name: str) -> None:
             # Validate both configs
             try:
                 validate_client_config({
-                    "private_key": new_priv_str,
-                    "psk": new_psk_str,
+                    "private_key": new_keypair_priv.expose_secret().decode("ascii"),
+                    "psk": new_psk.expose_secret().decode("ascii"),
                     "ip": client_ip,
                     "dns_server": dns_server,
                     "server_public_key": server_pub_key,
@@ -1434,6 +1465,31 @@ def rotate_keys(name: str) -> None:
             atomic_write(server_conf_path, server_encoded, mode=0o600)
             new_server_hash = hashlib.sha256(server_encoded).hexdigest()
 
+            # Step 8: Wipe old keys and update vault state
+            old_priv = state.clients[name].get("private_key")
+            if isinstance(old_priv, SecretBytes):
+                old_priv_bytes = bytearray(old_priv.expose_secret())
+                wipe_bytes(old_priv_bytes)
+                old_priv.wipe()
+
+            old_psk_val = state.clients[name].get("psk")
+            if isinstance(old_psk_val, SecretBytes):
+                old_psk_bytes = bytearray(old_psk_val.expose_secret())
+                wipe_bytes(old_psk_bytes)
+                old_psk_val.wipe()
+
+            # Update vault state with new keys and hashes
+            # P4-C1: store SecretBytes directly (not decoded str) so
+            # _unwrap_secrets handles serialization at save time.
+            state.clients[name]["private_key"] = new_keypair_priv
+            state.clients[name]["public_key"] = new_pub_str
+            state.clients[name]["psk"] = new_psk
+            state.integrity[f"client-{name}"] = new_client_hash
+            state.integrity["server"] = new_server_hash
+
+            # Commit vault BEFORE reloading WireGuard (P4-H1 fix)
+            vault.save(state, passphrase)
+
             # Step 7: Reload WireGuard (no shell=True — CRIT-01 fix)
             try:
                 strip_result = subprocess.run(
@@ -1457,32 +1513,9 @@ def rotate_keys(name: str) -> None:
                 )
                 # Do NOT abort — files on disk are already correct
 
-            # Step 8: Wipe old keys and update vault state
-            old_priv = state.clients[name].get("private_key")
-            if isinstance(old_priv, SecretBytes):
-                old_priv_bytes = bytearray(old_priv.expose_secret())
-                wipe_bytes(old_priv_bytes)
-                old_priv.wipe()
-
-            old_psk_val = state.clients[name].get("psk")
-            if isinstance(old_psk_val, SecretBytes):
-                old_psk_bytes = bytearray(old_psk_val.expose_secret())
-                wipe_bytes(old_psk_bytes)
-                old_psk_val.wipe()
-
-            # Update vault state with new keys and hashes
-            state.clients[name]["private_key"] = new_keypair_priv
-            state.clients[name]["public_key"] = new_pub_str
-            state.clients[name]["psk"] = new_psk
-            state.integrity[f"client-{name}"] = new_client_hash
-            state.integrity["server"] = new_server_hash
-
             # Step 9: Audit log (no key material)
             audit = AuditLog(DEFAULT_AUDIT_LOG_PATH)
             audit.log(action="rotate-keys", metadata={"name": name})
-
-            # Commit vault: state is saved when context manager exits
-            vault.save(state, passphrase)
 
         # Step 10: Show new QR from new config
         from wireseal.core.qr_generator import generate_qr_terminal
@@ -1493,6 +1526,7 @@ def rotate_keys(name: str) -> None:
         click.echo("QR will clear in 60 seconds...")
         time.sleep(60)
         click.clear()
+        _clear_scrollback()
 
         # Wipe config string from memory best-effort
         wipe_string(new_client_config_str)
@@ -1543,7 +1577,6 @@ def rotate_server_keys() -> None:
 
             new_server_priv, new_server_pub = generate_keypair()
             new_server_pub_str = new_server_pub.decode("ascii")
-            new_server_priv_str = new_server_priv.expose_secret().decode("ascii")
 
             server_data = state.server
             server_port = server_data["port"]
@@ -1561,6 +1594,7 @@ def rotate_server_keys() -> None:
             clients_dir.mkdir(parents=True, exist_ok=True)
 
             # Step 5: Update all client configs with new server public key
+            # P4-C1: decode SecretBytes to str only at render boundaries.
             new_client_hashes: dict = {}
             for cname in clients:
                 cdata = state.clients[cname]
@@ -1568,26 +1602,21 @@ def rotate_server_keys() -> None:
                 dns_server = cdata.get("dns_server", "1.1.1.1")
                 server_endpoint = cdata.get("endpoint", f"{server_ip_raw}:{server_port}")
 
-                cpriv_raw = cdata.get("private_key", "")
-                cpriv_str = cpriv_raw if isinstance(cpriv_raw, str) else cpriv_raw.expose_secret().decode("ascii")
-                cpsk_raw = cdata.get("psk", "")
-                cpsk_str = cpsk_raw if isinstance(cpsk_raw, str) else cpsk_raw.expose_secret().decode("ascii")
-                cpub_raw = cdata.get("public_key", "")
-                cpub_str = cpub_raw if isinstance(cpub_raw, str) else cpub_raw.decode("ascii")
-
                 updated_client_config = ConfigBuilder().render_client_config(
-                    client_private_key=cpriv_str,
+                    client_private_key=cdata["private_key"].expose_secret().decode("ascii") if isinstance(cdata["private_key"], SecretBytes) else str(cdata["private_key"]),
                     client_ip=client_ip,
                     dns_server=dns_server,
                     server_public_key=new_server_pub_str,
-                    psk=cpsk_str,
+                    psk=cdata["psk"].expose_secret().decode("ascii") if isinstance(cdata["psk"], SecretBytes) else str(cdata["psk"]),
                     server_endpoint=server_endpoint,
                 )
 
                 try:
+                    cpriv_tmp = cdata["private_key"].expose_secret().decode("ascii") if isinstance(cdata["private_key"], SecretBytes) else str(cdata["private_key"])
+                    cpsk_tmp = cdata["psk"].expose_secret().decode("ascii") if isinstance(cdata["psk"], SecretBytes) else str(cdata["psk"])
                     validate_client_config({
-                        "private_key": cpriv_str,
-                        "psk": cpsk_str,
+                        "private_key": cpriv_tmp,
+                        "psk": cpsk_tmp,
                         "ip": client_ip,
                         "dns_server": dns_server,
                         "server_public_key": new_server_pub_str,
@@ -1621,7 +1650,7 @@ def rotate_server_keys() -> None:
 
             try:
                 validate_server_config({
-                    "private_key": new_server_priv_str,
+                    "private_key": new_server_priv.expose_secret().decode("ascii"),
                     "public_key": "",
                     "port": server_port,
                     "subnet": subnet,
@@ -1632,7 +1661,7 @@ def rotate_server_keys() -> None:
                 raise click.ClickException(f"New server config validation failed: {exc}") from exc
 
             new_server_config_str = ConfigBuilder().render_server_config(
-                server_private_key=new_server_priv_str,
+                server_private_key=new_server_priv.expose_secret().decode("ascii"),
                 server_ip=server_ip_raw,
                 prefix_length=prefix_length,
                 server_port=server_port,
@@ -1643,6 +1672,22 @@ def rotate_server_keys() -> None:
             server_encoded = new_server_config_str.encode("utf-8")
             atomic_write(server_conf_path, server_encoded, mode=0o600)
             new_server_hash = hashlib.sha256(server_encoded).hexdigest()
+
+            # Step 8: Wipe old server private key and update vault state FIRST
+            old_server_priv = state.server.get("private_key")
+            if isinstance(old_server_priv, SecretBytes):
+                old_bytes = bytearray(old_server_priv.expose_secret())
+                wipe_bytes(old_bytes)
+                old_server_priv.wipe()
+
+            state.server["private_key"] = new_server_priv
+            state.server["public_key"] = new_server_pub_str
+            state.integrity["server"] = new_server_hash
+            for cname, chash in new_client_hashes.items():
+                state.integrity[f"client-{cname}"] = chash
+
+            # Commit vault BEFORE reloading WireGuard (P4-H1 fix)
+            vault.save(state, passphrase)
 
             # Step 7: Reload WireGuard (no shell=True — CRIT-01 fix)
             try:
@@ -1666,27 +1711,12 @@ def rotate_server_keys() -> None:
                     f"Run: wg syncconf wg0 <(wg-quick strip {server_conf_path})"
                 )
 
-            # Step 8: Wipe old server private key and update vault state
-            old_server_priv = state.server.get("private_key")
-            if isinstance(old_server_priv, SecretBytes):
-                old_bytes = bytearray(old_server_priv.expose_secret())
-                wipe_bytes(old_bytes)
-                old_server_priv.wipe()
-
-            state.server["private_key"] = new_server_priv
-            state.server["public_key"] = new_server_pub_str
-            state.integrity["server"] = new_server_hash
-            for cname, chash in new_client_hashes.items():
-                state.integrity[f"client-{cname}"] = chash
-
             # Step 9: Audit log (no key material)
             audit = AuditLog(DEFAULT_AUDIT_LOG_PATH)
             audit.log(
                 action="rotate-server-keys",
                 metadata={"client_count": client_count},
             )
-
-            vault.save(state, passphrase)
 
         # Step 10: Confirm
         click.echo(

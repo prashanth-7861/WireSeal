@@ -1,7 +1,7 @@
 """Tests for /api/unlock rate limiting (Hardening Phase 1).
 
 Covers:
-- _check_rate_limit raises 429 after _UNLOCK_MAX failures in _UNLOCK_WINDOW
+- _check_unlock_rate_limit raises 429 after _UNLOCK_MAX failures in _UNLOCK_WINDOW
 - _record_unlock_failure appends a timestamp to the per-IP list
 - _clear_unlock_failures wipes the IP's counter after a successful unlock
 - Stale entries outside the sliding window are pruned
@@ -16,6 +16,7 @@ from pathlib import Path
 import pytest
 
 from wireseal import api
+from wireseal.api import _shared as _api_shared
 
 
 # ---------------------------------------------------------------------------
@@ -28,12 +29,13 @@ def _reset_rate_limit_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     """Reset module-level rate-limit state and redirect the audit log.
 
     Rate-limiting uses global dicts; tests must start from a clean slate, and
-    the audit-log writes that _check_rate_limit / _record_unlock_failure emit
+    the audit-log writes that _check_unlock_rate_limit / _record_unlock_failure emit
     must not touch the real ~/.wireseal/audit.log.
     """
     with api._lock:
         api._unlock_attempts.clear()
     monkeypatch.setattr(api, "_AUDIT_PATH", tmp_path / "audit.log")
+    monkeypatch.setattr(_api_shared, "_AUDIT_PATH", tmp_path / "audit.log")
     yield
     with api._lock:
         api._unlock_attempts.clear()
@@ -81,14 +83,14 @@ def test_check_allows_below_threshold() -> None:
     for _ in range(api._UNLOCK_MAX - 1):
         api._record_unlock_failure("10.0.0.1")
     # 4 failures < 5 → no raise
-    api._check_rate_limit("10.0.0.1")
+    api._check_unlock_rate_limit("10.0.0.1")
 
 
 def test_check_raises_429_at_threshold() -> None:
     for _ in range(api._UNLOCK_MAX):
         api._record_unlock_failure("10.0.0.1")
     with pytest.raises(api._ApiError) as excinfo:
-        api._check_rate_limit("10.0.0.1")
+        api._check_unlock_rate_limit("10.0.0.1")
     assert excinfo.value.status == 429
     assert "too many" in str(excinfo.value).lower()
 
@@ -97,7 +99,7 @@ def test_check_raises_429_above_threshold() -> None:
     for _ in range(api._UNLOCK_MAX + 3):
         api._record_unlock_failure("10.0.0.1")
     with pytest.raises(api._ApiError) as excinfo:
-        api._check_rate_limit("10.0.0.1")
+        api._check_unlock_rate_limit("10.0.0.1")
     assert excinfo.value.status == 429
 
 
@@ -106,9 +108,9 @@ def test_rate_limit_is_per_ip() -> None:
     for _ in range(api._UNLOCK_MAX):
         api._record_unlock_failure("10.0.0.1")
     with pytest.raises(api._ApiError):
-        api._check_rate_limit("10.0.0.1")
+        api._check_unlock_rate_limit("10.0.0.1")
     # IP 2 still has a clean slate
-    api._check_rate_limit("10.0.0.2")
+    api._check_unlock_rate_limit("10.0.0.2")
 
 
 # ---------------------------------------------------------------------------
@@ -124,7 +126,7 @@ def test_stale_entries_are_pruned(monkeypatch: pytest.MonkeyPatch) -> None:
         api._unlock_attempts["10.0.0.1"] = [stale_ts] * api._UNLOCK_MAX
 
     # Check should prune all stale entries and NOT raise
-    api._check_rate_limit("10.0.0.1")
+    api._check_unlock_rate_limit("10.0.0.1")
     assert api._unlock_attempts["10.0.0.1"] == []
 
 
@@ -137,7 +139,7 @@ def test_mixed_stale_and_fresh_prunes_stale_only() -> None:
             now - 5,                          # fresh
             now - 1,                          # fresh
         ]
-    api._check_rate_limit("10.0.0.1")
+    api._check_unlock_rate_limit("10.0.0.1")
     # Only the two fresh entries survive
     assert len(api._unlock_attempts["10.0.0.1"]) == 2
 
@@ -155,7 +157,7 @@ def test_successful_unlock_clears_failures() -> None:
     # Five NEW failures should be tolerated before 429 fires
     for _ in range(api._UNLOCK_MAX - 1):
         api._record_unlock_failure("10.0.0.1")
-    api._check_rate_limit("10.0.0.1")  # should NOT raise
+    api._check_unlock_rate_limit("10.0.0.1")  # should NOT raise
 
 
 # ---------------------------------------------------------------------------
@@ -168,7 +170,7 @@ def test_ratelimit_trip_writes_audit_entry(tmp_path: Path) -> None:
     for _ in range(api._UNLOCK_MAX):
         api._record_unlock_failure("10.0.0.1")
     with pytest.raises(api._ApiError):
-        api._check_rate_limit("10.0.0.1")
+        api._check_unlock_rate_limit("10.0.0.1")
 
     audit_file = api._AUDIT_PATH
     assert audit_file.exists()

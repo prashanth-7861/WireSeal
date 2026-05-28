@@ -1,6 +1,7 @@
 import { useState, useRef, useEffect } from "react";
 import { AlertTriangle, CheckCircle, Copy, X, ShieldCheck, Eye, EyeOff } from "lucide-react";
 import { api } from "../api";
+import { useEscapeKey } from "../hooks/useEscapeKey";
 
 interface Props {
   onClose: () => void;
@@ -103,7 +104,8 @@ export function TotpEnrollDialog({ onClose, onEnrolled, adminId }: Props) {
   const [qrImageError, setQrImageError] = useState(false);
 
   return (
-    <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
+    <>{useEscapeKey(true, onClose)}
+    <div role="dialog" aria-modal="true" aria-labelledby="totp-enroll-title" className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
       <div className="bg-white rounded-lg shadow-xl p-6 w-full max-w-md">
         <div className="flex items-center justify-between mb-6">
           <div className="flex items-center gap-3">
@@ -111,7 +113,7 @@ export function TotpEnrollDialog({ onClose, onEnrolled, adminId }: Props) {
               <ShieldCheck className="w-5 h-5 text-indigo-700" />
             </div>
             <div>
-              <h2 className="text-lg font-semibold text-gray-900">Enable Two-Factor Auth</h2>
+              <h2 id="totp-enroll-title" className="text-lg font-semibold text-gray-900">Enable Two-Factor Auth</h2>
               <p className="text-xs text-gray-500">
                 {step === "confirm" && "Confirm your identity"}
                 {step === "qr" && "Step 1 of 3 — Scan QR code"}
@@ -287,5 +289,6 @@ export function TotpEnrollDialog({ onClose, onEnrolled, adminId }: Props) {
         )}
       </div>
     </div>
+    </>
   );
 }

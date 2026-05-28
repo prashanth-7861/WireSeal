@@ -18,6 +18,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from wireseal import api
+from wireseal.api import _shared as _api_shared
 
 
 # ---------------------------------------------------------------------------
@@ -28,9 +29,13 @@ from wireseal import api
 @pytest.fixture(autouse=True)
 def _isolate_api_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(api, "_VAULT_DIR", tmp_path)
+    monkeypatch.setattr(_api_shared, "_VAULT_DIR", tmp_path)
     monkeypatch.setattr(api, "_VAULT_PATH", tmp_path / "vault.enc")
+    monkeypatch.setattr(_api_shared, "_VAULT_PATH", tmp_path / "vault.enc")
     monkeypatch.setattr(api, "_AUDIT_PATH", tmp_path / "audit.log")
+    monkeypatch.setattr(_api_shared, "_AUDIT_PATH", tmp_path / "audit.log")
     monkeypatch.setattr(api, "_PIN_PATH", tmp_path / "pin.enc")
+    monkeypatch.setattr(_api_shared, "_PIN_PATH", tmp_path / "pin.enc")
     with api._lock:
         api._session.update(vault=None, passphrase=None, cache=None,
                             admin_id=None, admin_role=None)

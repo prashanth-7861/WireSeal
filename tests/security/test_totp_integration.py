@@ -20,6 +20,7 @@ from typing import Any
 import pytest
 
 from wireseal import api
+from wireseal.api import _shared as _api_shared
 from wireseal.security.secret_types import SecretBytes
 from wireseal.security.totp import (
     _hotp,
@@ -144,8 +145,11 @@ def _add_non_owner_admin(vault: Vault, passphrase: SecretBytes | None = None,
 def _reset_api_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     """Reset all module-level API state between tests."""
     monkeypatch.setattr(api, "_AUDIT_PATH", tmp_path / "audit.log")
+    monkeypatch.setattr(_api_shared, "_AUDIT_PATH", tmp_path / "audit.log")
     monkeypatch.setattr(api, "_VAULT_DIR", tmp_path)
+    monkeypatch.setattr(_api_shared, "_VAULT_DIR", tmp_path)
     monkeypatch.setattr(api, "_VAULT_PATH", tmp_path / "vault.enc")
+    monkeypatch.setattr(_api_shared, "_VAULT_PATH", tmp_path / "vault.enc")
 
     yield
 

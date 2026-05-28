@@ -108,15 +108,34 @@ export function AuditLog() {
 
   const fetchAll = useCallback(async () => {
     setLoading(true);
-    try {
-      const [logRes, sumRes, fileRes] = await Promise.all([
-        api.auditLog(), api.sessionSummary(), api.fileActivity(),
-      ]);
-      _auditCache = { entries: logRes.entries, summary: sumRes, fileEvents: fileRes.events };
-      setEntries(logRes.entries); setSummary(sumRes); setFileEvents(fileRes.events); setError("");
-    } catch (e: unknown) {
-      setError(e instanceof Error ? e.message : "Failed");
-    } finally { setLoading(false); }
+    const [logRes, sumRes, fileRes] = await Promise.allSettled([
+      api.auditLog(), api.sessionSummary(), api.fileActivity(),
+    ]);
+    const errors: string[] = [];
+    if (logRes.status === "fulfilled") {
+      setEntries(logRes.value.entries);
+    } else {
+      errors.push("Audit log: " + (logRes.reason instanceof Error ? logRes.reason.message : "Failed"));
+    }
+    if (sumRes.status === "fulfilled") {
+      setSummary(sumRes.value);
+    } else {
+      errors.push("Session summary: " + (sumRes.reason instanceof Error ? sumRes.reason.message : "Failed"));
+    }
+    if (fileRes.status === "fulfilled") {
+      setFileEvents(fileRes.value.events);
+    } else {
+      errors.push("File activity: " + (fileRes.reason instanceof Error ? fileRes.reason.message : "Failed"));
+    }
+    if (logRes.status === "fulfilled" || sumRes.status === "fulfilled" || fileRes.status === "fulfilled") {
+      _auditCache = {
+        entries: logRes.status === "fulfilled" ? logRes.value.entries : _auditCache?.entries ?? [],
+        summary: sumRes.status === "fulfilled" ? sumRes.value : _auditCache?.summary ?? null,
+        fileEvents: fileRes.status === "fulfilled" ? fileRes.value.events : _auditCache?.fileEvents ?? [],
+      };
+    }
+    setError(errors.join("; "));
+    setLoading(false);
   }, []);
 
   useEffect(() => { fetchAll(); }, [fetchAll]);

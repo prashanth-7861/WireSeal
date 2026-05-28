@@ -1,4 +1,5 @@
 import { useState, useEffect } from "react";
+import { useEscapeKey } from "../hooks/useEscapeKey";
 import {
   Lock,
   RotateCcw,
@@ -444,15 +445,16 @@ export function Settings() {
       </div>
 
       {/* Change Passphrase Dialog */}
+      {useEscapeKey(showPassphraseDialog, () => setShowPassphraseDialog(false))}
       {showPassphraseDialog && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
+        <div role="dialog" aria-modal="true" aria-labelledby="settings-passphrase-title" className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
           <div className="bg-white rounded-lg shadow-xl p-6 w-full max-w-md">
             <div className="flex items-center gap-3 mb-6">
               <div className="w-12 h-12 bg-blue-100 rounded-full flex items-center justify-center">
                 <Key className="w-6 h-6 text-blue-700" />
               </div>
               <div>
-                <h2 className="text-xl font-semibold text-gray-900">Change Passphrase</h2>
+                <h2 id="settings-passphrase-title" className="text-xl font-semibold text-gray-900">Change Passphrase</h2>
                 <p className="text-sm text-gray-500">Enter current and new passphrase</p>
               </div>
             </div>
@@ -535,9 +537,13 @@ export function Settings() {
         </div>
       )}
 
+      {useEscapeKey(showPortDialog, () => setShowPortDialog(false))}
       {/* Change Port Dialog */}
       {showPortDialog && (
         <div
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="settings-port-title"
           className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4"
           onClick={(e) => {
             // Click outside dialog dismisses it (ignore clicks on the dialog itself).
@@ -557,7 +563,7 @@ export function Settings() {
                   <Globe className="w-6 h-6 text-gray-700" />
                 </div>
                 <div>
-                  <h2 className="text-xl font-semibold text-gray-900">Change WireGuard Port</h2>
+                  <h2 id="settings-port-title" className="text-xl font-semibold text-gray-900">Change WireGuard Port</h2>
                   <p className="text-sm text-gray-500">UDP, 1-65535. Tunnel restarts.</p>
                 </div>
               </div>
@@ -708,16 +714,17 @@ export function Settings() {
         </div>
       )}
 
+      {useEscapeKey(showEndpointDialog, () => setShowEndpointDialog(false))}
       {/* Update Endpoint Dialog */}
       {showEndpointDialog && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
+        <div role="dialog" aria-modal="true" aria-labelledby="settings-endpoint-title" className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
           <div className="bg-white rounded-lg shadow-xl p-6 w-full max-w-md">
             <div className="flex items-center gap-3 mb-6">
               <div className="w-12 h-12 bg-gray-100 rounded-full flex items-center justify-center">
                 <Globe className="w-6 h-6 text-gray-700" />
               </div>
               <div>
-                <h2 className="text-xl font-semibold text-gray-900">Update Endpoint</h2>
+                <h2 id="settings-endpoint-title" className="text-xl font-semibold text-gray-900">Update Endpoint</h2>
                 <p className="text-sm text-gray-500">Leave blank to auto-detect your public IP</p>
               </div>
             </div>
@@ -766,15 +773,16 @@ export function Settings() {
         </div>
       )}
 
+      {useEscapeKey(showResetDialog, () => setShowResetDialog(false))}
       {/* Fresh Start Confirmation Dialog */}
       {showResetDialog && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
+        <div role="dialog" aria-modal="true" aria-labelledby="settings-reset-title" className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
           <div className="bg-white rounded-lg shadow-xl p-6 w-full max-w-md">
             <div className="flex items-center gap-3 mb-4">
               <div className="w-12 h-12 bg-red-100 rounded-full flex items-center justify-center">
                 <AlertTriangle className="w-6 h-6 text-red-700" />
               </div>
-              <h2 className="text-xl font-semibold text-gray-900">Confirm Fresh Start</h2>
+              <h2 id="settings-reset-title" className="text-xl font-semibold text-gray-900">Confirm Fresh Start</h2>
             </div>
             <p className="text-gray-700 mb-4">This will permanently destroy:</p>
             <ul className="space-y-2 mb-6 text-sm text-gray-600">
@@ -810,9 +818,10 @@ export function Settings() {
         </div>
       )}
 
+      {useEscapeKey(showUninstallDialog, () => setShowUninstallDialog(false))}
       {/* Uninstall Instructions Dialog */}
       {showUninstallDialog && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+        <div role="dialog" aria-modal="true" aria-labelledby="settings-uninstall-title" className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
           <div className="bg-white rounded-lg shadow-xl w-full max-w-2xl max-h-[90vh] overflow-y-auto">
             <div className="p-6 border-b border-gray-200 flex items-start justify-between">
               <div className="flex items-center gap-3">
@@ -820,7 +829,7 @@ export function Settings() {
                   <Trash2 className="w-6 h-6 text-red-700" />
                 </div>
                 <div>
-                  <h2 className="text-xl font-semibold text-gray-900">Uninstall WireSeal</h2>
+                  <h2 id="settings-uninstall-title" className="text-xl font-semibold text-gray-900">Uninstall WireSeal</h2>
                   <p className="text-sm text-gray-500">
                     Detected OS: <span className="font-mono">{detectedOs}</span>
                   </p>

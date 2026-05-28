@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from "react";
 import { api, BackupConfig, BackupEntry } from "../api";
+import { useEscapeKey } from "../hooks/useEscapeKey";
 
 const DEST_LABELS: Record<string, string> = {
   local: "Local Filesystem",
@@ -51,28 +52,42 @@ export function Backup() {
   const [restoring, setRestoring] = useState(false);
   const [restoreError, setRestoreError] = useState<string | null>(null);
 
-  const load = () => {
+  const load = async () => {
     setLoading(true);
     setError(null);
-    Promise.all([api.getBackupConfig(), api.listBackups()])
-      .then(([cfgRes, listRes]) => {
-        const c = cfgRes.backup_config;
-        _backupCache = { config: c, backups: listRes.backups };
-        setConfig(c);
-        setDest((c.destination as "local" | "ssh" | "webdav") ?? "local");
-        setLocalPath(c.local_path ?? "");
-        setSshHost(c.ssh_host ?? "");
-        setSshUser(c.ssh_user ?? "");
-        setSshPath(c.ssh_path ?? "");
-        setWebdavUrl(c.webdav_url ?? "");
-        setWebdavUser(c.webdav_user ?? "");
-        setWebdavPass("");
-        setKeepN(c.keep_n ?? 10);
-        setEnabled(c.enabled ?? false);
-        setBackups(listRes.backups);
-      })
-      .catch(err => setError(err.message))
-      .finally(() => setLoading(false));
+    const [cfgResult, listResult] = await Promise.allSettled([
+      api.getBackupConfig(), api.listBackups(),
+    ]);
+    const errors: string[] = [];
+    if (cfgResult.status === "fulfilled") {
+      const c = cfgResult.value.backup_config;
+      setConfig(c);
+      setDest((c.destination as "local" | "ssh" | "webdav") ?? "local");
+      setLocalPath(c.local_path ?? "");
+      setSshHost(c.ssh_host ?? "");
+      setSshUser(c.ssh_user ?? "");
+      setSshPath(c.ssh_path ?? "");
+      setWebdavUrl(c.webdav_url ?? "");
+      setWebdavUser(c.webdav_user ?? "");
+      setWebdavPass("");
+      setKeepN(c.keep_n ?? 10);
+      setEnabled(c.enabled ?? false);
+    } else {
+      errors.push(cfgResult.reason instanceof Error ? cfgResult.reason.message : "Failed to load config");
+    }
+    if (listResult.status === "fulfilled") {
+      setBackups(listResult.value.backups);
+    } else {
+      errors.push(listResult.reason instanceof Error ? listResult.reason.message : "Failed to load backup list");
+    }
+    if (cfgResult.status === "fulfilled" || listResult.status === "fulfilled") {
+      _backupCache = {
+        config: cfgResult.status === "fulfilled" ? cfgResult.value.backup_config : _backupCache?.config!,
+        backups: listResult.status === "fulfilled" ? listResult.value.backups : _backupCache?.backups ?? [],
+      };
+    }
+    if (errors.length > 0) setError(errors.join("; "));
+    setLoading(false);
   };
 
   useEffect(() => { load(); }, []);
@@ -369,10 +384,11 @@ export function Backup() {
       )}
 
       {/* Restore modal */}
+      {useEscapeKey(!!restorePath, () => { setRestorePath(null); setRestoreError(null); setRestorePass(""); })}
       {restorePath && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
+        <div role="dialog" aria-modal="true" aria-labelledby="restore-vault-title" className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
           <div className="bg-white rounded-xl p-6 max-w-md w-full mx-4 space-y-4 shadow-2xl">
-            <h3 className="text-lg font-semibold text-gray-900">Restore Vault</h3>
+            <h3 id="restore-vault-title" className="text-lg font-semibold text-gray-900">Restore Vault</h3>
             <p className="text-sm text-gray-600">
               Restoring{" "}
               <span className="font-mono text-xs break-all bg-gray-100 px-1 py-0.5 rounded">

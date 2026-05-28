@@ -33,6 +33,8 @@ export function Terminal() {
   const fitRef = useRef<FitAddon | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
   const decoderRef = useRef<TextDecoder>(new TextDecoder("utf-8", { fatal: false }));
+  const pingIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const pongTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const [tunnel, setTunnel] = useState<ClientTunnelStatus | null>(null);
   const [connectForm, setConnectForm] = useState<ConnectForm>({
@@ -160,6 +162,8 @@ export function Terminal() {
   }, [connected]);
 
   const disconnect = useCallback(() => {
+    if (pingIntervalRef.current) { clearInterval(pingIntervalRef.current); pingIntervalRef.current = null; }
+    if (pongTimeoutRef.current) { clearTimeout(pongTimeoutRef.current); pongTimeoutRef.current = null; }
     if (wsRef.current) {
       try { wsRef.current.close(); } catch { /* ignore */ }
       wsRef.current = null;
@@ -238,7 +242,18 @@ export function Terminal() {
       const ws = new WebSocket(wsUrl);
       wsRef.current = ws;
 
+      const connectTimeout = setTimeout(() => {
+        if (ws.readyState !== WebSocket.OPEN) {
+          term?.writeln("\x1b[31m✗ Connection timeout (10s)\x1b[0m");
+          setError("Connection timeout");
+          setConnecting(false);
+          try { ws.close(); } catch { /* ignore */ }
+          wsRef.current = null;
+        }
+      }, 10000);
+
       ws.onopen = () => {
+        clearTimeout(connectTimeout);
         term?.writeln("\x1b[90mWebSocket connected, waiting for SSH...\x1b[0m");
         // Send initial resize so the remote PTY matches the visible grid
         if (term) {
@@ -248,6 +263,24 @@ export function Terminal() {
             rows: term.rows,
           }));
         }
+        // Start heartbeat: ping every 30s, expect pong within 5s
+        if (pingIntervalRef.current) clearInterval(pingIntervalRef.current);
+        pingIntervalRef.current = setInterval(() => {
+          if (wsRef.current?.readyState === WebSocket.OPEN) {
+            wsRef.current.send(JSON.stringify({ type: "ping" }));
+            if (pongTimeoutRef.current) clearTimeout(pongTimeoutRef.current);
+            pongTimeoutRef.current = setTimeout(() => {
+              term?.writeln("\x1b[31m✗ Connection lost — no pong received\x1b[0m");
+              setError("Connection lost — no response from server");
+              if (wsRef.current) {
+                try { wsRef.current.close(); } catch { /* ignore */ }
+                wsRef.current = null;
+              }
+              setConnected(false);
+              setConnecting(false);
+            }, 5000);
+          }
+        }, 30000);
       };
 
       ws.onmessage = (evt: MessageEvent) => {
@@ -295,6 +328,7 @@ export function Terminal() {
             disconnect();
             break;
           case "pong":
+            if (pongTimeoutRef.current) { clearTimeout(pongTimeoutRef.current); pongTimeoutRef.current = null; }
             break;
           default:
             break;
@@ -302,12 +336,16 @@ export function Terminal() {
       };
 
       ws.onerror = () => {
+        clearTimeout(connectTimeout);
         term?.writeln(`\x1b[31m✗ WebSocket error\x1b[0m`);
         setError("WebSocket connection failed");
         setConnecting(false);
       };
 
       ws.onclose = () => {
+        clearTimeout(connectTimeout);
+        if (pingIntervalRef.current) { clearInterval(pingIntervalRef.current); pingIntervalRef.current = null; }
+        if (pongTimeoutRef.current) { clearTimeout(pongTimeoutRef.current); pongTimeoutRef.current = null; }
         if (connected) {
           term?.writeln(`\x1b[90m-- disconnected --\x1b[0m`);
         }
@@ -322,6 +360,18 @@ export function Terminal() {
       term?.writeln(`\x1b[31m✗ ${msg}\x1b[0m`);
     }
   };
+
+  // Cleanup WebSocket on unmount
+  useEffect(() => {
+    return () => {
+      if (pingIntervalRef.current) { clearInterval(pingIntervalRef.current); pingIntervalRef.current = null; }
+      if (pongTimeoutRef.current) { clearTimeout(pongTimeoutRef.current); pongTimeoutRef.current = null; }
+      if (wsRef.current) {
+        try { wsRef.current.close(); } catch { /* ignore */ }
+        wsRef.current = null;
+      }
+    };
+  }, []);
 
   // Re-fit terminal on every render (layout shifts, sidebar changes, etc.)
   useEffect(() => {
