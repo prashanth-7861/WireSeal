@@ -57,7 +57,7 @@ interface ChangelogEntry {
   highlights: string[];
 }
 
-const CHANGELOG: ChangelogEntry[] = [
+const CHANGELOG: ChangelogEntry[] = [`n    {`n        version: "0.9.33",`n        date: "2026-05-28",`n        highlights: [`n            "Added accessibility improvements: ARIA labels and Escape key handling on all modal dialogs",`n            "Enhanced health check endpoint with disk space and memory metrics",`n            "Added /api/ready endpoint for readiness probing",`n            "Improved graceful shutdown: WireGuard, SFTP sessions, and DNS config cleanup",`n            "Synced Dashboard version to match backend (0.9.33)",`n        ],`n    },
   {
     version: "0.9.2",
     date: "2026-05-17",
@@ -678,3 +678,4 @@ export function About() {
     </div>
   );
 }
+
