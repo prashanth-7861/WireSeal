@@ -52,16 +52,7 @@ SECURITY_AUDIT_REPORT.md
 # Build
 *.log
 .conf.dpapi
-12
-180
-2
-config
-dict*
-master
-Result
-SecretBytes
-verify
-"Sftp_temp.tsx"
+!src/wireseal/config/
 
 # Agent skills
 .agents/
