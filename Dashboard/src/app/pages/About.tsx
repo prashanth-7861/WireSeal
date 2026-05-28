@@ -57,7 +57,28 @@ interface ChangelogEntry {
   highlights: string[];
 }
 
-const CHANGELOG: ChangelogEntry[] = [`n    {`n        version: "0.9.33",`n        date: "2026-05-28",`n        highlights: [`n            "Added accessibility improvements: ARIA labels and Escape key handling on all modal dialogs",`n            "Enhanced health check endpoint with disk space and memory metrics",`n            "Added /api/ready endpoint for readiness probing",`n            "Improved graceful shutdown: WireGuard, SFTP sessions, and DNS config cleanup",`n            "Synced Dashboard version to match backend (0.9.33)",`n        ],`n    },
+const CHANGELOG: ChangelogEntry[] = [
+  {
+    version: "0.9.34",
+    date: "2026-05-28",
+    highlights: [
+      "Split monolithic api.py (7,940 LOC) into 11 focused modules under api/ package",
+      "Fixed CI/Release pipeline failures caused by untracked api/ package",
+      "Fixed corrupted Dashboard changelog entry breaking Vite builds",
+      "Security audit and stability hardening improvements",
+    ],
+  },
+  {
+    version: "0.9.33",
+    date: "2026-05-28",
+    highlights: [
+      "Added accessibility improvements: ARIA labels and Escape key handling on all modal dialogs",
+      "Enhanced health check endpoint with disk space and memory metrics",
+      "Added /api/ready endpoint for readiness probing",
+      "Improved graceful shutdown: WireGuard, SFTP sessions, and DNS config cleanup",
+      "Synced Dashboard version to match backend (0.9.33)",
+    ],
+  },
   {
     version: "0.9.2",
     date: "2026-05-17",

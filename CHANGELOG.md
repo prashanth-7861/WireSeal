@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.9.34] — 2026-05-28
+
+### Fixed
+- **CI/Release pipeline** — `src/wireseal/api/` package was never committed to git; all 7 security tests failed with `ImportError: cannot import name 'api'`
+- **Dashboard build** — corrupted changelog entry in `About.tsx:60` used literal `\n` instead of newlines, causing Vite/esbuild parse failure on all platforms
+
+### Changed
+- **API architecture** — split monolithic `api.py` (7,940 LOC) into 11 focused modules under `src/wireseal/api/` package (Phase 5.1 of Stability Hardening Plan):
+  - `_shared.py` — locks, session state, validators, decorators
+  - `vault.py` — init, unlock, lock, fresh-start, passphrase
+  - `clients.py` — CRUD, QR, config, suspend, revoke, extend
+  - `admin.py` — authenticate, admin CRUD, roles
+  - `security.py` — TOTP, PIN, audit-log endpoints
+  - `service.py` — install, start, stop, uninstall, status
+  - `sftp.py` — SFTP session, file ops
+  - `ssh.py` — SSH session endpoints
+  - `dns.py` — DuckDNS, endpoint, DNS config
+  - `backup.py` — backup, restore endpoints
+  - `update.py` — auto-update endpoints
+  - `client_mode.py` — client tunnel/config management
+- **Version sync** — Dashboard package.json now tracks backend version (0.9.34)
+
+---
+
 ## [0.9.32] — 2026-05-25
 
 ### Fixed
