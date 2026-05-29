@@ -103,8 +103,10 @@ export function TotpEnrollDialog({ onClose, onEnrolled, adminId }: Props) {
     : "";
   const [qrImageError, setQrImageError] = useState(false);
 
+  // Escape key closes dialog
+  useEscapeKey(true, onClose);
+
   return (
-    <>{useEscapeKey(true, onClose)}
     <div role="dialog" aria-modal="true" aria-labelledby="totp-enroll-title" className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
       <div className="bg-white rounded-lg shadow-xl p-6 w-full max-w-md">
         <div className="flex items-center justify-between mb-6">
@@ -289,6 +291,5 @@ export function TotpEnrollDialog({ onClose, onEnrolled, adminId }: Props) {
         )}
       </div>
     </div>
-    </>
   );
 }
