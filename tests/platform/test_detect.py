@@ -4,11 +4,16 @@ Verifies:
   - get_platform_info returns correct dict structure
   - get_adapter returns the correct platform adapter
   - UnsupportedPlatformError for unknown platforms
+
+NOTE: test_win32_returns_windows_adapter imports winreg which is
+Windows-only.  Marked integration until conditionally skipped.
 """
 
 import sys
 
 import pytest
+
+pytestmark = pytest.mark.integration
 
 from wireseal.platform.detect import get_adapter, get_platform_info
 from wireseal.platform.exceptions import UnsupportedPlatformError

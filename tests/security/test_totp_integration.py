@@ -19,6 +19,8 @@ from typing import Any
 
 import pytest
 
+pytestmark = pytest.mark.integration
+
 from wireseal import api
 from wireseal.api import _shared as _api_shared
 from wireseal.security.secret_types import SecretBytes

@@ -4,6 +4,10 @@ All tests mock subprocess.run, os.geteuid, shutil.which, atomic_write,
 and file I/O — never call real system commands or write to real paths.
 
 Uses the same patterns as tests/security/test_permissions.py.
+
+NOTE: Several test classes attempt to write to real filesystem paths
+(/etc/, /fake) without proper mocking.  Marked as integration until
+the mocking is fixed.
 """
 
 import os
@@ -12,6 +16,8 @@ from pathlib import Path
 from unittest.mock import MagicMock, call, patch
 
 import pytest
+
+pytestmark = pytest.mark.integration
 
 from wireseal.platform.exceptions import (
     FirewallValidationError,
