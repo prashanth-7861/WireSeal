@@ -57,6 +57,8 @@ function LayoutInner() {
   const navigate = useNavigate();
   const location = useLocation();
   const { mode, setMode, clearMode } = useAppMode();
+  const modeRef = useRef(mode);
+  modeRef.current = mode;
   const [vaultState, setVaultState] = useState<VaultState>("loading");
 
   // Passphrase dialog state
@@ -118,7 +120,7 @@ function LayoutInner() {
         // after unlock. This prevents a stale localStorage "server" from showing
         // server UI when the underlying vault is a client vault (and vice-versa).
         if (info.mode === "server" || info.mode === "client") {
-          if (mode !== info.mode) setMode(info.mode);
+          if (modeRef.current !== info.mode) setMode(info.mode);
         }
         // Initialize admin ID for auto-unlocked vaults (not unlocked via the
         // frontend unlock dialog, so _currentAdminId was never set).
@@ -131,7 +133,7 @@ function LayoutInner() {
     } catch {
       setVaultState("locked");
     }
-  }, [mode, setMode]);
+  }, [setMode]);
 
   useEffect(() => { probeVault(); }, [probeVault]);
 
