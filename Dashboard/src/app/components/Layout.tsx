@@ -5,7 +5,7 @@ import {
   Server, ScrollText, Monitor, Settings, Lock, Play, Eye,
   EyeOff, AlertCircle, CheckCircle, Shield, Sparkles, RotateCcw,
   KeyRound, ArrowLeft, ShieldAlert, Timer, Globe, HardDrive,
-  ShieldCheck, Smartphone,
+  ShieldCheck, Smartphone, Info,
 } from "lucide-react";
 import { api, VAULT_LOCKED_EVENT, type Status } from "../api";
 import { AppModeProvider, useAppMode } from "../context/AppModeContext";
