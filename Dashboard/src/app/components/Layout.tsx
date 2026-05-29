@@ -514,11 +514,13 @@ function LayoutInner() {
     return <ModeSelector />;
   }
 
+  // ── Escape key handlers (must be at top level) ────────────────────────────
+  useEscapeKey(showFreshStart, () => { if (showFreshStart) { setShowFreshStart(false); setFreshStartPassphrase(""); setFreshStartError(""); } });
+  useEscapeKey(showPassphrase, () => { if (showPassphrase) { setShowPassphrase(false); setAuthError(""); setPin(["", "", "", "", "", ""]); } });
+  useEscapeKey(showPinSetup, () => { if (showPinSetup) { setShowPinSetup(false); setNewPin(["", "", "", "", "", ""]); setConfirmPin(["", "", "", "", "", ""]); setPinError(""); } });
+
   // ── Locked / Uninitialized — full-screen welcome screen ──────────────────
   if (vaultState === "locked" || vaultState === "uninitialized") {
-    useEscapeKey(showFreshStart, () => { setShowFreshStart(false); setFreshStartPassphrase(""); setFreshStartError(""); });
-    useEscapeKey(showPassphrase, () => { setShowPassphrase(false); setAuthError(""); setPin(["", "", "", "", "", ""]); });
-    useEscapeKey(showPinSetup, () => { setShowPinSetup(false); setNewPin(["", "", "", "", "", ""]); setConfirmPin(["", "", "", "", "", ""]); setPinError(""); });
     return (
       <div className="min-h-screen bg-gradient-to-br from-slate-900 via-blue-950 to-slate-900 flex items-center justify-center">
         <div className="flex flex-col items-center text-center gap-8 max-w-lg w-full mx-4 animate-fade-in">
