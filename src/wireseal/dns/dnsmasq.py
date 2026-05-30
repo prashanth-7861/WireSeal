@@ -6,6 +6,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from wireseal.security.atomic import atomic_write
+
 # Prevent brief console window flash on Windows when spawning child processes
 # from a GUI context (e.g., status checks from the Dashboard).
 _NO_WINDOW = 0x08000000 if sys.platform == "win32" else 0
@@ -114,10 +116,10 @@ class DnsmasqManager:
             if proc.returncode != 0:
                 # Fall back: try direct write (running as root)
                 conf_path.parent.mkdir(parents=True, exist_ok=True)
-                conf_path.write_text(content)
+                atomic_write(conf_path, content.encode("utf-8"), mode=0o644)
         except (FileNotFoundError, subprocess.TimeoutExpired):
             conf_path.parent.mkdir(parents=True, exist_ok=True)
-            conf_path.write_text(content)
+            atomic_write(conf_path, content.encode("utf-8"), mode=0o644)
         return conf_path
 
     def _write_macos(self, dns_mappings: dict[str, str]) -> Path:
@@ -131,7 +133,7 @@ class DnsmasqManager:
             validate_ip(ip)
             domain = hostname.split(".")[-1]
             resolver_file = resolver_dir / domain
-            resolver_file.write_text(f"nameserver {ip}\n")
+            atomic_write(resolver_file, f"nameserver {ip}\n".encode("utf-8"), mode=0o644)
             written.add(resolver_file)
         return resolver_dir
 

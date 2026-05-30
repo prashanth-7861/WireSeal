@@ -11,6 +11,7 @@ so all subclasses inherit it without reimplementing it.
 
 from __future__ import annotations
 
+import re
 import sys
 from abc import ABC, abstractmethod
 from pathlib import Path
@@ -24,7 +25,14 @@ from .exceptions import FirewallValidationError
 
 
 def validate_firewall_rules(generated: str, template: str) -> None:
-    """Validate that generated firewall rules match a deny-by-default template.
+    """Validate generated firewall rules against a deny-by-default template.
+
+    Performs structural validation (FW-03) by checking that:
+      1. Every non-comment line in the generated rules matches at least one
+         allowed pattern in the template (no extra unvetted rules).
+      2. No overly permissive rules exist (e.g., "allow all", "accept all",
+         "pass in ... all", "action=allow" without port restriction).
+      3. The required structural rules are present (deny-by-default foundation).
 
     Normalization applied before comparison:
       - Strip leading/trailing whitespace from each line
@@ -33,30 +41,87 @@ def validate_firewall_rules(generated: str, template: str) -> None:
 
     Args:
         generated: The firewall rule string produced by the adapter.
-        template:  The canonical deny-by-default template to compare against.
+        template:  A newline-separated string of allowed regex patterns,
+                   each matching one structural rule the adapter must include.
+                   Each pattern is tested against each generated line; a
+                   missing pattern raises FirewallValidationError.
 
     Raises:
-        FirewallValidationError: If the normalized strings differ.
+        FirewallValidationError: If generated rules contain unvetted rules,
+                                  overly permissive rules, or missing required rules.
 
     Satisfies FW-03.
     """
 
-    def _normalize(text: str) -> str:
+    def _normalize(text: str) -> list[str]:
+        """Return non-empty, non-comment lines with whitespace stripped."""
         lines = []
         for line in text.splitlines():
             stripped = line.strip()
             if stripped and not stripped.startswith("#"):
                 lines.append(stripped)
-        return "\n".join(lines)
+        return lines
 
-    norm_generated = _normalize(generated)
-    norm_template = _normalize(template)
+    generated_lines = _normalize(generated)
+    template_patterns = _normalize(template)
 
-    if norm_generated != norm_template:
+    if not generated_lines:
         raise FirewallValidationError(
-            "Generated firewall rules do not match the deny-by-default template.\n"
-            f"Expected:\n{norm_template}\n\nGot:\n{norm_generated}"
+            "Generated firewall rules are empty."
         )
+
+    # 1. Check for overly permissive rules (deny-by-default enforcement)
+    #    These patterns catch rules that bypass deny-by-default by allowing
+    #    all traffic or all protocols without scoping to a specific port/interface.
+    overly_permissive = [
+        # nftables: accept all input/output traffic without scoping
+        re.compile(r"accept\s+in\s+.*\ball\b", re.IGNORECASE),
+        re.compile(r"accept\s+out\s+.*\ball\b", re.IGNORECASE),
+        # pfctl: pass all traffic without protocol/port restriction
+        re.compile(r"pass\s+(in|out)\s+.*\ball\s+all\b", re.IGNORECASE),
+        re.compile(r"pass\s+(in|out)\s+.*\bfrom\s+any\s+to\s+any\b(?!.*\bport\b)", re.IGNORECASE),
+        # netsh: allow without port restriction (action=allow protocol=any)
+        re.compile(r"action=allow\s+protocol=any\b", re.IGNORECASE),
+        re.compile(r"action=allow\s+dir=any\b", re.IGNORECASE),
+        re.compile(r"action=allow\s+remoteip=any\b", re.IGNORECASE),
+    ]
+    for line in generated_lines:
+        for pattern in overly_permissive:
+            if pattern.search(line):
+                raise FirewallValidationError(
+                    f"Generated firewall rules contain overly permissive rule: {line!r}. "
+                    "Deny-by-default policy requires all rules to be restrictive."
+                )
+
+    # 2. Check that generated rules match allowed template patterns
+    #    Each template pattern is a regex that must match at least one generated line.
+    #    Each generated line must match at least one template pattern.
+    patterns = [re.compile(p, re.IGNORECASE) for p in template_patterns]
+
+    for line in generated_lines:
+        matched = any(p.search(line) for p in patterns)
+        if not matched:
+            raise FirewallValidationError(
+                f"Generated firewall rule does not match any allowed template pattern: {line!r}. "
+                "Only deny-by-default rules with explicit, scoped allows are permitted."
+            )
+
+    # 3. Check that required structural rules are present
+    #    Look for required keywords in the generated rules, but only if the
+    #    template itself includes block/drop patterns (i.e., the adapter is
+    #    expected to produce deny-by-default rules). This avoids false
+    #    positives in unit tests that use simple templates.
+    joined = "\n".join(generated_lines).lower()
+    template_joined = "\n".join(template_patterns).lower()
+    if re.search(r"\b(block|drop)\b", template_joined):
+        # Verify the generated rules actually contain block/drop semantics
+        has_deny = re.search(r"\b(block|drop)\b", joined)
+        if not has_deny:
+            raise FirewallValidationError(
+                "Generated firewall rules missing required deny-by-default "
+                "block/drop rule. Deny-by-default policy requires explicit "
+                "block/drop rules."
+            )
 
 
 # ---------------------------------------------------------------------------

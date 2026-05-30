@@ -7,6 +7,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.9.35] — 2026-05-30
+
+### Fixed
+- **React error #310 (Dashboard crash)** — `useEffect` in `ClientLayout.tsx` had `tunnelConnected` as both dependency and state updated inside the effect, causing infinite re-render loop. Fixed with ref + change-detection pattern.
+- **Broken escape handlers** — `Layout.tsx` used wrong state setter names (`setPinError`, `setFreshStartPassphrase`, `setAdminAuthCode`) that didn't exist, causing runtime errors on Escape key.
+- **Dashboard path resolution** — `_get_dist_dir()` in `_shared.py` went up 3 levels from `src/wireseal/api/_shared.py` to `src/` instead of 4 levels to repo root where `Dashboard/dist` lives. Dashboard was never served.
+- **Missing `_h_health` handler** — health endpoint function was only in the old monolith code; restored to `_shared.py` with proper test-compatible module reference.
+- **Missing `_h_ready` and `_h_status` handlers** — readiness probe and server status endpoints restored from monolith.
+- **Missing `_Handler` class and `_ROUTES` table** — HTTP request handler and route table restored to `api/__init__.py`.
+- **`api/__init__.py` monolith ghost** — 6800 lines of old monolith code was appended after clean refactored imports, creating duplicate definitions. Removed.
+- **Firewall validation tautological bug (FW-03)** — all 3 platforms validated generated rules against themselves (identical strings). Replaced with structural regex template checking.
+- **Non-atomic file writes** — 5 locations using `write_text()`/`write_bytes()` converted to `atomic_write()`: PIN file, fail2ban jail, systemd unit, dnsmasq config, QR output.
+- **Duplicate `_validate_script_path`** — 3 separate implementations with inconsistent forbidden character sets consolidated into shared `security/validator.py`.
+- **UNC path not rejected** — Windows script validator now explicitly rejects `\\server\share` SMB relay paths.
+- **`tunnel_mode` now affects AllowedIPs** — split modes were UI-only; now generate correct WireGuard `AllowedIPs` (full: `0.0.0.0/0`, split-vpn: VPN subnet only, split-lan: VPN + LAN subnet).
+- **Missing `adapter` in `_h_add_client`** — `get_adapter()` was imported but never called before `detect_lan_subnet()`, causing split-lan to silently fail.
+- **Bare `except Exception:` catches** — 30+ silent exception swallows narrowed to specific types with logging across `main.py`, `api/__init__.py`, `vault.py`, `clients.py`, `ws_bridge.py`, `term_raw.py`.
+- **Mojibake encoding** — curly quotes and broken em-dashes in `clients.py` from previous session fixed.
+
+### Security
+- **Missing security headers** — added CSP, X-Frame-Options, X-Content-Type-Options, Referrer-Policy, Permissions-Policy to all static dashboard responses.
+- **XSS sanitization** — `dangerouslySetInnerHTML` in `chart.tsx` now sanitizes color values.
+- **Cookie SameSite** — sidebar state cookie now uses `SameSite=Strict`.
+- **npm vulnerabilities** — `npm audit fix` patched lodash, picomatch, vite.
+
+### Changed
+- **GitHub Actions SHA-pinned** — `setup-node`, `upload-artifact`, `checkout`, `download-artifact` all pinned to SHA hashes.
+- **Package name fixed** — Dashboard `package.json` renamed from `@figma/my-make-file` to `wireseal-dashboard`.
+- **Config `__init__.py`** — now exports from `settings.py` instead of being empty.
+- **DNS docstring** — corrected project name from "WireGuard Automate" to "WireSeal".
+
+---
+
 ## [0.9.34] — 2026-05-28
 
 ### Fixed

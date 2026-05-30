@@ -27,32 +27,15 @@ from pathlib import Path
 # only imported by get_adapter() on Windows (lazy import pattern, see detect.py).
 import winreg  # type: ignore[import]
 
-# Characters forbidden in script paths to prevent injection attacks
-_SCRIPT_PATH_FORBIDDEN = frozenset(";$`|&<>\"'\\")
-_SCRIPT_PATH_PATTERN = re.compile(r"^/[A-Za-z]:[\\/.]")
-
-
-def _validate_script_path(script_path: Path) -> None:
-    """Validate script path to prevent injection attacks.
-
-    Raises ValueError if path contains dangerous characters or is invalid.
-    """
-    path_str = str(script_path)
-    # Check for forbidden characters that could inject into PowerShell/schtasks
-    for char in _SCRIPT_PATH_FORBIDDEN:
-        if char in path_str:
-            raise ValueError(f"Script path contains forbidden character: {char}")
-    # Must be absolute path (Windows: drive letter + absolute path)
-    if not re.match(r"^[A-Za-z]:[\\/]", path_str):
-        raise ValueError("Script path must be absolute (e.g., C:\\path\\script.py)")
-    # Must exist and be a file
-    if not script_path.is_file():
-        raise ValueError(f"Script path does not exist or is not a file: {script_path}")
-
 from .base import AbstractPlatformAdapter
 from .exceptions import PrerequisiteError, PrivilegeError, SetupError
 from ..security.atomic import atomic_write
 from ..security.permissions import set_file_permissions, set_dir_permissions
+from ..security.validator import validate_script_path as _validate_script_path_core
+
+
+def _validate_script_path(script_path: Path) -> None:
+    _validate_script_path_core(script_path, platform="win32")
 
 
 # ---------------------------------------------------------------------------
@@ -362,15 +345,13 @@ class WindowsAdapter(AbstractPlatformAdapter):
         # Detect outbound interface for NAT binding
         outbound = self.detect_outbound_interface()
 
-        # FW-03: Build canonical template and validate against what we will apply
-        template = (
-            f"netsh advfirewall firewall add rule "
-            f"name=wireseal-{wg_interface}-in protocol=UDP dir=in "
-            f"localport={wg_port} action=allow profile=any enable=yes\n"
-            f"netsh advfirewall firewall add rule "
-            f"name=wireseal-{wg_interface}-block dir=in "
-            f"interface={wg_interface} action=block profile=any enable=yes"
-        )
+        # FW-03: Validate generated rules against structural deny-by-default template.
+        # Each pattern is a regex matching one required structural rule; the validator
+        # ensures every generated line matches a pattern and no overly permissive rules exist.
+        netsh_template = "\n".join([
+            r"netsh\s+advfirewall\s+firewall\s+add\s+rule\s+name=wireseal-\w+-in\s+protocol=UDP\s+dir=in\s+localport=\d+\s+action=allow",
+            r"netsh\s+advfirewall\s+firewall\s+add\s+rule\s+name=wireseal-\w+-block\s+dir=in\s+interface=\w+\s+action=block",
+        ])
         generated = (
             f"netsh advfirewall firewall add rule "
             f"name=wireseal-{wg_interface}-in protocol=UDP dir=in "
@@ -379,7 +360,7 @@ class WindowsAdapter(AbstractPlatformAdapter):
             f"name=wireseal-{wg_interface}-block dir=in "
             f"interface={wg_interface} action=block profile=any enable=yes"
         )
-        self.validate_firewall_rules(generated, template)
+        self.validate_firewall_rules(generated, netsh_template)
 
         # Allow inbound WireGuard UDP on the configured port (FW-01)
         subprocess.run(

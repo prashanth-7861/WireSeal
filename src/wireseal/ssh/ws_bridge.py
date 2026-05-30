@@ -100,7 +100,7 @@ async def _recv_loop(
                 rows = max(10, min(rows, 200))
                 try:
                     chan.change_terminal_size(cols, rows)
-                except Exception:  # noqa: BLE001
+                except (asyncssh.Error, OSError):
                     pass
             elif mtype == "ping":
                 await _send_json(ws, {"type": "pong"})
@@ -109,7 +109,7 @@ async def _recv_loop(
     finally:
         try:
             chan.stdin.write_eof()
-        except Exception:  # noqa: BLE001
+        except (asyncssh.Error, OSError, EOFError):
             pass
 
 
@@ -209,7 +209,7 @@ class _TofuCapturingClient(asyncssh.SSHClient):
             return "<unknown fingerprint>"
         try:
             return self._captured_key.get_fingerprint()  # type: ignore[attr-defined]
-        except Exception:
+        except (AttributeError, OSError):
             return "<unknown fingerprint>"
 
     def key_export(self) -> str:
@@ -219,7 +219,7 @@ class _TofuCapturingClient(asyncssh.SSHClient):
         try:
             raw: bytes = self._captured_key.export_public_key()  # type: ignore[attr-defined]
             return raw.decode("utf-8").strip()
-        except Exception:
+        except (AttributeError, UnicodeDecodeError, OSError):
             return ""
 
 
@@ -287,7 +287,7 @@ async def _handle_session(
     if ticket.password is not None:
         try:
             _password_str = bytes(ticket.password.expose_secret()).decode("utf-8")
-        except Exception:
+        except (UnicodeDecodeError, AttributeError):
             _password_str = None
 
     _client_keys: list[asyncssh.SSHKey] = []
@@ -296,7 +296,7 @@ async def _handle_session(
             key = asyncssh.import_private_key(ticket.key_pem.encode("utf-8"))
             _client_keys = [key]
             log.info("Loaded SSH key '%s' for session", ticket.key_name or "?")
-        except Exception as exc:
+        except (asyncssh.KeyImportError, ValueError, UnicodeDecodeError) as exc:
             log.warning("Error loading SSH key: %s", exc)
 
     try:
@@ -367,13 +367,13 @@ async def _handle_session(
         # may have interned it, but the SecretBytes buffer is zeroed for sure.
         try:
             ticket.wipe()
-        except Exception:
+        except (AttributeError, OSError):
             pass
         if _password_str is not None:
             try:
                 from wireseal.security.secrets_wipe import wipe_string
                 wipe_string(_password_str)
-            except Exception:
+            except (AttributeError, OSError):
                 pass
             _password_str = None
         manager.unregister_session(session_id)
@@ -414,7 +414,7 @@ async def _bridge_handler(ws: WebSocketServerProtocol, path: str, log_dir: Path)
         await _send_json(ws, {"type": "error", "message": f"Bridge error: {exc}"})
         try:
             await ws.close()
-        except Exception:  # noqa: BLE001
+        except (websockets.ConnectionClosed, OSError):
             pass
 
 

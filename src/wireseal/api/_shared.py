@@ -112,7 +112,7 @@ def _get_dist_dir() -> Path | None:
             return d
 
     # Development: api.py lives at src/wireseal/api.py â†’ go up 3 levels
-    dev = Path(__file__).parent.parent.parent / "Dashboard" / "dist"
+    dev = Path(__file__).parent.parent.parent.parent / "Dashboard" / "dist"
     if dev.is_dir():
         return dev
 
@@ -1104,7 +1104,8 @@ def _pin_save(passphrase_bytes: bytes, pin: str) -> None:
     salt_b64 = base64.b64encode(salt).decode()
     header = f"argon2id:v1:{salt_b64}\n".encode()
     _VAULT_DIR.mkdir(parents=True, exist_ok=True)
-    _PIN_PATH.write_bytes(header + nonce + ct)
+    from wireseal.security.vault import atomic_write
+    atomic_write(_PIN_PATH, header + nonce + ct, mode=0o600)
     try:
         if sys.platform != "win32":
             os.chmod(_PIN_PATH, 0o600)
@@ -1514,6 +1515,159 @@ def _reload_wireguard(interface: str = "wg0") -> str:
 _server_start_time: float = 0.0
 _last_activity: list[float] = [0.0]
 _SESSION_TIMEOUT = _SESSION_TIMEOUT_CFG
+
+
+def _h_health(req: "_Handler", _groups: tuple) -> dict:
+    """Lightweight health endpoint for monitoring -- no auth, no subprocess."""
+    import shutil
+    import sys as _sys
+    import time
+
+    # Read from wireseal.api module so tests that patch api._server_start_time work
+    import wireseal.api as _api_mod
+    start_time = getattr(_api_mod, "_server_start_time", _server_start_time)
+    uptime = int(time.monotonic() - start_time) if start_time else 0
+
+    try:
+        from wireseal import __version__ as _wireseal_version
+    except Exception:
+        _wireseal_version = "unknown"
+
+    disk_free = -1
+    try:
+        du = shutil.disk_usage(str(_VAULT_DIR) if _VAULT_DIR else ".")
+        disk_free = du.free
+    except Exception:
+        pass
+
+    mem_avail = -1
+    try:
+        if _sys.platform == "win32":
+            import ctypes as _ctypes
+
+            class _MEMORYSTATUSEX(_ctypes.Structure):
+                _fields_ = [
+                    ("dwLength", _ctypes.c_ulong),
+                    ("dwMemoryLoad", _ctypes.c_ulong),
+                    ("ullTotalPhys", _ctypes.c_ulonglong),
+                    ("ullAvailPhys", _ctypes.c_ulonglong),
+                    ("ullTotalPageFile", _ctypes.c_ulonglong),
+                    ("ullAvailPageFile", _ctypes.c_ulonglong),
+                    ("ullTotalVirtual", _ctypes.c_ulonglong),
+                    ("ullAvailVirtual", _ctypes.c_ulonglong),
+                    ("ullAvailExtendedVirtual", _ctypes.c_ulonglong),
+                ]
+
+            _mem = _MEMORYSTATUSEX()
+            _mem.dwLength = _ctypes.sizeof(_MEMORYSTATUSEX)
+            _ctypes.windll.kernel32.GlobalMemoryStatusEx(_ctypes.byref(_mem))
+            mem_avail = _mem.ullAvailPhys
+        elif _sys.platform == "linux":
+            with open("/proc/meminfo") as _f:
+                for _line in _f:
+                    if _line.startswith("MemAvailable:"):
+                        mem_avail = int(_line.split()[1]) * 1024
+                        break
+    except Exception:
+        pass
+
+    return {
+        "status": "ok",
+        "vault_initialized": _VAULT_PATH.exists(),
+        "vault_locked": _session["vault"] is None,
+        "uptime_seconds": uptime,
+        "version": _wireseal_version,
+        "disk_free_bytes": disk_free,
+        "memory_available_bytes": mem_avail,
+    }
+
+
+def _h_ready(req: "_Handler", _groups: tuple) -> dict:
+    """Readiness probe -- is the vault unlocked and WireGuard running?
+
+    Separate from /api/health (which is purely about process liveness).
+    Monitoring tools should check this before routing traffic.
+    """
+    vault_unlocked = _session["vault"] is not None
+
+    wg_running = False
+    if vault_unlocked:
+        try:
+            import subprocess as _sp
+            _sp.run(
+                ["wg", "show", _WG_IFACE],
+                capture_output=True, timeout=5, check=True,
+            )
+            wg_running = True
+        except Exception:
+            pass
+
+    return {
+        "ready": vault_unlocked and wg_running,
+        "vault_unlocked": vault_unlocked,
+        "wg_running": wg_running,
+    }
+
+
+def _h_status(req: "_Handler", _groups: tuple) -> dict:
+    """Server status -- running, peers, interface info."""
+    _require_unlocked()
+
+    with _lock:
+        cache = _session["cache"] or {}
+
+    running = False
+    peers: list[dict] = []
+
+    try:
+        result = subprocess.run(
+            _sudo(["wg", "show", _WG_IFACE]), capture_output=True, text=True, timeout=5,
+            creationflags=_SP_FLAGS,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            running = True
+            peers = _parse_wg_show(result.stdout)
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        pass
+
+    # Windows fallback: wg CLI may not be in PATH; check service status instead
+    if not running and sys.platform == "win32":
+        try:
+            sc_result = subprocess.run(
+                ["sc.exe", "query", f"WireGuardTunnel${_WG_IFACE}"],
+                capture_output=True, text=True, timeout=5,
+                creationflags=_SP_FLAGS,
+            )
+            if sc_result.returncode == 0 and "RUNNING" in sc_result.stdout:
+                running = True
+        except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+            pass
+
+    ip_to_name = {
+        data["ip"].split("/")[0]: name
+        for name, data in cache.get("clients", {}).items()
+    }
+    for p in peers:
+        ip = p.get("allowed_ips", "").split("/")[0]
+        p["name"] = ip_to_name.get(ip, "unknown")
+
+    iface = cache.get("server", {}).get("interface", _WG_IFACE)
+    server_ip = cache.get("server", {}).get("server_ip", "")
+    endpoint = cache.get("server", {}).get("endpoint", "")
+    port = cache.get("server", {}).get("port", 0)
+    lan_subnet = cache.get("server", {}).get("lan_subnet", "")
+    total_clients = len(cache.get("clients", {}))
+
+    return {
+        "running": running,
+        "interface": iface,
+        "server_ip": server_ip,
+        "endpoint": endpoint,
+        "port": port,
+        "lan_subnet": lan_subnet,
+        "peers": peers,
+        "total_clients": total_clients,
+    }
 # ---------------------------------------------------------------------------
 # Port validation policy (used by /api/init and /api/change-port)
 #

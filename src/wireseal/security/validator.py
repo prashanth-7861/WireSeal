@@ -16,6 +16,8 @@ import base64
 import binascii
 import ipaddress
 import re
+import sys
+from pathlib import Path
 from typing import Any
 
 # ---------------------------------------------------------------------------
@@ -369,3 +371,74 @@ def validate_client_config(config: dict[str, Any]) -> None:
             f"Field 'endpoint': port '{port_str}' in '{endpoint}' is not a valid integer"
         ) from None
     validate_port(port, "endpoint.port")
+
+
+# ---------------------------------------------------------------------------
+# Script path validators
+# ---------------------------------------------------------------------------
+
+# Characters forbidden in script paths — platform-specific sets
+_SCRIPT_PATH_FORBIDDEN_UNIX = frozenset(";&|$`\n\r#" + "'" + '"')
+_SCRIPT_PATH_FORBIDDEN_WINDOWS = frozenset(";$`|&<>\"'\\")
+
+
+def validate_script_path(script_path: Path, *, platform: str | None = None) -> None:
+    """Validate a script path to prevent injection attacks.
+
+    Common checks (all platforms):
+      - No null bytes
+      - No path traversal (..)
+      - No shell metacharacters (platform-specific set)
+      - Must be absolute
+      - Must exist and be a file
+
+    Windows additionally:
+      - Must have a drive letter (e.g., C:\\path\\script.py)
+      - UNC paths (\\\\server\\share) are rejected
+
+    Args:
+        script_path: Path to validate.
+        platform: Platform string (default: sys.platform).
+
+    Raises:
+        ValueError: If the path is invalid or contains dangerous characters.
+    """
+    if platform is None:
+        platform = sys.platform
+
+    path_str = str(script_path)
+
+    # Reject null bytes
+    if "\x00" in path_str:
+        raise ValueError("Script path contains null byte")
+
+    # Reject path traversal
+    parts = re.split(r"[/\\]", path_str)
+    if ".." in parts:
+        raise ValueError("Script path contains path traversal (..)")
+
+    if platform == "win32":
+        forbidden = _SCRIPT_PATH_FORBIDDEN_WINDOWS
+    else:
+        forbidden = _SCRIPT_PATH_FORBIDDEN_UNIX
+
+    # Check for forbidden characters first (before path format checks)
+    for char in forbidden:
+        if char in path_str:
+            raise ValueError(f"Script path contains forbidden character: {repr(char)}")
+
+    if platform == "win32":
+        # Must be absolute with drive letter
+        if not re.match(r"^[A-Za-z]:[\\/]", path_str):
+            raise ValueError("Script path must be absolute (e.g., C:\\path\\script.py)")
+        # Reject UNC paths (\\\\server\\share)
+        if path_str.startswith("\\\\"):
+            raise ValueError("UNC paths are not allowed for script paths")
+    else:
+        # Must be absolute (Unix)
+        if not path_str.startswith("/"):
+            raise ValueError("Script path must be absolute")
+
+    # Must exist and be a file
+    if not script_path.is_file():
+        raise ValueError(f"Script path does not exist or is not a file: {script_path}")

@@ -90,9 +90,11 @@ const ChartStyle = ({ id, config }: { id: string; config: ChartConfig }) => {
 ${prefix} [data-chart=${sanitizeId}] {
 ${colorConfig
   .map(([key, itemConfig]) => {
-    const color =
+    const color = (
       itemConfig.theme?.[theme as keyof typeof itemConfig.theme] ||
-      itemConfig.color;
+      itemConfig.color ||
+      ""
+    ).replace(/[^a-zA-Z0-9#,.\s()]/g, "");
     const safeKey = sanitizeKey(key);
     return color && safeKey ? `  --color-${safeKey}: ${color};` : null;
   })

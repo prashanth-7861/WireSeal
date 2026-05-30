@@ -66,14 +66,14 @@ def _set_raw_mode_win() -> Any:
         # Disable line input and echo for raw-like mode
         new_mode = mode.value & ~(ENABLE_LINE_INPUT | ENABLE_ECHO_INPUT | ENABLE_PROCESSED_INPUT)
         kernel32.SetConsoleMode(handle, new_mode)
-    except Exception:
+    except (OSError, ValueError, OverflowError):
         pass
 
     if mode is not None:
         def _restore() -> None:
             try:
                 kernel32.SetConsoleMode(handle, mode.value)
-            except Exception:
+            except (OSError, ValueError, OverflowError):
                 pass
         return _restore
     return lambda: None
@@ -145,7 +145,7 @@ def _get_terminal_size() -> tuple[int, int]:
         import shutil
         size = shutil.get_terminal_size()
         return size.columns, size.lines
-    except Exception:
+    except (AttributeError, ValueError, OSError):
         return 80, 24
 
 
@@ -168,7 +168,7 @@ async def _forward_stdin(chan: asyncssh.SSHClientProcess) -> None:
     finally:
         try:
             chan.stdin.write_eof()
-        except Exception:
+        except (asyncssh.Error, OSError, EOFError):
             pass
 
 
@@ -199,7 +199,7 @@ async def _handle_resize(chan: asyncssh.SSHClientProcess) -> None:
         cols, rows = _get_terminal_size()
         try:
             chan.change_terminal_size(cols, rows)
-        except Exception:
+        except (asyncssh.Error, OSError):
             pass
 
     try:

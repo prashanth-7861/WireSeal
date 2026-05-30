@@ -484,6 +484,12 @@ function LayoutInner() {
     { to: "/about", label: "About", icon: Info },
   ];
 
+  // ── Escape key handlers (MUST be before any conditional return — Rules of Hooks) ──
+  useEscapeKey(showFreshStart, () => { if (showFreshStart) { setShowFreshStart(false); setAuthError(""); } });
+  useEscapeKey(showPassphrase, () => { if (showPassphrase) { setShowPassphrase(false); setAuthError(""); setPin(["", "", "", "", "", ""]); } });
+  useEscapeKey(showPinSetup, () => { if (showPinSetup) { setShowPinSetup(false); setNewPin(""); setConfirmPin(""); setPinSetupError(""); } });
+  useEscapeKey(showAdminAuth, () => { setShowAdminAuth(false); setAdminPassword(""); setAdminAuthError(""); });
+
   // ── Loading state ─────────────────────────────────────────────────────────
   if (vaultState === "loading") {
     return (
@@ -513,11 +519,6 @@ function LayoutInner() {
   if (vaultState === "uninitialized" && mode === null) {
     return <ModeSelector />;
   }
-
-  // ── Escape key handlers (must be at top level) ────────────────────────────
-  useEscapeKey(showFreshStart, () => { if (showFreshStart) { setShowFreshStart(false); setFreshStartPassphrase(""); setFreshStartError(""); } });
-  useEscapeKey(showPassphrase, () => { if (showPassphrase) { setShowPassphrase(false); setAuthError(""); setPin(["", "", "", "", "", ""]); } });
-  useEscapeKey(showPinSetup, () => { if (showPinSetup) { setShowPinSetup(false); setNewPin(["", "", "", "", "", ""]); setConfirmPin(["", "", "", "", "", ""]); setPinError(""); } });
 
   // ── Locked / Uninitialized — full-screen welcome screen ──────────────────
   if (vaultState === "locked" || vaultState === "uninitialized") {
@@ -993,8 +994,6 @@ function LayoutInner() {
   }
 
   // ── Server mode — show sidebar + page content ──────────────────────────
-  useEscapeKey(showAdminAuth, () => { setShowAdminAuth(false); setAdminAuthCode(""); setAdminAuthError(""); });
-  useEscapeKey(showPinSetup, () => { setShowPinSetup(false); setNewPin(["", "", "", "", "", ""]); setConfirmPin(["", "", "", "", "", ""]); setPinError(""); });
   return (
     <div className="min-h-screen bg-gray-50">
       <ServerSidebar

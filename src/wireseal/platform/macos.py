@@ -26,27 +26,14 @@ import subprocess
 import sys
 from pathlib import Path
 
-# Characters forbidden in script paths to prevent launchd injection
-_SCRIPT_PATH_FORBIDDEN = frozenset(";&|$`\n\r#" + "'" + '"')
-
-
-def _validate_script_path(script_path: Path) -> None:
-    """Validate script path to prevent injection.
-
-    Raises ValueError if path contains dangerous characters or is invalid.
-    """
-    path_str = str(script_path)
-    for char in _SCRIPT_PATH_FORBIDDEN:
-        if char in path_str:
-            raise ValueError(f"Script path contains forbidden character: {repr(char)}")
-    if not path_str.startswith("/"):
-        raise ValueError("Script path must be absolute")
-    if not script_path.is_file():
-        raise ValueError(f"Script path does not exist or is not a file: {script_path}")
-
 from .base import AbstractPlatformAdapter
 from .exceptions import PrivilegeError, PrerequisiteError, SetupError
 from ..security.atomic import atomic_write
+from ..security.validator import validate_script_path as _validate_script_path_core
+
+
+def _validate_script_path(script_path: Path) -> None:
+    _validate_script_path_core(script_path, platform="darwin")
 
 
 class MacOSAdapter(AbstractPlatformAdapter):
@@ -304,18 +291,17 @@ class MacOSAdapter(AbstractPlatformAdapter):
             f"block drop in on {outbound} all\n"
         )
 
-        # Build template with the same values for FW-03 validation
-        template = (
-            f"nat from {subnet} to any -> ({outbound})\n"
-            f"table <wg_bruteforce> persist\n"
-            f"block drop in quick on {outbound} from <wg_bruteforce>\n"
-            f"pass in quick on {outbound} proto udp from any to any port {wg_port} "
-            f"keep state (max-pkt-rate 5/1, overload <wg_bruteforce> flush global)\n"
-            f"block drop in on {outbound} all\n"
-        )
-
-        # FW-03: validate generated rules against template before applying
-        self.validate_firewall_rules(rules, template)
+        # FW-03: Validate generated rules against structural deny-by-default template.
+        # Each pattern is a regex matching one required structural rule; the validator
+        # ensures every generated line matches a pattern and no overly permissive rules exist.
+        pf_template = "\n".join([
+            r"nat\s+from\s+.+\s+to\s+any\s+->\s+\(.+\)",
+            r"table\s+<wg_bruteforce>\s+persist",
+            r"block\s+drop\s+in\s+quick\s+on\s+.+\s+from\s+<wg_bruteforce>",
+            r"pass\s+in\s+quick\s+on\s+.+\s+proto\s+udp\s+from\s+any\s+to\s+any\s+port\s+\d+",
+            r"block\s+drop\s+in\s+on\s+.+\s+all",
+        ])
+        self.validate_firewall_rules(rules, pf_template)
 
         # Idempotency: re-apply only when config changed. pfctl normalizes its
         # output, so compare on the values that can actually drift (subnet,

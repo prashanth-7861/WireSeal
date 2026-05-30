@@ -22,33 +22,20 @@ import subprocess
 import sys
 import textwrap
 
-# Characters forbidden in script paths to prevent cron injection (C-07)
-_SCRIPT_PATH_FORBIDDEN = frozenset(";&|$`\n\r#" + "'" + '"')
-
 # Minimal safe environment for subprocess calls that don't need the full user env (LIN-08)
 _MINIMAL_ENV = {k: v for k, v in os.environ.items() if k in ("PATH", "HOME", "USER")}
 
-
-def _validate_script_path(script_path: Path) -> None:
-    """Validate script path to prevent cron injection.
-
-    Raises ValueError if path contains dangerous characters or is invalid.
-    """
-    path_str = str(script_path)
-    for char in _SCRIPT_PATH_FORBIDDEN:
-        if char in path_str:
-            raise ValueError(f"Script path contains forbidden character: {repr(char)}")
-    # Must be absolute
-    if not path_str.startswith("/"):
-        raise ValueError("Script path must be absolute")
-    if not script_path.is_file():
-        raise ValueError(f"Script path does not exist or is not a file: {script_path}")
 from pathlib import Path
 from typing import Any
 
 from .base import AbstractPlatformAdapter
 from .exceptions import PrerequisiteError, PrivilegeError, SetupError
 from ..security.atomic import atomic_write
+from ..security.validator import validate_script_path as _validate_script_path_core
+
+
+def _validate_script_path(script_path: Path) -> None:
+    _validate_script_path_core(script_path, platform="linux")
 
 
 # ---------------------------------------------------------------------------
@@ -344,9 +331,26 @@ class LinuxAdapter(AbstractPlatformAdapter):
         if not generated_rules:
             return
 
-        # TODO: Implement real template-based validation (FW-03).
-        # Currently uses the same build function for both args, which is tautological.
-        self.validate_firewall_rules(generated_rules, generated_rules)
+        # FW-03: Validate generated rules against structural deny-by-default template.
+        # Each pattern is a regex matching one required structural rule; the validator
+        # ensures every generated line matches a pattern and no overly permissive rules exist.
+        nft_template = "\n".join([
+            r"table\s+inet\s+wg_filter\s*\{",
+            r"chain\s+input\s*\{",
+            r"type\s+filter\s+hook\s+input\s+priority\s+0",
+            r"ct\s+state\s+invalid\s+drop",
+            r"iifname\s+.+\s+udp\s+dport\s+\d+\s+ct\s+state\s+new\s+limit\s+rate\s+over\s+\d+/second",
+            r"chain\s+forward\s*\{",
+            r"type\s+filter\s+hook\s+forward\s+priority\s+0",
+            r"iifname\s+.+\s+oifname\s+.+\s+accept",
+            r"oifname\s+.+\s+ct\s+state\s+\{?\s*established",
+            r"table\s+ip\s+wg_nat\s*\{",
+            r"chain\s+postrouting\s*\{",
+            r"type\s+nat\s+hook\s+postrouting\s+priority\s+100",
+            r"iifname\s+.+\s+masquerade",
+            r"\}",
+        ])
+        self.validate_firewall_rules(generated_rules, nft_template)
 
         if not _NFTABLES_DIR.exists():
             _NFTABLES_DIR.mkdir(parents=True, mode=0o755, exist_ok=True)
@@ -817,7 +821,7 @@ class LinuxAdapter(AbstractPlatformAdapter):
         try:
             jail_conf.parent.mkdir(parents=True, exist_ok=True)
             if not jail_conf.exists() or jail_conf.read_text() != jail_content:
-                jail_conf.write_text(jail_content, encoding="utf-8")
+                atomic_write(jail_conf, jail_content.encode("utf-8"), mode=0o644)
                 actions.append("Configured fail2ban SSH jail (5 retries → 1h ban)")
         except OSError:
             pass
@@ -1359,7 +1363,7 @@ class LinuxAdapter(AbstractPlatformAdapter):
             "WantedBy=multi-user.target\n"
         )
         try:
-            self._API_SERVICE_PATH.write_text(unit)
+            atomic_write(self._API_SERVICE_PATH, unit.encode("utf-8"), mode=0o644)
             os.chmod(self._API_SERVICE_PATH, 0o644)
         except OSError as exc:
             raise SetupError(

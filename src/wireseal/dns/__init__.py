@@ -1,4 +1,4 @@
-"""Dynamic DNS package for WireGuard Automate.
+"""Dynamic DNS package for WireSeal.
 
 Public API:
   - resolve_public_ip: Query 3 HTTPS sources and return consensus IPv4Address

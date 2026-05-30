@@ -1,11 +1,15 @@
 ﻿"""Client management handlers."""
 
+import logging
+
 from . import _shared as _mod
 for _name in dir(_mod):
     if not _name.startswith("__"):
         globals()[_name] = getattr(_mod, _name)
 _s = _mod
 del _name
+
+_clients_log = logging.getLogger("wireseal.api.clients")
 
 def _h_heartbeat(req: "_Handler", groups: tuple) -> dict:
     """Reset TTL for a client. Rate-limited to 1 reset per 30s per client.
@@ -25,7 +29,7 @@ def _h_heartbeat(req: "_Handler", groups: tuple) -> dict:
     import hmac as _hmac
     name = groups[0]
 
-    # Rate limiting â€” guard _heartbeat_cooldown with _lock for thread safety.
+    # Rate limiting â€" guard _heartbeat_cooldown with _lock for thread safety.
     now = _time.time()
     with _lock:
         last = _heartbeat_cooldown.get(name, 0)
@@ -50,7 +54,7 @@ def _h_heartbeat(req: "_Handler", groups: tuple) -> dict:
     stored    = client.get("heartbeat_token") or ""
     if not stored:
         raise _ApiError(
-            "Client has no heartbeat token â€” fetch config while vault is "
+            "Client has no heartbeat token -- fetch config while vault is "
             "unlocked to provision one.", 401,
         )
     if not presented or not _hmac.compare_digest(presented, stored):
@@ -127,7 +131,7 @@ def _h_set_client_ttl(req: "_Handler", groups: tuple) -> dict:
 
 def _h_get_client_details(req: "_Handler", groups: tuple) -> dict:
 
-    """GET /api/clients/{name}/details â€” full client info including access control."""
+    """GET /api/clients/{name}/details â€" full client info including access control."""
     _require_unlocked()
     _require_server_mode()
     name = (groups[0] if groups else "").strip()
@@ -171,7 +175,7 @@ def _h_get_client_details(req: "_Handler", groups: tuple) -> dict:
 
 def _h_edit_client(req: "_Handler", groups: tuple) -> dict:
 
-    """PUT /api/clients/{name} â€” edit access level, privileges, description.
+    """PUT /api/clients/{name} â€" edit access level, privileges, description.
 
     Requires TOTP or passphrase confirmation.
     """
@@ -193,7 +197,7 @@ def _h_edit_client(req: "_Handler", groups: tuple) -> dict:
 
 def _h_server_status(req: "_Handler", _groups: tuple) -> dict:
 
-    """GET /api/server/status â€” return server runtime status."""
+    """GET /api/server/status â€" return server runtime status."""
     _require_unlocked()
     _require_server_mode()
     wireguard = _get_wireguard_adapter()
@@ -205,7 +209,7 @@ def _h_server_status(req: "_Handler", _groups: tuple) -> dict:
 
 def _h_extend_client(req: "_Handler", groups: tuple) -> dict:
 
-    """POST /api/clients/{name}/extend â€” extend or change expiry.
+    """POST /api/clients/{name}/extend â€" extend or change expiry.
 
     Requires TOTP or passphrase confirmation.
     Body: { extend_seconds, expires_at, remove_expiry, totp_code|confirm_passphrase }
@@ -291,7 +295,7 @@ def _h_extend_client(req: "_Handler", groups: tuple) -> dict:
 
 def _h_revoke_client(req: "_Handler", groups: tuple) -> dict:
 
-    """POST /api/clients/{name}/revoke â€” immediately revoke a client.
+    """POST /api/clients/{name}/revoke â€" immediately revoke a client.
 
     Removes the WireGuard peer but keeps the client record with status=revoked.
     Requires TOTP or passphrase confirmation.
@@ -358,7 +362,7 @@ def _h_revoke_client(req: "_Handler", groups: tuple) -> dict:
 
 def _h_suspend_client(req: "_Handler", groups: tuple) -> dict:
 
-    """POST /api/clients/{name}/suspend â€” suspend or unsuspend a client.
+    """POST /api/clients/{name}/suspend â€" suspend or unsuspend a client.
 
     Suspended clients have their WireGuard peer removed but can be restored.
     Body: { action: "suspend"|"unsuspend", totp_code|confirm_passphrase }
@@ -509,7 +513,7 @@ def _h_add_client(req: "_Handler", _groups: tuple) -> dict:
         if req_mtu < 1280 or req_mtu > 1420:
             raise _ApiError("mtu must be between 1280 and 1420.", 400)
 
-    # Access control fields (backward-compatible â€” all optional)
+    # Access control fields (backward-compatible â€" all optional)
     access_level = body.get("access_level", "standard")
     from wireseal.security.access_control import (
         VALID_ACCESS_LEVELS, build_client_access_fields, compute_expires_at,
@@ -561,16 +565,27 @@ def _h_add_client(req: "_Handler", _groups: tuple) -> dict:
         # Re-detect LAN subnet if not stored (server init predates detection)
         if not lan_subnet and tunnel_mode == "split-lan":
             try:
+                adapter = get_adapter()
                 lan_subnet = adapter.detect_lan_subnet()
                 if lan_subnet:
                     state.server["lan_subnet"] = lan_subnet
                     _session["cache"]["server"]["lan_subnet"] = lan_subnet
-            except Exception:
-                pass
+            except (OSError, ValueError, Exception) as e:
+                _clients_log.debug("LAN subnet detection failed during add-client", exc_info=True)
 
-        # All modes route internet through VPN (0.0.0.0/0) for encryption.
-        # VPN exists to protect internet â€” no mode should bypass that.
-        allowed_ips = "0.0.0.0/0"
+        # Compute AllowedIPs based on tunnel_mode:
+        #   full      - route ALL traffic through VPN (0.0.0.0/0)
+        #   split-vpn - route only VPN subnet through tunnel (internet direct)
+        #   split-lan - route VPN subnet + server LAN through tunnel
+        if tunnel_mode == "full":
+            allowed_ips = "0.0.0.0/0"
+        elif tunnel_mode == "split-lan":
+            parts = [vpn_subnet]
+            if lan_subnet:
+                parts.append(lan_subnet)
+            allowed_ips = ", ".join(parts)
+        else:  # split-vpn (default)
+            allowed_ips = vpn_subnet
 
         builder       = ConfigBuilder()
         client_mtu    = req_mtu if req_mtu is not None else _detect_mtu()
@@ -823,16 +838,17 @@ def _h_client_qr(req: "_Handler", groups: tuple) -> dict:
             img.save(buf, format="PNG")
             png_b64 = base64.b64encode(buf.getvalue()).decode()
             img_format = "png"
-        except Exception:
-            # Pillow not available â€” use SVG
+        except (ImportError, OSError, AttributeError):
+            # Pillow not available — use SVG
             img = qr.make_image(image_factory=qrcode.image.svg.SvgPathFillImage)
             buf = io.BytesIO()
             img.save(buf)
             png_b64 = base64.b64encode(buf.getvalue()).decode()
             img_format = "svg+xml"
     except ImportError:
-        raise _ApiError("QR code generation unavailable â€” 'qrcode' package not installed", 500)
-    except Exception:
+        raise _ApiError("QR code generation unavailable — 'qrcode' package not installed", 500)
+    except Exception as _exc:
+        _clients_log.warning("QR code generation failed: %s", _exc)
         raise _ApiError("QR code generation failed.", 500)
 
     AuditLog(_s._AUDIT_PATH).log("export-qr", {"client": name}, actor=_actor_id)
@@ -841,10 +857,10 @@ def _h_client_qr(req: "_Handler", groups: tuple) -> dict:
 
 def _h_client_self_config(req: "_Handler", _groups: tuple) -> dict:
 
-    """GET /api/client/self/config â€” Client fetches its own config using heartbeat token.
+    """GET /api/client/self/config â€" Client fetches its own config using heartbeat token.
 
     Authenticated by the per-client heartbeat token (``X-WireSeal-Heartbeat``
-    header). Does NOT require vault unlock, server mode, or TOTP â€” intended
+    header). Does NOT require vault unlock, server mode, or TOTP â€" intended
     for machine-to-machine use where the client already holds its secret token.
 
     Rate-limited to 1 request per 60 seconds per token to prevent brute-force
@@ -1007,7 +1023,7 @@ def _h_rotate_client_keys(req: "_Handler", groups: tuple) -> dict:
     """Rotate the keypair and PSK for a specific client.
 
     POST /api/clients/<name>/rotate
-    Server-mode only â€” client vaults have no clients to rotate.
+    Server-mode only â€" client vaults have no clients to rotate.
 
     Generates new client keypair + PSK, rebuilds both client and server
     configs, validates them, writes atomically, reloads WireGuard, and
@@ -1016,7 +1032,7 @@ def _h_rotate_client_keys(req: "_Handler", groups: tuple) -> dict:
     _require_unlocked()
     _require_server_mode()
     # SEC-TOTP-07: require TOTP confirmation before rotating client keys.
-    # Client key rotation invalidates the existing config â€” all connected
+    # Client key rotation invalidates the existing config â€" all connected
     # sessions for this client are terminated until the new config is deployed.
     _require_confirmation(req._json())
     name = (groups[0] if groups else "").strip()
@@ -1155,8 +1171,8 @@ def _h_rotate_client_keys(req: "_Handler", groups: tuple) -> dict:
         import qrcode  # type: ignore
         qrcode.make(new_client_config).save(qr_img, format="PNG")
         qr_b64 = base64.b64encode(qr_img.getvalue()).decode()
-    except Exception:
-        pass
+    except (ImportError, OSError, AttributeError):
+        _clients_log.debug("QR generation failed during key rotation", exc_info=True)
 
     result: dict = {"ok": True, "name": name, "config": new_client_config}
     if qr_b64:

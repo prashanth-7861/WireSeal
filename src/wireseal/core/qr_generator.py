@@ -27,6 +27,8 @@ import threading
 import warnings
 from pathlib import Path
 
+from wireseal.security.atomic import atomic_write
+
 
 # CORE-02: Track auto-delete files for cleanup on interpreter exit.
 _auto_delete_files: set[Path] = set()
@@ -117,7 +119,7 @@ def save_qr(
 
     # Write to the validated path as UTF-8 text
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(qr_ascii, encoding="utf-8")
+    atomic_write(path, qr_ascii.encode("utf-8"), mode=0o600)
 
     # Apply restrictive permissions: 0o600 on Unix, Windows ACL equivalent
     set_file_permissions(path, mode=0o600)

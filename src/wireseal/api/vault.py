@@ -1,11 +1,15 @@
 ﻿"""Vault lifecycle handlers."""
 
+import logging
+
 from . import _shared as _mod
 for _name in dir(_mod):
     if not _name.startswith("__"):
         globals()[_name] = getattr(_mod, _name)
 _s = _mod
 del _name
+
+_vault_log = logging.getLogger("wireseal.api.vault")
 
 def _h_vault_info(req: "_Handler", _groups: tuple) -> dict:
     # SEC-FIX-3: Do NOT expose totp_required_for (admin ID list) to
@@ -146,7 +150,7 @@ def _h_init_locked(req: "_Handler", _groups: tuple = ()) -> dict:
             try:
                 from wireseal.dns.ip_resolver import resolve_public_ip
                 endpoint = str(resolve_public_ip())
-            except Exception:
+            except (OSError, ValueError, ImportError):
                 endpoint = None
 
         priv_key, pub_key_bytes = generate_keypair()
@@ -254,18 +258,21 @@ def _h_init_locked(req: "_Handler", _groups: tuple = ()) -> dict:
         if hasattr(adapter, "open_firewalld_port"):
             try:
                 adapter.open_firewalld_port(port)
-            except Exception:
+            except (OSError, PermissionError) as _exc:
+                _vault_log.warning("firewalld port open skipped: %s", _exc)
                 warnings_list.append("firewalld port open skipped.")
         if hasattr(adapter, "ensure_sshd"):
             try:
                 adapter.ensure_sshd()
-            except Exception:
+            except (OSError, PermissionError) as _exc:
+                _vault_log.warning("SSH server setup skipped: %s", _exc)
                 warnings_list.append("SSH server setup skipped.")
         # Server hardening (SSH, kernel, fail2ban, auto-updates)
         if hasattr(adapter, "harden_server"):
             try:
                 adapter.harden_server()
-            except Exception:
+            except (OSError, PermissionError) as _exc:
+                _vault_log.warning("Server hardening skipped: %s", _exc)
                 warnings_list.append("Server hardening skipped.")
 
         try:
@@ -277,8 +284,9 @@ def _h_init_locked(req: "_Handler", _groups: tuple = ()) -> dict:
         lan_subnet = ""
         try:
             lan_subnet = adapter.detect_lan_subnet()
-        except Exception:
-            warnings_list.append("LAN subnet detection failed â€” split-tunnel will use VPN subnet only.")
+        except (OSError, ValueError) as _exc:
+            _vault_log.warning("LAN subnet detection failed: %s", _exc)
+            warnings_list.append("LAN subnet detection failed — split-tunnel will use VPN subnet only.")
         if lan_subnet:
             try:
                 with vault.open(passphrase) as state:
@@ -286,7 +294,8 @@ def _h_init_locked(req: "_Handler", _groups: tuple = ()) -> dict:
                     vault.save(state, passphrase)
                 with _lock:
                     _session["cache"]["server"]["lan_subnet"] = lan_subnet
-            except Exception:
+            except Exception as _exc:
+                _vault_log.warning("Could not persist LAN subnet to vault: %s", _exc)
                 warnings_list.append("Could not persist LAN subnet to vault.")
 
         if port_warning:
@@ -451,7 +460,7 @@ def _h_unlock(req: "_Handler", _groups: tuple) -> dict:
                     type("_S", (), {"data": cache})()
                 )
                 auto_profile = client_settings.get("auto_connect_profile")
-            except Exception:
+            except (KeyError, AttributeError, TypeError):
                 pass
 
         result: dict = {"ok": True, "role": admin_role}

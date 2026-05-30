@@ -13,12 +13,15 @@ Security invariants:
 """
 
 import hashlib
+import logging
 import os
 import re
 import subprocess
 import sys
 import time
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Windows console handling for GUI binary (console=False).
@@ -37,14 +40,14 @@ if sys.platform == "win32":
             if ctypes.windll.kernel32.AttachConsole(_ATTACH_PARENT_PROCESS):
                 sys.stdout = open("CONOUT$", "w")
                 sys.stderr = open("CONOUT$", "w")
-        except Exception:
+        except (OSError, ValueError):
             pass
     else:
         # GUI mode (double-click) — suppress all console output
         try:
             sys.stdout = open(os.devnull, "w")
             sys.stderr = open(os.devnull, "w")
-        except Exception:
+        except OSError:
             pass
 
 import click
@@ -60,7 +63,7 @@ try:
     from wireseal.security.process_hardening import harden_process
     harden_process()
 except Exception:
-    pass
+    logger.warning("Process hardening failed — security posture degraded", exc_info=True)
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -491,8 +494,8 @@ def _resolve_config_path(config_name: str) -> Path | None:
         if config_name.startswith("client-"):
             interface = config_name[len("client-"):]
             return adapter.get_config_path(interface)
-    except Exception:
-        pass
+    except (OSError, ValueError, KeyError):
+        logger.debug("Could not resolve config path for %r", config_name, exc_info=True)
     return None
 
 
@@ -522,7 +525,7 @@ def lock() -> None:
         audit = AuditLog(DEFAULT_AUDIT_LOG_PATH)
         audit.log(action="lock", metadata={})
     except Exception:
-        pass  # Lock must never fail due to audit log issues
+        logger.debug("Audit log write failed during lock", exc_info=True)
 
     # Step 5: Exit cleanly
     sys.exit(0)
@@ -711,7 +714,7 @@ def _clear_scrollback() -> None:
             kernel32.SetConsoleMode(h, mode.value | ENABLE_VIRTUAL_TERMINAL_PROCESSING)
             _sys.stdout.write("\x1b[3J")
             _sys.stdout.flush()
-        except Exception:
+        except (OSError, ValueError, OverflowError):
             _sys.stdout.write("\n" * 80)
             _sys.stdout.flush()
     elif _sys.stdout and _sys.stdout.isatty():
@@ -1942,7 +1945,7 @@ def audit_log(lines: int, action: str | None, actor: str | None,
     if since:
         try:
             since_ts = _dt.datetime.fromisoformat(since).timestamp()
-        except Exception:
+        except (ValueError, OverflowError, OSError):
             click.echo(f"Error: invalid --since format '{since}'. Use ISO 8601.", err=True)
             raise SystemExit(1)
 
@@ -1959,7 +1962,7 @@ def audit_log(lines: int, action: str | None, actor: str | None,
                 entry_ts = _dt.datetime.fromisoformat(entry.timestamp).timestamp()
                 if entry_ts < since_ts:
                     return False
-            except Exception:
+            except (ValueError, OverflowError, OSError):
                 pass
         return True
 
@@ -2129,7 +2132,8 @@ def backup_vault(dest: str) -> None:
         try:
             with vault.open(passphrase) as _st:
                 pass  # Just verify it decrypts
-        except Exception:
+        except (ValueError, KeyError, OSError) as _exc:
+            logger.debug("Vault passphrase verification failed: %s", _exc)
             click.echo("Incorrect passphrase.")
             raise SystemExit(1)
 
@@ -2250,7 +2254,7 @@ def terminate(interface: str) -> None:
         audit = AuditLog(DEFAULT_AUDIT_LOG_PATH)
         audit.log(action="terminate", metadata={"interface": interface})
     except Exception:
-        pass  # Audit failure must not prevent terminate
+        logger.debug("Audit log write failed during terminate", exc_info=True)
 
 
 # ===========================================================================

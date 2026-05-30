@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { NavLink, Outlet } from "react-router";
 import {
   Wifi, TerminalSquare, Settings, Info, LogOut,
@@ -27,27 +27,53 @@ export function ClientLayout({ onLock }: ClientLayoutProps) {
   const [pinSetupLoading, setPinSetupLoading] = useState(false);
   const [tunnelConnected, setTunnelConnected] = useState(false);
   const [tunnelProfile, setTunnelProfile] = useState<string | null>(null);
+  const tunnelConnectedRef = useRef(false);
 
   useEffect(() => {
     api.pinInfo().then((info) => setPinSet(info.pin_set ?? false)).catch(() => {});
   }, []);
 
-  // Poll tunnel status every 5s when connected, 15s when disconnected
+  // Poll tunnel status every 5s when connected, 15s when disconnected.
+  // Uses a ref for tunnelConnected to avoid infinite re-render loop:
+  // the interval duration depends on connection state, but we must not
+  // re-create the interval on every state change.
   useEffect(() => {
     let cancelled = false;
+    let intervalId: ReturnType<typeof setInterval> | null = null;
+
     const poll = async () => {
       try {
         const status = await api.clientTunnelStatus();
         if (!cancelled) {
-          setTunnelConnected(status.connected);
+          // Only update state if value actually changed to avoid unnecessary re-renders
+          if (status.connected !== tunnelConnectedRef.current) {
+            tunnelConnectedRef.current = status.connected;
+            setTunnelConnected(status.connected);
+          }
           setTunnelProfile(status.profile);
         }
-      } catch {}
+      } catch { /* ignore transient network errors */ }
     };
+
+    // Initial poll + set interval
     poll();
-    const interval = setInterval(poll, tunnelConnected ? 5000 : 15000);
-    return () => { cancelled = true; clearInterval(interval); };
-  }, [tunnelConnected]);
+    const scheduleInterval = () => {
+      if (intervalId !== null) clearInterval(intervalId);
+      const ms = tunnelConnectedRef.current ? 5000 : 15000;
+      intervalId = setInterval(async () => {
+        await poll();
+        // Re-schedule with correct interval if connection state changed
+        const newMs = tunnelConnectedRef.current ? 5000 : 15000;
+        if (newMs !== ms) scheduleInterval();
+      }, ms);
+    };
+    scheduleInterval();
+
+    return () => {
+      cancelled = true;
+      if (intervalId !== null) clearInterval(intervalId);
+    };
+  }, []); // Empty deps — runs once on mount, cleans up on unmount
 
   const handlePinSetup = async (e: React.FormEvent) => {
     e.preventDefault();
