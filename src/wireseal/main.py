@@ -2114,6 +2114,7 @@ def backup_vault(dest: str) -> None:
     import shutil
     from pathlib import Path
     from wireseal.security.vault import Vault, DEFAULT_VAULT_DIR
+    from wireseal.security.exceptions import VaultUnlockError
     from wireseal.security.secret_types import SecretBytes
     from wireseal.security.secrets_wipe import wipe_string
     from wireseal.security.audit import AuditLog
@@ -2132,7 +2133,7 @@ def backup_vault(dest: str) -> None:
         try:
             with vault.open(passphrase) as _st:
                 pass  # Just verify it decrypts
-        except (ValueError, KeyError, OSError) as _exc:
+        except (ValueError, KeyError, OSError, VaultUnlockError) as _exc:
             logger.debug("Vault passphrase verification failed: %s", _exc)
             click.echo("Incorrect passphrase.")
             raise SystemExit(1)
