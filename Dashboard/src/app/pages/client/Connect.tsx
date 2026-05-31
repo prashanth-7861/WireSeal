@@ -208,6 +208,10 @@ export function Connect() {
     e.target.value = "";
   };
 
+  // ── Escape key handlers (MUST be at top level — Rules of Hooks) ──
+  useEscapeKey(showImport, () => { setShowImport(false); setImportName(""); setImportText(""); setImportError(""); });
+  useEscapeKey(!!editName, () => { if (!editing) closeEdit(); });
+
   return (
     <div>
       <div className="mb-8 flex items-center justify-between">
@@ -463,7 +467,6 @@ export function Connect() {
       )}
 
       {/* Import dialog */}
-      {useEscapeKey(showImport, () => { setShowImport(false); setImportName(""); setImportText(""); setImportError(""); })}
       {showImport && (
         <div role="dialog" aria-modal="true" aria-labelledby="import-config-title" className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
           <div className="bg-white rounded-xl shadow-2xl w-full max-w-lg mx-4 p-6">
@@ -545,7 +548,6 @@ export function Connect() {
       )}
 
       {/* Edit dialog — paste new .conf when server endpoint/port/keys change. */}
-      {useEscapeKey(!!editName, () => { if (!editing) closeEdit(); })}
       {editName && (
         <div
           role="dialog" aria-modal="true" aria-labelledby="edit-profile-title"

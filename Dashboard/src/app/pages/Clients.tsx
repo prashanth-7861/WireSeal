@@ -329,12 +329,16 @@ export function Clients() {
     return "Idle";
   };
 
+  // ── Escape key handlers (MUST be at top level — Rules of Hooks) ──
+  useEscapeKey(showAddDialog, () => { addAbortRef.current?.abort(); setShowAddDialog(false); setAddError(""); setNewName(""); setTunnelMode("split-vpn"); setNewClientAccessLevel("standard"); setExpiryType("permanent"); setTtlValue(""); setCustomTtl(""); setExpiryDate(""); });
+  useEscapeKey(!!totpRequiredName, () => { addAbortRef.current?.abort(); setTotpRequiredName(null); setTotpCode(""); setTotpError(""); });
+
   return (
     <div>
       <div className="flex items-center justify-between mb-8">
         <div>
           <h1 className="text-3xl font-semibold text-gray-900">Clients</h1>
-          <p className="text-gray-500 mt-1">Manage WireGuard clients</p>
+          <p className="text-gray-500 mt-1">Manage device connections to your network</p>
         </div>
         <button
           onClick={() => setShowAddDialog(true)}
@@ -546,7 +550,6 @@ export function Clients() {
       </div>
 
       {/* ── Add Client Dialog ─────────────────────────────────────────────── */}
-      {useEscapeKey(showAddDialog, () => { addAbortRef.current?.abort(); setShowAddDialog(false); setAddError(""); setNewName(""); setTunnelMode("split-vpn"); setNewClientAccessLevel("standard"); setExpiryType("permanent"); setTtlValue(""); setCustomTtl(""); setExpiryDate(""); })}
       {showAddDialog && (
         <div role="dialog" aria-modal="true" aria-labelledby="add-client-title" className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
           <div className="bg-white rounded-xl shadow-xl p-6 w-full max-w-md">
@@ -738,7 +741,6 @@ export function Clients() {
       )}
 
       {/* ── TOTP confirmation dialog ───────────────────────────────────── */}
-      {useEscapeKey(!!totpRequiredName, () => { addAbortRef.current?.abort(); setTotpRequiredName(null); setTotpCode(""); setTotpError(""); })}
       {totpRequiredName && (
         <div role="dialog" aria-modal="true" aria-labelledby="totp-confirm-title" className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
           <div className="bg-white rounded-lg shadow-xl p-6 w-full max-w-sm">

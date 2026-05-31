@@ -82,7 +82,7 @@ export function ClientSettings() {
       <div className="mb-8 flex items-center justify-between">
         <div>
           <h1 className="text-3xl font-semibold text-gray-900">Client Settings</h1>
-          <p className="text-gray-500 mt-1">VPN connection, security, and network preferences</p>
+          <p className="text-gray-500 mt-1">Connection, security, and network preferences</p>
         </div>
         <button
           onClick={handleSave}

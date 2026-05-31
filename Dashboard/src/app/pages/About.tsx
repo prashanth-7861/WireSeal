@@ -240,7 +240,7 @@ const CREDITS: Credit[] = [
   {
     name: "WireGuard",
     url: "https://www.wireguard.com",
-    description: "Fast, modern, secure VPN tunnel. The core protocol that WireSeal automates and manages.",
+    description: "Fast, modern, secure tunnel protocol. The encrypted transport layer that WireSeal builds on.",
     license: "GPL-2.0",
   },
   {
@@ -417,7 +417,7 @@ export function About() {
     <div>
       <div className="mb-8">
         <h1 className="text-3xl font-semibold text-gray-900">About WireSeal</h1>
-        <p className="text-gray-500 mt-1">WireGuard server automation with zero plaintext secrets on disk</p>
+        <p className="text-gray-500 mt-1">Secure home network access — encrypted tunnels, managed connections, zero plaintext secrets</p>
       </div>
 
       {/* Hero card */}
@@ -432,15 +432,15 @@ export function About() {
           />
           <div>
             <h2 className="text-2xl font-bold">WireSeal</h2>
-            <p className="text-blue-200 text-sm">Secure · Automated · Cross-platform</p>
+            <p className="text-blue-200 text-sm">Secure Home Network Access · Encrypted · Cross-platform</p>
             <p className="text-blue-300/70 text-xs mt-0.5 font-mono">v{currentVersion}</p>
             <p className="text-blue-300/40 text-[11px] mt-0.5 font-mono">Dashboard v{typeof __APP_VERSION__ !== "undefined" ? __APP_VERSION__ : "built"}</p>
           </div>
         </div>
         <p className="text-blue-100 leading-relaxed max-w-xl">
-          WireSeal automates WireGuard server setup and client management while keeping every
-          cryptographic secret encrypted at all times. Unlike plain-text config approaches,
-          WireSeal wraps everything in a dual-layer AEAD vault derived from your passphrase.
+          WireSeal gives you secure access to your home network and its devices from anywhere —
+          no data leakage, no plaintext secrets, fully managed client connections. Every key and
+          config is wrapped in a dual-layer AEAD vault derived from your passphrase.
         </p>
 
         <div className="mt-6 flex flex-wrap gap-3">

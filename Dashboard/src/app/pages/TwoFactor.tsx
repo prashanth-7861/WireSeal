@@ -51,6 +51,10 @@ export function TwoFactor() {
 
   useEffect(() => { load(); }, []);
 
+  // ── Escape key handlers (MUST be before any conditional return — Rules of Hooks) ──
+  useEscapeKey(enrolling, () => { setEnrolling(false); setEnrollingId(null); });
+  useEscapeKey(confirmingDisable, () => { setConfirmingDisable(false); setDisablePass(""); setDisableError(""); });
+
   if (loading) return (
     <div className="p-6 flex items-center gap-3 text-gray-500">
       <div className="w-5 h-5 border-2 border-indigo-400 border-t-transparent rounded-full animate-spin" />
@@ -213,7 +217,6 @@ export function TwoFactor() {
         </>
       )}
 
-      {useEscapeKey(enrolling, () => { setEnrolling(false); setEnrollingId(null); })}
       {enrolling && (
         <TotpEnrollDialog
           adminId={enrollingId ?? currentId}
@@ -223,7 +226,6 @@ export function TwoFactor() {
       )}
 
       {/* Disable confirmation modal */}
-      {useEscapeKey(confirmingDisable, () => { setConfirmingDisable(false); setDisablePass(""); setDisableError(""); })}
       {confirmingDisable && (
         <div role="dialog" aria-modal="true" aria-labelledby="disable-totp-title" className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
           <div className="bg-white rounded-lg shadow-xl p-6 w-full max-w-sm">

@@ -500,7 +500,7 @@ function LayoutInner() {
           </div>
           <div className="text-center">
             <h1 className="text-3xl font-bold text-white tracking-tight">WireSeal</h1>
-            <p className="text-blue-300/70 text-sm mt-1">Secure WireGuard Management</p>
+            <p className="text-blue-300/70 text-sm mt-1">Secure Home Network Access</p>
           </div>
           <div className="flex items-center gap-2 text-blue-300/60 text-sm">
             <div className="w-4 h-4 border-2 border-blue-400/40 border-t-blue-400 rounded-full animate-spin" />
@@ -544,7 +544,7 @@ function LayoutInner() {
               <Sparkles className="w-5 h-5 text-amber-400" />
             </div>
             <h1 className="text-4xl font-bold text-white tracking-tight mb-2">WireSeal</h1>
-            <p className="text-blue-300/60 text-sm mb-4">Secure WireGuard Management</p>
+            <p className="text-blue-300/60 text-sm mb-4">Secure Home Network Access</p>
             <h2 className="text-lg font-semibold text-blue-200 mb-2">
               {vaultState === "uninitialized" ? "Let's get you set up" : "Welcome back"}
             </h2>
@@ -553,7 +553,7 @@ function LayoutInner() {
                 ? "Create a vault passphrase to encrypt your keys and configs. Everything is secured with dual-layer AEAD encryption."
                 : pinSet
                   ? "Enter your PIN to quickly unlock your vault."
-                  : "Unlock the vault with your passphrase to manage your WireGuard network."}
+                  : "Unlock the vault with your passphrase to access your network."}
             </p>
           </div>
 
@@ -1053,7 +1053,7 @@ function LayoutInner() {
                     </p>
                   </div>
                 )}
-                <p className="text-green-600 text-sm mt-4">Head to the <strong>Clients</strong> page to add your first VPN client.</p>
+                <p className="text-green-600 text-sm mt-4">Head to the <strong>Clients</strong> page to add your first device connection.</p>
               </div>
               <button
                 onClick={() => setInitResult(null)}

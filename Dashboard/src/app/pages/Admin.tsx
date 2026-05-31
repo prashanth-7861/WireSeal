@@ -495,6 +495,12 @@ function AccountsTab() {
     } finally { setTotpResetLoading(false); }
   };
 
+  // ── Escape key handlers (MUST be before any conditional return — Rules of Hooks) ──
+  useEscapeKey(showAddDialog, () => { setShowAddDialog(false); setAddError(""); });
+  useEscapeKey(!!confirmRemove, () => setConfirmRemove(null));
+  useEscapeKey(!!showPassDialog, () => { setShowPassDialog(null); setNewAdminPass(""); setPassError(""); });
+  useEscapeKey(!!showTOTPReset, () => setShowTOTPReset(null));
+
   if (loading) return (
     <div className="flex items-center gap-3 text-gray-500 py-8 justify-center">
       <div className="w-5 h-5 border-2 border-indigo-400 border-t-transparent rounded-full animate-spin" />
@@ -598,7 +604,6 @@ function AccountsTab() {
       </div>
 
       {/* Add Admin Dialog */}
-      {useEscapeKey(showAddDialog, () => { setShowAddDialog(false); setAddError(""); })}
       {showAddDialog && (
         <div role="dialog" aria-modal="true" aria-labelledby="add-admin-title" className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
           <div className="bg-white rounded-lg shadow-xl p-6 w-full max-w-md">
@@ -649,7 +654,6 @@ function AccountsTab() {
       )}
 
       {/* Remove Confirmation */}
-      {useEscapeKey(!!confirmRemove, () => setConfirmRemove(null))}
       {confirmRemove && (
         <div role="dialog" aria-modal="true" aria-labelledby="remove-admin-title" className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
           <div className="bg-white rounded-lg shadow-xl p-6 w-full max-w-sm">
@@ -675,7 +679,6 @@ function AccountsTab() {
       )}
 
       {/* Change Passphrase Dialog */}
-      {useEscapeKey(!!showPassDialog, () => { setShowPassDialog(null); setNewAdminPass(""); setPassError(""); })}
       {showPassDialog && (
         <div role="dialog" aria-modal="true" aria-labelledby="change-pass-title" className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
           <div className="bg-white rounded-lg shadow-xl p-6 w-full max-w-md">
@@ -703,7 +706,6 @@ function AccountsTab() {
       )}
 
       {/* TOTP Reset Confirmation */}
-      {useEscapeKey(!!showTOTPReset, () => setShowTOTPReset(null))}
       {showTOTPReset && (
         <div role="dialog" aria-modal="true" aria-labelledby="totp-reset-title" className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
           <div className="bg-white rounded-lg shadow-xl p-6 w-full max-w-sm">

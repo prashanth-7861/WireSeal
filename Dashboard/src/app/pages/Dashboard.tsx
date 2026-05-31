@@ -180,7 +180,7 @@ export function Dashboard() {
     <div>
       <div className="mb-8">
         <h1 className="text-3xl font-semibold text-gray-900">Dashboard</h1>
-        <p className="text-gray-500 mt-1">Monitor and control your WireGuard server</p>
+        <p className="text-gray-500 mt-1">Monitor and control your secure network</p>
       </div>
 
       {/* Error banner */}

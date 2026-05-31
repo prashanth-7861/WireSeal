@@ -149,6 +149,9 @@ export function Backup() {
     }
   };
 
+  // ── Escape key handler (MUST be at top level — Rules of Hooks) ──
+  useEscapeKey(!!restorePath, () => { setRestorePath(null); setRestoreError(null); setRestorePass(""); });
+
   return (
     <div className="p-6 space-y-8 max-w-3xl">
       <h1 className="text-2xl font-bold text-gray-900">Backup</h1>
@@ -384,7 +387,6 @@ export function Backup() {
       )}
 
       {/* Restore modal */}
-      {useEscapeKey(!!restorePath, () => { setRestorePath(null); setRestoreError(null); setRestorePass(""); })}
       {restorePath && (
         <div role="dialog" aria-modal="true" aria-labelledby="restore-vault-title" className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
           <div className="bg-white rounded-xl p-6 max-w-md w-full mx-4 space-y-4 shadow-2xl">

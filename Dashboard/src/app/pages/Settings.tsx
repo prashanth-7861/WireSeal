@@ -296,6 +296,13 @@ export function Settings() {
     }
   };
 
+  // ── Escape key handlers (MUST be at top level — Rules of Hooks) ──
+  useEscapeKey(showPassphraseDialog, () => setShowPassphraseDialog(false));
+  useEscapeKey(showPortDialog, () => setShowPortDialog(false));
+  useEscapeKey(showEndpointDialog, () => setShowEndpointDialog(false));
+  useEscapeKey(showResetDialog, () => setShowResetDialog(false));
+  useEscapeKey(showUninstallDialog, () => setShowUninstallDialog(false));
+
   return (
     <div>
       <div className="mb-8">
@@ -445,7 +452,6 @@ export function Settings() {
       </div>
 
       {/* Change Passphrase Dialog */}
-      {useEscapeKey(showPassphraseDialog, () => setShowPassphraseDialog(false))}
       {showPassphraseDialog && (
         <div role="dialog" aria-modal="true" aria-labelledby="settings-passphrase-title" className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
           <div className="bg-white rounded-lg shadow-xl p-6 w-full max-w-md">
@@ -537,7 +543,6 @@ export function Settings() {
         </div>
       )}
 
-      {useEscapeKey(showPortDialog, () => setShowPortDialog(false))}
       {/* Change Port Dialog */}
       {showPortDialog && (
         <div
@@ -714,7 +719,6 @@ export function Settings() {
         </div>
       )}
 
-      {useEscapeKey(showEndpointDialog, () => setShowEndpointDialog(false))}
       {/* Update Endpoint Dialog */}
       {showEndpointDialog && (
         <div role="dialog" aria-modal="true" aria-labelledby="settings-endpoint-title" className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
@@ -773,7 +777,6 @@ export function Settings() {
         </div>
       )}
 
-      {useEscapeKey(showResetDialog, () => setShowResetDialog(false))}
       {/* Fresh Start Confirmation Dialog */}
       {showResetDialog && (
         <div role="dialog" aria-modal="true" aria-labelledby="settings-reset-title" className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
@@ -818,7 +821,6 @@ export function Settings() {
         </div>
       )}
 
-      {useEscapeKey(showUninstallDialog, () => setShowUninstallDialog(false))}
       {/* Uninstall Instructions Dialog */}
       {showUninstallDialog && (
         <div role="dialog" aria-modal="true" aria-labelledby="settings-uninstall-title" className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
