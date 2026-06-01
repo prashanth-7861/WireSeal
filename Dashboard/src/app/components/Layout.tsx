@@ -1076,7 +1076,7 @@ function LayoutInner() {
               </div>
               <div>
                 <h2 id="dialog-title-adminauth" className="text-xl font-semibold text-gray-900">Activate Admin Mode</h2>
-                <p className="text-sm text-gray-500">Enter your root / sudo password</p>
+                <p className="text-sm text-gray-500">Enter your vault passphrase to confirm authority</p>
               </div>
             </div>
 
@@ -1091,7 +1091,7 @@ function LayoutInner() {
                   type={showAdminPw ? "text" : "password"}
                   value={adminPassword}
                   onChange={e => setAdminPassword(e.target.value)}
-                  placeholder="Root / sudo password"
+                  placeholder="Vault passphrase"
                   className="w-full px-4 py-2.5 pr-10 border border-gray-300 rounded-lg focus:ring-2 focus:ring-red-500 focus:border-transparent"
                   autoFocus
                   disabled={adminAuthLoading}

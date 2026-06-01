@@ -141,6 +141,7 @@ export interface Status {
   lan_subnet: string;
   peers: Peer[];
   total_clients: number;
+  needs_reboot?: boolean;
 }
 
 export interface Client {

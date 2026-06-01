@@ -3,7 +3,7 @@ import { Link } from "react-router";
 import {
   Server, Activity, Monitor, Clock, Wifi, WifiOff,
   ShieldCheck, Users, PowerOff, Play, RefreshCw,
-  ArrowDownCircle, ArrowUpCircle, Globe, Zap, Pencil,
+  ArrowDownCircle, ArrowUpCircle, Globe, Zap, Pencil, AlertTriangle,
 } from "lucide-react";
 import { api, type Status } from "../api";
 
@@ -182,6 +182,19 @@ export function Dashboard() {
         <h1 className="text-3xl font-semibold text-gray-900">Dashboard</h1>
         <p className="text-gray-500 mt-1">Monitor and control your secure network</p>
       </div>
+
+      {/* Reboot required warning */}
+      {status?.needs_reboot && (
+        <div className="mb-4 bg-amber-50 border border-amber-300 text-amber-800 px-4 py-3 rounded-lg flex items-center gap-3">
+          <AlertTriangle className="w-5 h-5 flex-shrink-0" />
+          <div>
+            <p className="text-sm font-medium">System reboot required</p>
+            <p className="text-xs text-amber-700 mt-0.5">
+              IP forwarding was enabled but requires a reboot to take effect. Without it, connected clients cannot reach the internet or LAN devices through the tunnel.
+            </p>
+          </div>
+        </div>
+      )}
 
       {/* Error banner */}
       {error && (

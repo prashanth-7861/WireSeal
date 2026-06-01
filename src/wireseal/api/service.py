@@ -155,6 +155,17 @@ def _h_start_server(req: "_Handler", _groups: tuple) -> dict:
             err = (start_result.stderr or start_result.stdout or b"").decode("utf-8", errors="replace")
             if "1056" not in err:
                 raise _ApiError(f"Failed to start service: {err.strip()}", 500)
+        # sc.exe start is async — wait for service to reach RUNNING state
+        import time
+        for _ in range(10):
+            time.sleep(1)
+            poll = subprocess.run(
+                ["sc.exe", "query", svc],
+                capture_output=True, text=True, timeout=5,
+                creationflags=_SP_FLAGS,
+            )
+            if poll.returncode == 0 and "RUNNING" in poll.stdout:
+                break
         AuditLog(_s._AUDIT_PATH).log("start", {"interface": _WG_IFACE},
                                       actor=_session.get("admin_id", "owner"))
         return {"ok": True}

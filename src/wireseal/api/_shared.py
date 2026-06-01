@@ -1652,11 +1652,36 @@ def _h_status(req: "_Handler", _groups: tuple) -> dict:
         p["name"] = ip_to_name.get(ip, "unknown")
 
     iface = cache.get("server", {}).get("interface", _WG_IFACE)
-    server_ip = cache.get("server", {}).get("server_ip", "")
+    server_ip = cache.get("server", {}).get("ip", "")
     endpoint = cache.get("server", {}).get("endpoint", "")
     port = cache.get("server", {}).get("port", 0)
     lan_subnet = cache.get("server", {}).get("lan_subnet", "")
     total_clients = len(cache.get("clients", {}))
+
+    # Windows: check if IP forwarding requires a pending reboot
+    needs_reboot = False
+    if sys.platform == "win32":
+        try:
+            import winreg
+            with winreg.OpenKey(
+                winreg.HKEY_LOCAL_MACHINE,
+                r"SYSTEM\CurrentControlSet\Services\Tcpip\Parameters",
+                0, winreg.KEY_READ,
+            ) as key:
+                val, _ = winreg.QueryValueEx(key, "IPEnableRouter")
+                if val == 1:
+                    # Registry says enabled — check if routing is actually active
+                    check = subprocess.run(
+                        ["powershell", "-NoProfile", "-Command",
+                         "(Get-NetIPInterface -Forwarding Enabled -ErrorAction SilentlyContinue).ifIndex.Count"],
+                        capture_output=True, text=True, timeout=10,
+                        creationflags=_SP_FLAGS,
+                    )
+                    forwarding_active = (check.stdout.strip() or "0") != "0"
+                    if not forwarding_active:
+                        needs_reboot = True
+        except Exception:
+            pass
 
     return {
         "running": running,
@@ -1667,6 +1692,7 @@ def _h_status(req: "_Handler", _groups: tuple) -> dict:
         "lan_subnet": lan_subnet,
         "peers": peers,
         "total_clients": total_clients,
+        "needs_reboot": needs_reboot,
     }
 # ---------------------------------------------------------------------------
 # Port validation policy (used by /api/init and /api/change-port)
