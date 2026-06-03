@@ -959,7 +959,7 @@ def serve(host: str = "127.0.0.1", port: int = 8080, gui: bool = True) -> None:
 
                     continue
 
-                if _last_activity and (_t.monotonic() - _last_activity > _SESSION_TIMEOUT):
+                if _last_activity[0] and (_t.monotonic() - _last_activity[0] > _SESSION_TIMEOUT):
 
                     if _session["passphrase"]:
 
@@ -969,7 +969,7 @@ def serve(host: str = "127.0.0.1", port: int = 8080, gui: bool = True) -> None:
 
             # Audit log OUTSIDE the lock to avoid deadlock
 
-            if _last_activity and (_t.monotonic() - _last_activity > _SESSION_TIMEOUT + 60):
+            if _last_activity[0] and (_t.monotonic() - _last_activity[0] > _SESSION_TIMEOUT + 60):
 
                 continue  # Already logged
 

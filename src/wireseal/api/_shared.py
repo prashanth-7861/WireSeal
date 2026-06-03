@@ -1694,6 +1694,7 @@ def _h_status(req: "_Handler", _groups: tuple) -> dict:
         )
         if result.returncode == 0 and result.stdout.strip():
             running = True
+            from wireseal.api.service import _parse_wg_show
             peers = _parse_wg_show(result.stdout)
     except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
         pass
