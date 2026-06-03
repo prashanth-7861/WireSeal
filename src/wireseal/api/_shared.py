@@ -1315,6 +1315,34 @@ def _extract(value: Any) -> str:
     return str(value)
 
 
+def _dns_for_tunnel_mode(tunnel_mode: str, lan_subnet: str = "") -> str:
+    """Compute DNS server(s) appropriate for the tunnel mode.
+
+    - full:      public DNS (all traffic tunneled, always reachable)
+    - split-lan: LAN gateway IP (routed through tunnel -- works even when
+                 the client's local network blocks external DNS)
+    - split-vpn: empty string (use system DNS -- tunnel only carries VPN subnet)
+
+    The split-lan fix is critical: hardcoded public DNS (1.1.1.1, 8.8.8.8)
+    is NOT in AllowedIPs for split modes, so DNS goes via the client's local
+    network. WiFi/VPN networks that block or intercept external DNS break
+    the tunnel. Using the LAN gateway (which IS in AllowedIPs) routes DNS
+    through the tunnel reliably.
+    """
+    if tunnel_mode == "full":
+        return "1.1.1.1, 8.8.8.8"
+    if tunnel_mode == "split-lan" and lan_subnet:
+        import ipaddress as _ipa
+        try:
+            net = _ipa.IPv4Network(lan_subnet, strict=False)
+            gateway = str(next(net.hosts()))  # first usable IP = router/gateway
+            return gateway
+        except (ValueError, StopIteration):
+            pass
+    # split-vpn or fallback: no DNS override, use system DNS
+    return ""
+
+
 def _detect_mtu() -> int:
     """Detect optimal WireGuard client MTU based on outbound interface MTU.
 
@@ -1325,29 +1353,69 @@ def _detect_mtu() -> int:
     try:
         if sys.platform == "win32":
             import subprocess as _sp
+            import re as _re
+            # Primary: find the default-route interface, get its MTU
+            try:
+                route_result = _sp.run(
+                    ["powershell", "-NoProfile", "-Command",
+                     "(Get-NetRoute -DestinationPrefix '0.0.0.0/0' "
+                     "| Sort-Object RouteMetric "
+                     "| Select-Object -First 1).InterfaceIndex"],
+                    capture_output=True, text=True, timeout=10,
+                )
+                if_index = route_result.stdout.strip()
+                if if_index and if_index.isdigit():
+                    mtu_result = _sp.run(
+                        ["powershell", "-NoProfile", "-Command",
+                         f"(Get-NetIPInterface -InterfaceIndex {if_index} "
+                         "-AddressFamily IPv4).NlMtu"],
+                        capture_output=True, text=True, timeout=10,
+                    )
+                    mtu_str = mtu_result.stdout.strip()
+                    if mtu_str and mtu_str.isdigit():
+                        return min(int(mtu_str) - 80, 1420)
+            except (OSError, _sp.TimeoutExpired):
+                pass
+            # Fallback: parse netsh output, use LOWEST MTU (safe for WiFi/VPN)
             result = _sp.run(
                 ["netsh", "interface", "ipv4", "show", "interfaces"],
                 capture_output=True, text=True, timeout=10,
             )
-            # Find the highest MTU from connected interfaces (skip loopback)
-            import re as _re
             mtus = []
             for line in result.stdout.splitlines():
                 parts = line.split()
                 if len(parts) >= 4 and parts[0].isdigit() and parts[1].isdigit():
                     mtu_val = int(parts[1])
-                    if 500 < mtu_val <= 9000:  # reasonable range
+                    if 500 < mtu_val <= 9000:
                         mtus.append(mtu_val)
             if mtus:
-                return min(max(mtus) - 80, 1420)
+                return min(min(mtus) - 80, 1420)
+        elif sys.platform == "darwin":
+            import subprocess as _sp
+            import re as _re
+            # macOS: route -n get + networksetup/ifconfig for MTU
+            result = _sp.run(
+                ["route", "-n", "get", "8.8.8.8"],
+                capture_output=True, text=True, timeout=10,
+            )
+            iface_match = _re.search(r"interface:\s*(\S+)", result.stdout)
+            if iface_match:
+                iface = iface_match.group(1)
+                ifcfg = _sp.run(
+                    ["ifconfig", iface],
+                    capture_output=True, text=True, timeout=5,
+                )
+                mtu_match = _re.search(r"\bmtu\s+(\d+)", ifcfg.stdout)
+                if mtu_match:
+                    return min(int(mtu_match.group(1)) - 80, 1420)
         else:
             import subprocess as _sp
-            # Use ip route to find the outbound interface, then get its MTU
+            import re as _re
+            # Linux: ip route to find outbound interface, then read its MTU
             result = _sp.run(
                 ["ip", "route", "get", "8.8.8.8"],
                 capture_output=True, text=True, timeout=10,
             )
-            import re as _re
             iface_match = _re.search(r"\bdev\s+(\S+)", result.stdout)
             if iface_match:
                 iface = iface_match.group(1)

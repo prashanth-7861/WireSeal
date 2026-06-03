@@ -59,6 +59,17 @@ interface ChangelogEntry {
 
 const CHANGELOG: ChangelogEntry[] = [
   {
+    version: "0.9.38",
+    date: "2026-06-02",
+    highlights: [
+      "Network Discovery: new dashboard page to see all devices on your home LAN",
+      "Device scanner: passive ARP table + active ping sweep with progress indicator",
+      "Service discovery: mDNS/Bonjour and SSDP/UPnP find printers, media servers, file shares, smart home devices",
+      "OUI vendor lookup for 800+ manufacturers (Apple, Samsung, Intel, Raspberry Pi, etc.)",
+      "Optional zeroconf dependency for mDNS — install with pip install wireseal[network]",
+    ],
+  },
+  {
     version: "0.9.34",
     date: "2026-05-28",
     highlights: [

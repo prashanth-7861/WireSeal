@@ -13,6 +13,7 @@ from . import service as _service_module
 from . import ssh as _ssh_module
 from . import sftp as _sftp_module
 from . import client_mode as _client_mode_module
+from . import network as _network_module
 
 # Re-export all names from _shared (before remaining code, so remaining code can use them)
 for _api_shared_name in dir(_api_shared_module):
@@ -73,6 +74,11 @@ for _sftp_name in dir(_sftp_module):
 for _client_mode_name in dir(_client_mode_module):
     if not _client_mode_name.startswith("__"):
         globals()[_client_mode_name] = getattr(_client_mode_module, _client_mode_name)
+
+# Re-export all names from network
+for _network_name in dir(_network_module):
+    if not _network_name.startswith("__"):
+        globals()[_network_name] = getattr(_network_module, _network_name)
 
 
 """WireSeal REST API server.
@@ -320,6 +326,18 @@ _ROUTES: list[tuple[str, re.Pattern, Any]] = [
     ("POST",   re.compile(r"^/api/sftp/rename$"),                         _h_sftp_rename),
 
     ("POST",   re.compile(r"^/api/sftp/copy$"),                           _h_sftp_copy),
+
+    # Network discovery (device & service enumeration)
+
+    ("GET",    re.compile(r"^/api/network/devices$"),                     _h_network_devices),
+
+    ("POST",   re.compile(r"^/api/network/scan$"),                        _h_network_scan),
+
+    ("GET",    re.compile(r"^/api/network/scan/status$"),                 _h_network_scan_status),
+
+    ("GET",    re.compile(r"^/api/network/services$"),                    _h_network_services),
+
+    ("POST",   re.compile(r"^/api/network/services/scan$"),               _h_network_services_scan),
 
 ]
 

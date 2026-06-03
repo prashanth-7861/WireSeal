@@ -589,10 +589,11 @@ def _h_add_client(req: "_Handler", _groups: tuple) -> dict:
 
         builder       = ConfigBuilder()
         client_mtu    = req_mtu if req_mtu is not None else _detect_mtu()
+        client_dns    = _dns_for_tunnel_mode(tunnel_mode, lan_subnet)
         client_config = builder.render_client_config(
             client_private_key=priv_key_str,
             client_ip=allocated_ip,
-            dns_server="1.1.1.1, 8.8.8.8",
+            dns_server=client_dns,
             server_public_key=server_pub_key,
             psk=psk_str,
             server_endpoint=server_endpoint,
@@ -678,6 +679,7 @@ def _h_add_client(req: "_Handler", _groups: tuple) -> dict:
             "heartbeat_token": heartbeat_token,
             "tunnel_mode":     tunnel_mode,
             "allowed_ips":     allowed_ips,
+            "dns_server":      client_dns,
             # Access control fields
             "access_level":    ac_fields["access_level"],
             "privileges":      ac_fields["privileges"],
@@ -812,10 +814,12 @@ def _h_client_qr(req: "_Handler", groups: tuple) -> dict:
         if name not in state.clients:
             raise _ApiError(f"Client '{name}' not found.", 404)
         cdata = state.clients[name]
+        _tm = cdata.get("tunnel_mode", "full")
+        _ls = state.server.get("lan_subnet", "")
         config_str = ConfigBuilder().render_client_config(
             client_private_key=_extract(cdata["private_key"]),
             client_ip=cdata["ip"],
-            dns_server="1.1.1.1, 8.8.8.8",
+            dns_server=cdata.get("dns_server") or _dns_for_tunnel_mode(_tm, _ls),
             server_public_key=_extract(state.server["public_key"]),
             psk=_extract(cdata["psk"]),
             server_endpoint=_resolve_client_endpoint(state.server),
@@ -906,10 +910,12 @@ def _h_client_self_config(req: "_Handler", _groups: tuple) -> dict:
         _heartbeat_cooldown[f"_self_config_{token_hash}"] = now
 
         heartbeat_token = cdata.get("heartbeat_token", "")
+        _tm = cdata.get("tunnel_mode", "full")
+        _ls = state.server.get("lan_subnet", "")
         config_str = ConfigBuilder().render_client_config(
             client_private_key=_extract(cdata["private_key"]),
             client_ip=cdata["ip"],
-            dns_server="1.1.1.1, 8.8.8.8",
+            dns_server=cdata.get("dns_server") or _dns_for_tunnel_mode(_tm, _ls),
             server_public_key=_extract(state.server["public_key"]),
             psk=_extract(cdata["psk"]),
             server_endpoint=_resolve_client_endpoint(state.server),
@@ -958,10 +964,12 @@ def _h_client_config(req: "_Handler", groups: tuple) -> dict:
             heartbeat_token = _secrets_hb.token_hex(32)
             cdata["heartbeat_token"] = heartbeat_token
             vault.save(state, passphrase)
+        _tm = cdata.get("tunnel_mode", "full")
+        _ls = state.server.get("lan_subnet", "")
         config_str = ConfigBuilder().render_client_config(
             client_private_key=_extract(cdata["private_key"]),
             client_ip=cdata["ip"],
-            dns_server="1.1.1.1, 8.8.8.8",
+            dns_server=cdata.get("dns_server") or _dns_for_tunnel_mode(_tm, _ls),
             server_public_key=_extract(state.server["public_key"]),
             psk=_extract(cdata["psk"]),
             server_endpoint=_resolve_client_endpoint(state.server),
@@ -994,10 +1002,12 @@ def _h_client_config_download(req: "_Handler", groups: tuple) -> None:
         if name not in state.clients:
             raise _ApiError(f"Client '{name}' not found.", 404)
         cdata = state.clients[name]
+        _tm = cdata.get("tunnel_mode", "full")
+        _ls = state.server.get("lan_subnet", "")
         config_str = ConfigBuilder().render_client_config(
             client_private_key=_extract(cdata["private_key"]),
             client_ip=cdata["ip"],
-            dns_server="1.1.1.1, 8.8.8.8",
+            dns_server=cdata.get("dns_server") or _dns_for_tunnel_mode(_tm, _ls),
             server_public_key=_extract(state.server["public_key"]),
             psk=_extract(cdata["psk"]),
             server_endpoint=_resolve_client_endpoint(state.server),
@@ -1073,7 +1083,9 @@ def _h_rotate_client_keys(req: "_Handler", groups: tuple) -> dict:
         server_endpoint = _resolve_client_endpoint(server_data)
         subnet          = state.ip_pool.get("subnet", "192.168.1.0/24")
         prefix_length   = int(subnet.split("/")[1])
-        dns_server      = client_data.get("dns_server", "1.1.1.1, 8.8.8.8")
+        _tm = client_data.get("tunnel_mode", "full")
+        _ls = server_data.get("lan_subnet", "")
+        dns_server      = client_data.get("dns_server") or _dns_for_tunnel_mode(_tm, _ls)
 
         # Build new client config
         builder = ConfigBuilder()

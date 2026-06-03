@@ -2,7 +2,7 @@ import { useState, useEffect, useRef } from "react";
 import { NavLink, Outlet } from "react-router";
 import {
   Wifi, TerminalSquare, Settings, Info, LogOut,
-  Circle, WifiOff, KeyRound, Trash2, AlertCircle, FolderOpen,
+  Circle, WifiOff, KeyRound, Trash2, AlertCircle, FolderOpen, Radar,
 } from "lucide-react";
 import { api } from "../api";
 
@@ -14,6 +14,7 @@ const navItems = [
   { to: "/client", label: "Connect", icon: Wifi, end: true },
   { to: "/client/terminal", label: "Terminal", icon: TerminalSquare },
   { to: "/client/sftp", label: "SFTP", icon: FolderOpen },
+  { to: "/client/network", label: "Network", icon: Radar },
   { to: "/client/settings", label: "Settings", icon: Settings },
   { to: "/about", label: "About", icon: Info },
 ];

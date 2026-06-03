@@ -2,8 +2,12 @@
 [Interface]
 PrivateKey = {{ client_private_key }}
 Address = {{ client_ip }}/32
+{% if dns_server %}
 DNS = {{ dns_server }}
+{% endif %}
+{% if mtu %}
 MTU = {{ mtu }}
+{% endif %}
 
 [Peer]
 PublicKey = {{ server_public_key }}

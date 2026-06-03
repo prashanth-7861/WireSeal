@@ -233,6 +233,49 @@ export interface DnsStatus {
   platform?: string; // "win32" | "linux" | "darwin"
 }
 
+// ── Network Discovery ──────────────────────────────────────────────────────
+export interface NetworkDevice {
+  ip: string;
+  mac: string;
+  hostname: string;
+  vendor: string;
+  source: string;
+  last_seen: string;
+}
+
+export interface NetworkDevicesResponse {
+  devices: NetworkDevice[];
+  lan_subnet: string;
+  platform: string;
+  scan_available: boolean;
+}
+
+export interface ScanStatus {
+  running: boolean;
+  progress: { total: number; done: number; status: string };
+  devices: NetworkDevice[];
+}
+
+export interface NetworkService {
+  name: string;
+  type: string;
+  protocol: string;
+  host: string;
+  ip: string;
+  port: number;
+  manufacturer: string;
+  model: string;
+  properties: Record<string, string>;
+}
+
+export interface NetworkServicesResponse {
+  services: NetworkService[];
+  mdns_available: boolean;
+  ssdp_available: boolean;
+  cached: boolean;
+  cache_age_seconds: number;
+}
+
 export interface BackupConfig {
   enabled: boolean;
   destination: "local" | "ssh" | "webdav";
@@ -640,6 +683,22 @@ export const api = {
 
   removeDnsMapping: (hostname: string) =>
     _fetch<{ ok: boolean }>("DELETE", `/dns/${encodeURIComponent(hostname)}`),
+
+  // ── Network Discovery ────────────────────────────────────────────────────
+  getNetworkDevices: () =>
+    _fetch<NetworkDevicesResponse>("GET", "/network/devices"),
+
+  scanNetwork: () =>
+    _fetch<{ ok: boolean; reason?: string; retry_after?: number }>("POST", "/network/scan"),
+
+  getNetworkScanStatus: () =>
+    _fetch<ScanStatus>("GET", "/network/scan/status"),
+
+  getNetworkServices: () =>
+    _fetch<NetworkServicesResponse>("GET", "/network/services"),
+
+  scanNetworkServices: () =>
+    _fetch<NetworkServicesResponse>("POST", "/network/services/scan"),
 
   // ── Backup (7.5 encrypted local backup) ──────────────────────────────────
   getBackupConfig: (): Promise<{ backup_config: BackupConfig }> =>

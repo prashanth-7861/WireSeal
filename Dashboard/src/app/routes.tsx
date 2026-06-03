@@ -8,6 +8,7 @@ import { Settings } from "./pages/Settings";
 import { About } from "./pages/About";
 import { Admin } from "./pages/Admin";
 import { Dns } from "./pages/Dns";
+import { Network } from "./pages/Network";
 import { Backup } from "./pages/Backup";
 import { TwoFactor } from "./pages/TwoFactor";
 import { Connect } from "./pages/client/Connect";
@@ -28,12 +29,14 @@ export const router = createBrowserRouter([
       { path: "settings", Component: Settings },
       { path: "admin", Component: Admin },
       { path: "dns", Component: Dns },
+      { path: "network", Component: Network },
       { path: "two-factor", Component: TwoFactor },
       { path: "backup", Component: Backup },
       // Client mode routes
       { path: "client", Component: Connect },
       { path: "client/terminal", Component: Terminal },
       { path: "client/sftp", Component: Sftp },
+      { path: "client/network", Component: Network },
       { path: "client/settings", Component: ClientSettings },
       // Shared routes
       { path: "about", Component: About },
