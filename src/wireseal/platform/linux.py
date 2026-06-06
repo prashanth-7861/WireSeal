@@ -1250,6 +1250,16 @@ class LinuxAdapter(AbstractPlatformAdapter):
         net = ipaddress.IPv4Interface(match.group(1)).network
         return str(net)
 
+    def detect_default_gateway(self) -> str:
+        result = subprocess.run(
+            ["ip", "route", "show", "default"],
+            shell=False, check=True, capture_output=True, text=True, timeout=10,
+        )
+        match = re.search(r"default\s+via\s+(\d+\.\d+\.\d+\.\d+)", result.stdout)
+        if not match:
+            raise SetupError("Cannot detect default gateway from routing table")
+        return match.group(1)
+
     # ------------------------------------------------------------------
     # API server background-service lifecycle (systemd unit).
     #

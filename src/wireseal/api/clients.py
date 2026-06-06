@@ -561,17 +561,24 @@ def _h_add_client(req: "_Handler", _groups: tuple) -> dict:
 
         vpn_subnet  = state.ip_pool.get("subnet", "192.168.1.0/24")
         lan_subnet  = state.server.get("lan_subnet", "")
+        lan_gateway = state.server.get("lan_gateway", "")
 
-        # Re-detect LAN subnet if not stored (server init predates detection)
-        if not lan_subnet and tunnel_mode == "split-lan":
+        # Re-detect LAN subnet and gateway if not stored
+        if tunnel_mode == "split-lan":
             try:
                 adapter = get_adapter()
-                lan_subnet = adapter.detect_lan_subnet()
-                if lan_subnet:
-                    state.server["lan_subnet"] = lan_subnet
-                    _session["cache"]["server"]["lan_subnet"] = lan_subnet
+                if not lan_subnet:
+                    lan_subnet = adapter.detect_lan_subnet()
+                    if lan_subnet:
+                        state.server["lan_subnet"] = lan_subnet
+                        _session["cache"]["server"]["lan_subnet"] = lan_subnet
+                if not lan_gateway:
+                    lan_gateway = adapter.detect_default_gateway()
+                    if lan_gateway:
+                        state.server["lan_gateway"] = lan_gateway
+                        _session["cache"]["server"]["lan_gateway"] = lan_gateway
             except (OSError, ValueError, Exception) as e:
-                _clients_log.debug("LAN subnet detection failed during add-client", exc_info=True)
+                _clients_log.debug("LAN detection failed during add-client", exc_info=True)
 
         # Compute AllowedIPs based on tunnel_mode:
         #   full      - route ALL traffic through VPN (0.0.0.0/0)
@@ -589,7 +596,7 @@ def _h_add_client(req: "_Handler", _groups: tuple) -> dict:
 
         builder       = ConfigBuilder()
         client_mtu    = req_mtu if req_mtu is not None else _detect_mtu()
-        client_dns    = _dns_for_tunnel_mode(tunnel_mode, lan_subnet)
+        client_dns    = _dns_for_tunnel_mode(tunnel_mode, lan_subnet, lan_gateway)
         client_config = builder.render_client_config(
             client_private_key=priv_key_str,
             client_ip=allocated_ip,
@@ -816,10 +823,11 @@ def _h_client_qr(req: "_Handler", groups: tuple) -> dict:
         cdata = state.clients[name]
         _tm = cdata.get("tunnel_mode", "full")
         _ls = state.server.get("lan_subnet", "")
+        _lg = state.server.get("lan_gateway", "")
         config_str = ConfigBuilder().render_client_config(
             client_private_key=_extract(cdata["private_key"]),
             client_ip=cdata["ip"],
-            dns_server=cdata.get("dns_server") or _dns_for_tunnel_mode(_tm, _ls),
+            dns_server=cdata.get("dns_server") or _dns_for_tunnel_mode(_tm, _ls, _lg),
             server_public_key=_extract(state.server["public_key"]),
             psk=_extract(cdata["psk"]),
             server_endpoint=_resolve_client_endpoint(state.server),
@@ -912,10 +920,11 @@ def _h_client_self_config(req: "_Handler", _groups: tuple) -> dict:
         heartbeat_token = cdata.get("heartbeat_token", "")
         _tm = cdata.get("tunnel_mode", "full")
         _ls = state.server.get("lan_subnet", "")
+        _lg = state.server.get("lan_gateway", "")
         config_str = ConfigBuilder().render_client_config(
             client_private_key=_extract(cdata["private_key"]),
             client_ip=cdata["ip"],
-            dns_server=cdata.get("dns_server") or _dns_for_tunnel_mode(_tm, _ls),
+            dns_server=cdata.get("dns_server") or _dns_for_tunnel_mode(_tm, _ls, _lg),
             server_public_key=_extract(state.server["public_key"]),
             psk=_extract(cdata["psk"]),
             server_endpoint=_resolve_client_endpoint(state.server),
@@ -966,10 +975,11 @@ def _h_client_config(req: "_Handler", groups: tuple) -> dict:
             vault.save(state, passphrase)
         _tm = cdata.get("tunnel_mode", "full")
         _ls = state.server.get("lan_subnet", "")
+        _lg = state.server.get("lan_gateway", "")
         config_str = ConfigBuilder().render_client_config(
             client_private_key=_extract(cdata["private_key"]),
             client_ip=cdata["ip"],
-            dns_server=cdata.get("dns_server") or _dns_for_tunnel_mode(_tm, _ls),
+            dns_server=cdata.get("dns_server") or _dns_for_tunnel_mode(_tm, _ls, _lg),
             server_public_key=_extract(state.server["public_key"]),
             psk=_extract(cdata["psk"]),
             server_endpoint=_resolve_client_endpoint(state.server),
@@ -1004,10 +1014,11 @@ def _h_client_config_download(req: "_Handler", groups: tuple) -> None:
         cdata = state.clients[name]
         _tm = cdata.get("tunnel_mode", "full")
         _ls = state.server.get("lan_subnet", "")
+        _lg = state.server.get("lan_gateway", "")
         config_str = ConfigBuilder().render_client_config(
             client_private_key=_extract(cdata["private_key"]),
             client_ip=cdata["ip"],
-            dns_server=cdata.get("dns_server") or _dns_for_tunnel_mode(_tm, _ls),
+            dns_server=cdata.get("dns_server") or _dns_for_tunnel_mode(_tm, _ls, _lg),
             server_public_key=_extract(state.server["public_key"]),
             psk=_extract(cdata["psk"]),
             server_endpoint=_resolve_client_endpoint(state.server),
@@ -1085,7 +1096,8 @@ def _h_rotate_client_keys(req: "_Handler", groups: tuple) -> dict:
         prefix_length   = int(subnet.split("/")[1])
         _tm = client_data.get("tunnel_mode", "full")
         _ls = server_data.get("lan_subnet", "")
-        dns_server      = client_data.get("dns_server") or _dns_for_tunnel_mode(_tm, _ls)
+        _lg = server_data.get("lan_gateway", "")
+        dns_server      = client_data.get("dns_server") or _dns_for_tunnel_mode(_tm, _ls, _lg)
 
         # Build new client config
         builder = ConfigBuilder()

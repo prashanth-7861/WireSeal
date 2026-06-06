@@ -59,6 +59,16 @@ interface ChangelogEntry {
 
 const CHANGELOG: ChangelogEntry[] = [
   {
+    version: "0.9.39",
+    date: "2026-06-05",
+    highlights: [
+      "Split-LAN DNS fix: auto-detects actual router gateway instead of assuming first subnet IP",
+      "Windows runtime IP forwarding: split-LAN works immediately without reboot",
+      "Gateway detection on all platforms: Linux (ip route), macOS (route), Windows (Get-NetRoute)",
+      "All 6 config export paths updated to use detected gateway for DNS",
+    ],
+  },
+  {
     version: "0.9.38",
     date: "2026-06-02",
     highlights: [

@@ -627,6 +627,17 @@ class MacOSAdapter(AbstractPlatformAdapter):
         net = ipaddress.IPv4Interface(f"{ip_str}/{prefix}").network
         return str(net)
 
+    def detect_default_gateway(self) -> str:
+        result = self._run(["route", "-n", "get", "default"], check=True)
+        output = result.stdout.decode("utf-8", errors="replace")
+        for line in output.splitlines():
+            stripped = line.strip()
+            if stripped.startswith("gateway:"):
+                parts = stripped.split()
+                if len(parts) >= 2:
+                    return parts[1]
+        raise SetupError("Cannot detect default gateway from routing table")
+
     # ------------------------------------------------------------------
     # Network services (SSH, hardening, security status)
     # ------------------------------------------------------------------

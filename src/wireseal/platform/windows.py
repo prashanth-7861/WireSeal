@@ -591,7 +591,10 @@ class WindowsAdapter(AbstractPlatformAdapter):
             current_value = 0
 
         if current_value == 1:
-            return  # already enabled -- nothing to do
+            # Registry set, but also apply runtime forwarding in case
+            # the reboot hasn't happened yet.
+            self._enable_runtime_forwarding()
+            return
 
         # Set IPEnableRouter = 1
         with winreg.OpenKey(
@@ -599,12 +602,14 @@ class WindowsAdapter(AbstractPlatformAdapter):
         ) as key:
             winreg.SetValueEx(key, "IPEnableRouter", 0, winreg.REG_DWORD, 1)
 
-        # Warn user that a reboot is required for IP forwarding
+        # Apply runtime forwarding immediately (no reboot needed for this)
+        self._enable_runtime_forwarding()
+
+        # Warn user that registry change needs reboot for full persistence
         print(
-            "[!] IP routing enabled in registry (IPEnableRouter=1). "
-            "A system reboot is required for this to take effect.\n"
-            "    Without a reboot, split-lan and full tunnel modes will NOT "
-            "route client traffic through this server.",
+            "[!] IP routing enabled in registry (IPEnableRouter=1) and "
+            "activated at runtime via Set-NetIPInterface.\n"
+            "    A reboot is still recommended for full persistence.",
             file=sys.stderr,
         )
 
@@ -613,6 +618,23 @@ class WindowsAdapter(AbstractPlatformAdapter):
         if not WG_CONFIG_DIR.exists():
             WG_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
         sentinel.touch()
+
+    def _enable_runtime_forwarding(self) -> None:
+        """Enable IP forwarding at runtime via Set-NetIPInterface.
+
+        This takes effect immediately without requiring a reboot.
+        Applied to all interfaces so VPN traffic can be forwarded.
+        """
+        subprocess.run(
+            [
+                "powershell", "-NoProfile", "-Command",
+                "Get-NetIPInterface -AddressFamily IPv4 "
+                "| Where-Object { $_.Forwarding -ne 'Enabled' } "
+                "| Set-NetIPInterface -Forwarding Enabled",
+            ],
+            shell=False, capture_output=True, timeout=30,
+            creationflags=_NO_WIN,
+        )
 
     # ------------------------------------------------------------------
     # 8 & 9. Tunnel service lifecycle
@@ -1279,6 +1301,22 @@ class WindowsAdapter(AbstractPlatformAdapter):
         import ipaddress
         net = ipaddress.IPv4Interface(f"{lines[0]}/{lines[1]}").network
         return str(net)
+
+    def detect_default_gateway(self) -> str:
+        result = subprocess.run(
+            [
+                "powershell", "-NoProfile", "-Command",
+                "(Get-NetRoute -DestinationPrefix '0.0.0.0/0' "
+                "| Sort-Object RouteMetric "
+                "| Select-Object -First 1).NextHop",
+            ],
+            capture_output=True, text=True, shell=False,
+            check=True, timeout=15, creationflags=_NO_WIN,
+        )
+        gateway = result.stdout.strip()
+        if not gateway or not re.match(r"^\d+\.\d+\.\d+\.\d+$", gateway):
+            raise SetupError("Cannot detect default gateway from routing table")
+        return gateway
 
     # ------------------------------------------------------------------
     # API server background-service lifecycle (Task Scheduler).

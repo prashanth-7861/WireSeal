@@ -1,13 +1,15 @@
 # WireSeal
 
-WireGuard server automation with zero plaintext secrets on disk. Manages key generation,
-client lifecycle, firewall rules, and optional dynamic DNS — all protected by a dual-layer
-AES-256-GCM / ChaCha20-Poly1305 encrypted vault. If the vault file is stolen without the
-passphrase, no cryptographic material is exposed.
+Secure home network access — manage encrypted WireGuard tunnels, client connections, and
+LAN device access with zero plaintext secrets on disk. Automates key generation, client
+lifecycle, cross-platform firewall rules, and optional dynamic DNS. All cryptographic
+material lives inside a dual-layer AES-256-GCM / ChaCha20-Poly1305 encrypted vault with
+Argon2id key derivation. If the vault file is stolen without the passphrase, no keys,
+tokens, or secrets are exposed.
 
 [![CI](https://github.com/prashanth-7861/WireSeal/actions/workflows/build.yml/badge.svg)](https://github.com/prashanth-7861/WireSeal/actions/workflows/build.yml)
 [![Python](https://img.shields.io/badge/python-3.12%20%E2%80%93%203.14-blue)](https://python.org)
-[![Version](https://img.shields.io/badge/version-0.9.35-green)](https://github.com/prashanth-7861/WireSeal/releases)
+[![Version](https://img.shields.io/badge/version-0.9.39-green)](https://github.com/prashanth-7861/WireSeal/releases)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 [![Website](https://img.shields.io/badge/website-wireseal.vercel.app-blue)](https://wireseal.vercel.app)
 
@@ -56,8 +58,12 @@ passphrase, no cryptographic material is exposed.
 
 ### Network & Automation
 - **Firewall automation** — nftables + NAT masquerade (Linux), pf anchor (macOS),
-  netsh advfirewall (Windows); IP forwarding enabled automatically
+  netsh advfirewall + New-NetNat (Windows); IP forwarding enabled automatically
 - **Auto-detect optimal MTU** — reads outbound interface MTU, subtracts WireGuard overhead
+- **Default gateway detection** — auto-detects actual router IP for split-LAN DNS instead
+  of guessing first usable subnet host (works with .1, .254, or any gateway address)
+- **Runtime IP forwarding (Windows)** — applies `Set-NetIPInterface -Forwarding Enabled`
+  immediately; no reboot required for split-LAN/full tunnel to work on first run
 - **Automated network setup** — IP forwarding, firewalld port opening, and OpenSSH server
   configured automatically during `wireseal init`
 - **Optional DuckDNS** dynamic DNS with 2-of-3 IP consensus
@@ -117,8 +123,9 @@ passphrase, no cryptographic material is exposed.
 - **Tunnel mode selection** — choose per-client routing at provisioning time:
   `split-vpn`, `split-lan`, or `full` — all modes route internet through VPN for encryption;
   mode controls LAN device access scope
-- **LAN subnet auto-detection** — server detects its own LAN subnet on init; used to compute
-  `AllowedIPs` for `split-lan` clients without manual configuration
+- **LAN subnet + gateway auto-detection** — server detects its own LAN subnet and default
+  gateway on init; `split-lan` clients get correct DNS (actual router IP) and `AllowedIPs`
+  without manual configuration
 - **Client Settings page** — configure auto-connect profile, auto-lock timeout, kill switch,
   and per-session DNS override from the dashboard
 - **DNS override** — replace DNS servers in any client config at connect time without

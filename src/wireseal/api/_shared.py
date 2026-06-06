@@ -1315,7 +1315,11 @@ def _extract(value: Any) -> str:
     return str(value)
 
 
-def _dns_for_tunnel_mode(tunnel_mode: str, lan_subnet: str = "") -> str:
+def _dns_for_tunnel_mode(
+    tunnel_mode: str,
+    lan_subnet: str = "",
+    lan_gateway: str = "",
+) -> str:
     """Compute DNS server(s) appropriate for the tunnel mode.
 
     - full:      public DNS (all traffic tunneled, always reachable)
@@ -1328,17 +1332,25 @@ def _dns_for_tunnel_mode(tunnel_mode: str, lan_subnet: str = "") -> str:
     network. WiFi/VPN networks that block or intercept external DNS break
     the tunnel. Using the LAN gateway (which IS in AllowedIPs) routes DNS
     through the tunnel reliably.
+
+    Args:
+        lan_gateway: Actual default gateway IP detected from routing table.
+                     Preferred over guessing first usable IP from subnet.
     """
     if tunnel_mode == "full":
         return "1.1.1.1, 8.8.8.8"
-    if tunnel_mode == "split-lan" and lan_subnet:
-        import ipaddress as _ipa
-        try:
-            net = _ipa.IPv4Network(lan_subnet, strict=False)
-            gateway = str(next(net.hosts()))  # first usable IP = router/gateway
-            return gateway
-        except (ValueError, StopIteration):
-            pass
+    if tunnel_mode == "split-lan":
+        # Prefer actual detected gateway over first-usable-IP guess.
+        # Routers use .1, .254, or anything — only the real gateway is reliable.
+        if lan_gateway:
+            return lan_gateway
+        if lan_subnet:
+            import ipaddress as _ipa
+            try:
+                net = _ipa.IPv4Network(lan_subnet, strict=False)
+                return str(next(net.hosts()))
+            except (ValueError, StopIteration):
+                pass
     # split-vpn or fallback: no DNS override, use system DNS
     return ""
 

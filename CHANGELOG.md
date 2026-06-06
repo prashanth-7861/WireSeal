@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.9.39] — 2026-06-05
+
+### Fixed
+- **Split-LAN DNS gateway bug** — `_dns_for_tunnel_mode` assumed first usable IP in LAN subnet (e.g., `.1`) as the router/DNS server. Routers at `.254` or other addresses got wrong DNS, breaking name resolution for split-LAN clients. Now auto-detects actual default gateway from the OS routing table.
+- **Windows IP forwarding requires reboot** — split-LAN and full tunnel modes failed silently on fresh Windows installs because `IPEnableRouter` registry key only takes effect after reboot. Now applies `Set-NetIPInterface -Forwarding Enabled` at runtime for immediate effect.
+
+### Added
+- **`detect_default_gateway()`** on all 3 platforms — Linux (`ip route`), macOS (`route -n get default`), Windows (`Get-NetRoute`). Stored in vault as `lan_gateway` alongside `lan_subnet`.
+- **Runtime IP forwarding on Windows** — `_enable_runtime_forwarding()` enables forwarding on all IPv4 interfaces immediately, even before the recommended reboot.
+
+### Changed
+- **`_dns_for_tunnel_mode` signature** — now accepts optional `lan_gateway` parameter; prefers detected gateway over first-usable-IP fallback. All 6 call sites (add-client + 5 re-export paths) updated.
+- **README** — enhanced project description with security details; updated version badge to 0.9.39; documented gateway auto-detection and runtime IP forwarding features.
+- **pyproject.toml** — updated description to "Secure home network access — manage encrypted tunnels, client connections, and device access with zero plaintext secrets".
+
+---
+
 ## [0.9.35] — 2026-05-30
 
 ### Fixed

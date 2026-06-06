@@ -320,6 +320,24 @@ class AbstractPlatformAdapter(ABC):
         raise NotImplementedError
 
     # ------------------------------------------------------------------
+    # 14. Default gateway detection
+    # ------------------------------------------------------------------
+
+    def detect_default_gateway(self) -> str:
+        """Return the IPv4 default gateway of the outbound interface.
+
+        Used by split-LAN mode to set DNS to the actual router IP rather
+        than guessing the first usable host in the LAN subnet.
+
+        Returns:
+            Gateway IPv4 address string (e.g., ``"192.168.1.254"``).
+
+        Raises:
+            SetupError: If the gateway cannot be determined.
+        """
+        raise NotImplementedError
+
+    # ------------------------------------------------------------------
     # Concrete helper (inherited by all subclasses)
     # ------------------------------------------------------------------
 
