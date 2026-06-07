@@ -178,7 +178,21 @@ class LinuxAdapter(AbstractPlatformAdapter):
             "systemctl": "systemd",
         }
 
-        missing = [tool for tool in required if shutil.which(tool) is None]
+        # Probe known fallback paths for tools that may not be on a
+        # service/cron PATH (e.g. /usr/sbin is absent from systemd minimal PATH).
+        _fallbacks = {
+            "wg":       ["/usr/bin/wg", "/usr/sbin/wg", "/sbin/wg", "/usr/local/bin/wg"],
+            "wg-quick": ["/usr/bin/wg-quick", "/usr/sbin/wg-quick", "/sbin/wg-quick", "/usr/local/bin/wg-quick"],
+            "nft":      ["/usr/sbin/nft", "/sbin/nft", "/usr/bin/nft"],
+            "systemctl": ["/usr/bin/systemctl", "/bin/systemctl"],
+        }
+
+        def _find(tool: str) -> bool:
+            if shutil.which(tool) is not None:
+                return True
+            return any(Path(p).exists() for p in _fallbacks.get(tool, []))
+
+        missing = [tool for tool in required if not _find(tool)]
 
         if missing:
             missing_str = ", ".join(missing)
@@ -208,7 +222,9 @@ class LinuxAdapter(AbstractPlatformAdapter):
         Idempotent: returns immediately if wg is already on PATH.
         Raises SetupError on installation failure.
         """
-        if shutil.which("wg") is not None:
+        if shutil.which("wg") is not None or any(
+            Path(p).exists() for p in ("/usr/bin/wg", "/usr/sbin/wg", "/sbin/wg")
+        ):
             return  # already installed
 
         try:

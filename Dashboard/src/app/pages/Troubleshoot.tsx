@@ -1,8 +1,9 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import {
   Wrench, CheckCircle, XCircle, AlertTriangle, RefreshCw,
-  Wifi, WifiOff, Shield, Server, Globe, HardDrive, Terminal,
-  Copy, ChevronDown, ChevronRight, Loader2, Cpu, Lock,
+  Wifi, Globe, Shield, Server,
+  ChevronDown, ChevronRight, Loader2, Zap, ShieldCheck,
+  Clock, Activity,
 } from "lucide-react";
 import { api, type Status, type SecurityStatus } from "../api";
 
@@ -16,8 +17,13 @@ interface CheckResult {
   severity: Severity;
   message: string;
   fix?: string;
-  command?: string;
   details?: string;
+  /** If present, renders a "Fix" button. Must return a user-safe message. */
+  action?: () => Promise<string>;
+  actionLabel?: string;
+  /** If true, show a confirmation dialog before running the action. */
+  confirmRequired?: boolean;
+  confirmMessage?: string;
 }
 
 interface CheckGroup {
@@ -26,7 +32,20 @@ interface CheckGroup {
   checks: CheckResult[];
 }
 
-// No module-level cache — diagnostic data must not leak across user sessions
+// ── Security: sanitize error messages ──────────────────────────────────────
+
+/** Strip internal details from API errors before displaying to user. */
+function sanitizeError(e: unknown): string {
+  if (!(e instanceof Error)) return "Operation failed. Please try again.";
+  const msg = e.message;
+  // Strip file paths, stack traces, and internal details
+  if (/traceback|\/home\/|\/root\/|C:\\|\/etc\/|line \d+/i.test(msg)) {
+    return "Operation failed due to a server error.";
+  }
+  // Truncate long messages
+  if (msg.length > 120) return msg.slice(0, 117) + "...";
+  return msg;
+}
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 
@@ -35,20 +54,92 @@ function SeverityIcon({ severity }: { severity: Severity }) {
     case "pass": return <CheckCircle className="w-4 h-4 text-green-500 flex-shrink-0" />;
     case "warn": return <AlertTriangle className="w-4 h-4 text-yellow-500 flex-shrink-0" />;
     case "fail": return <XCircle className="w-4 h-4 text-red-500 flex-shrink-0" />;
-    case "info": return <Globe className="w-4 h-4 text-blue-500 flex-shrink-0" />;
+    case "info": return <Activity className="w-4 h-4 text-blue-500 flex-shrink-0" />;
   }
 }
 
-function CopyButton({ text }: { text: string }) {
-  const [copied, setCopied] = useState(false);
+function ConfirmDialog({ message, onConfirm, onCancel }: {
+  message: string;
+  onConfirm: () => void;
+  onCancel: () => void;
+}) {
   return (
-    <button
-      onClick={() => { navigator.clipboard.writeText(text); setCopied(true); setTimeout(() => setCopied(false), 2000); }}
-      className="ml-2 text-xs text-gray-400 hover:text-gray-600"
-      title="Copy command"
-    >
-      {copied ? <CheckCircle className="w-3.5 h-3.5 text-green-500" /> : <Copy className="w-3.5 h-3.5" />}
-    </button>
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
+      <div className="bg-white rounded-xl shadow-xl border border-gray-200 p-6 max-w-sm w-full mx-4">
+        <div className="flex items-start gap-3 mb-4">
+          <AlertTriangle className="w-5 h-5 text-amber-500 mt-0.5 flex-shrink-0" />
+          <div>
+            <h3 className="font-semibold text-gray-900 mb-1">Confirm Action</h3>
+            <p className="text-sm text-gray-600">{message}</p>
+          </div>
+        </div>
+        <div className="flex justify-end gap-2">
+          <button
+            onClick={onCancel}
+            className="px-4 py-2 text-sm text-gray-700 bg-gray-100 rounded-lg hover:bg-gray-200"
+          >
+            Cancel
+          </button>
+          <button
+            onClick={onConfirm}
+            className="px-4 py-2 text-sm text-white bg-orange-600 rounded-lg hover:bg-orange-700"
+          >
+            Proceed
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function FixButton({ action, label, confirmRequired, confirmMessage, onDone }: {
+  action: () => Promise<string>;
+  label: string;
+  confirmRequired?: boolean;
+  confirmMessage?: string;
+  onDone: (msg: string, ok: boolean) => void;
+}) {
+  const [busy, setBusy] = useState(false);
+  const [showConfirm, setShowConfirm] = useState(false);
+  const cooldownRef = useRef(false);
+
+  const execute = async () => {
+    if (cooldownRef.current) return;
+    cooldownRef.current = true;
+    setBusy(true);
+    try {
+      const msg = await action();
+      onDone(msg, true);
+    } catch (e: unknown) {
+      onDone(sanitizeError(e), false);
+    } finally {
+      setBusy(false);
+      setTimeout(() => { cooldownRef.current = false; }, 2000);
+    }
+  };
+
+  return (
+    <>
+      <button
+        onClick={() => {
+          if (busy || cooldownRef.current) return;
+          if (confirmRequired) { setShowConfirm(true); return; }
+          execute();
+        }}
+        disabled={busy}
+        className="flex items-center gap-1.5 px-3 py-1.5 bg-orange-600 text-white rounded-lg hover:bg-orange-700 disabled:opacity-50 text-xs font-medium transition-colors"
+      >
+        {busy ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Zap className="w-3.5 h-3.5" />}
+        {busy ? "Applying..." : label}
+      </button>
+      {showConfirm && (
+        <ConfirmDialog
+          message={confirmMessage || `Are you sure you want to ${label.toLowerCase()}?`}
+          onConfirm={() => { setShowConfirm(false); execute(); }}
+          onCancel={() => setShowConfirm(false)}
+        />
+      )}
+    </>
   );
 }
 
@@ -62,8 +153,7 @@ async function runApiCheck(): Promise<CheckResult> {
     return {
       id: "api", label: "API Server", severity: "fail",
       message: "Cannot reach the WireSeal API server",
-      fix: "Start the API server with the command below, or check if the service is running.",
-      command: "sudo wireseal serve",
+      fix: "The API server is not running or not reachable. Verify the server process is active.",
     };
   }
 }
@@ -74,17 +164,20 @@ async function runVaultCheck(): Promise<CheckResult> {
     if (info.state === "uninitialized") {
       return {
         id: "vault", label: "Vault", severity: "warn",
-        message: "Vault not initialized — no server configuration exists yet",
-        fix: "Initialize the vault to create your WireGuard server.",
-        command: "sudo wireseal init --subnet 10.0.0.0/24 --port 51820",
+        message: "Vault not initialized",
+        fix: "No server configuration exists yet. Go to the Setup page to initialize.",
       };
     }
     if (info.state === "locked") {
-      return { id: "vault", label: "Vault", severity: "info", message: "Vault is locked — unlock it to manage clients" };
+      return {
+        id: "vault", label: "Vault", severity: "info",
+        message: "Vault is locked",
+        fix: "Enter your passphrase on the lock screen to unlock and manage the VPN.",
+      };
     }
-    return { id: "vault", label: "Vault", severity: "pass", message: "Vault is unlocked and ready" };
+    return { id: "vault", label: "Vault", severity: "pass", message: "Vault is unlocked and operational" };
   } catch {
-    return { id: "vault", label: "Vault", severity: "fail", message: "Could not check vault state", fix: "API server may be down." };
+    return { id: "vault", label: "Vault", severity: "fail", message: "Could not verify vault state" };
   }
 }
 
@@ -95,22 +188,26 @@ async function runWireGuardCheck(): Promise<CheckResult> {
       const peerCount = status.peers?.length ?? 0;
       return {
         id: "wg", label: "WireGuard Tunnel", severity: "pass",
-        message: `WireGuard tunnel is running with ${peerCount} peer(s) configured`,
+        message: `Tunnel active with ${peerCount} peer(s)`,
       };
     }
     return {
       id: "wg", label: "WireGuard Tunnel", severity: "warn",
       message: "WireGuard tunnel is not running",
-      fix: "Start the tunnel or check if WireGuard is installed.",
-      command: "sudo wg-quick up wg0",
-      details: "If wg-quick is not found, WireGuard may not be installed. Install it with your package manager.",
+      fix: "The VPN tunnel is down. Start it to accept incoming connections.",
+      action: async () => {
+        const res = await api.startServer();
+        return res.note === "already running" ? "Tunnel was already running" : "Tunnel started successfully";
+      },
+      actionLabel: "Start Tunnel",
+      confirmRequired: true,
+      confirmMessage: "This will start the WireGuard VPN tunnel and begin accepting connections. Continue?",
     };
   } catch {
     return {
       id: "wg", label: "WireGuard Tunnel", severity: "fail",
-      message: "Cannot check WireGuard status — vault may be locked or WireGuard not installed",
-      fix: "Install WireGuard and ensure the vault is unlocked.",
-      command: "sudo apt install wireguard-tools  # Debian/Ubuntu\nsudo pacman -S wireguard-tools    # Arch\nsudo dnf install wireguard-tools  # Fedora",
+      message: "Cannot determine tunnel status",
+      fix: "Unlock the vault first, then verify WireGuard is installed on this system.",
     };
   }
 }
@@ -122,8 +219,7 @@ async function runClientCheck(): Promise<CheckResult> {
       return {
         id: "clients", label: "VPN Clients", severity: "warn",
         message: "No VPN clients configured",
-        fix: "Add a client to start using the VPN.",
-        command: "sudo wireseal add-client my-phone",
+        fix: "Navigate to the Clients page to add your first device.",
       };
     }
     return {
@@ -131,7 +227,7 @@ async function runClientCheck(): Promise<CheckResult> {
       message: `${clients.clients.length} client(s) configured`,
     };
   } catch {
-    return { id: "clients", label: "VPN Clients", severity: "info", message: "Cannot list clients — vault may be locked" };
+    return { id: "clients", label: "VPN Clients", severity: "info", message: "Cannot retrieve client list" };
   }
 }
 
@@ -153,17 +249,24 @@ async function runSecurityCheck(): Promise<CheckResult[]> {
         message: `All ${total} security checks passed`,
       });
     } else {
+      const failing = sec.checks.filter(c => !c.ok);
       results.push({
         id: "security-score", label: "Security Audit", severity: "warn",
-        message: `${passed}/${total} security checks passed`,
-        fix: "Go to the Security page to review and apply server hardening.",
+        message: `${passed}/${total} security checks passed (${failing.length} issue${failing.length !== 1 ? "s" : ""})`,
+        fix: "Server hardening will apply firewall rules, file permissions, and kernel parameters.",
+        action: async () => {
+          const res = await api.hardenServer();
+          const count = res.actions?.length ?? 0;
+          return `${count} hardening action${count !== 1 ? "s" : ""} applied successfully`;
+        },
+        actionLabel: "Harden Server",
+        confirmRequired: true,
+        confirmMessage: "This will modify firewall rules, file permissions, and system parameters to improve security. These changes are safe but may require a service restart. Continue?",
       });
-      // Add top 3 failing checks as detail
-      const failing = sec.checks.filter(c => !c.ok).slice(0, 3);
-      for (const c of failing) {
+      for (const c of failing.slice(0, 4)) {
         results.push({
           id: `security-${c.id}`, label: c.label, severity: "warn",
-          message: c.detail || "Check failed",
+          message: c.detail || "Check did not pass",
           fix: c.fix || undefined,
         });
       }
@@ -172,7 +275,7 @@ async function runSecurityCheck(): Promise<CheckResult[]> {
   } catch {
     return [{
       id: "security", label: "Security Audit", severity: "info",
-      message: "Cannot run security checks — vault may be locked",
+      message: "Cannot run security checks",
     }];
   }
 }
@@ -183,19 +286,18 @@ async function runNetworkCheck(): Promise<CheckResult[]> {
     const net = await api.getNetworkDevices();
     results.push({
       id: "lan-subnet", label: "LAN Subnet", severity: "pass",
-      message: `Detected LAN subnet: ${net.lan_subnet}`,
+      message: `Detected: ${net.lan_subnet}`,
     });
     if (!net.scan_available) {
       results.push({
         id: "net-scan", label: "Network Scanner", severity: "info",
-        message: "ARP scan not available — install arp-scan for device discovery",
-        command: "sudo apt install arp-scan  # Debian/Ubuntu",
+        message: "ARP scan unavailable — device discovery is limited to passive methods",
       });
     }
   } catch {
     results.push({
       id: "lan-subnet", label: "LAN Subnet", severity: "info",
-      message: "Cannot detect LAN — vault may be locked",
+      message: "Cannot detect LAN",
     });
   }
 
@@ -203,19 +305,18 @@ async function runNetworkCheck(): Promise<CheckResult[]> {
     const svc = await api.getNetworkServices();
     if (!svc.mdns_available) {
       results.push({
-        id: "mdns", label: "mDNS / Bonjour", severity: "warn",
-        message: "mDNS service discovery not available — zeroconf package missing",
-        fix: "Install the network extra for LAN device discovery.",
-        command: "pip install wireseal[network]",
+        id: "mdns", label: "Service Discovery (mDNS)", severity: "warn",
+        message: "mDNS not available — LAN service browsing disabled",
+        fix: "The zeroconf package is required for mDNS service discovery.",
       });
     } else {
       results.push({
-        id: "mdns", label: "mDNS / Bonjour", severity: "pass",
-        message: `mDNS available — ${svc.services?.length ?? 0} service(s) discovered`,
+        id: "mdns", label: "Service Discovery (mDNS)", severity: "pass",
+        message: `${svc.services?.length ?? 0} service(s) discovered via mDNS`,
       });
     }
   } catch {
-    // ignore
+    // Silently skip — non-critical
   }
 
   return results;
@@ -225,21 +326,33 @@ async function runServiceCheck(): Promise<CheckResult> {
   try {
     const svc = await api.serviceStatus();
     if (svc.installed && svc.running) {
-      return { id: "service", label: "Background Service", severity: "pass", message: "WireSeal service is installed and running" };
+      return { id: "service", label: "Background Service", severity: "pass", message: "Installed and running" };
     }
     if (svc.installed) {
       return {
         id: "service", label: "Background Service", severity: "warn",
-        message: "Service is installed but not running",
-        fix: "Start the background service.",
-        command: "sudo wireseal service start",
+        message: "Service is installed but stopped",
+        fix: "The background service ensures WireSeal starts automatically on boot.",
+        action: async () => {
+          await api.serviceStart();
+          return "Service started successfully";
+        },
+        actionLabel: "Start Service",
+        confirmRequired: true,
+        confirmMessage: "Start the WireSeal background service? It will run on system boot.",
       };
     }
     return {
       id: "service", label: "Background Service", severity: "info",
-      message: "Background service not installed (optional)",
-      fix: "Install for auto-start on boot.",
-      command: "sudo wireseal service install",
+      message: "Not installed (optional)",
+      fix: "Installing the service enables auto-start on boot.",
+      action: async () => {
+        await api.serviceInstall({ autostart: true });
+        return "Service installed with auto-start enabled";
+      },
+      actionLabel: "Install Service",
+      confirmRequired: true,
+      confirmMessage: "This will register WireSeal as a system service that starts automatically on boot. Continue?",
     };
   } catch {
     return { id: "service", label: "Background Service", severity: "info", message: "Cannot check service status" };
@@ -250,173 +363,192 @@ async function runDnsCheck(): Promise<CheckResult> {
   try {
     const dns = await api.getDns();
     if (dns.provider && dns.provider !== "none") {
-      return { id: "dns", label: "Dynamic DNS", severity: "pass", message: `DNS provider: ${dns.provider} — ${dns.hostname || "configured"}` };
+      return { id: "dns", label: "Dynamic DNS", severity: "pass", message: `Provider: ${dns.provider}` };
     }
     return {
       id: "dns", label: "Dynamic DNS", severity: "info",
-      message: "No dynamic DNS configured (optional — needed for changing IP addresses)",
-      fix: "Set up DNS if your server IP changes. Go to the DNS page to configure.",
+      message: "Not configured (optional)",
+      fix: "Configure Dynamic DNS if your server's public IP address changes. Visit the DNS settings page.",
     };
   } catch {
-    return { id: "dns", label: "Dynamic DNS", severity: "info", message: "Cannot check DNS — vault may be locked" };
+    return { id: "dns", label: "Dynamic DNS", severity: "info", message: "Cannot check DNS configuration" };
   }
 }
-
-// ── Install Commands Map ───────────────────────────────────────────────────
-
-const INSTALL_COMMANDS: { label: string; command: string }[] = [
-  { label: "Install WireGuard (Debian/Ubuntu)", command: "sudo apt install wireguard wireguard-tools" },
-  { label: "Install WireGuard (Arch)", command: "sudo pacman -S wireguard-tools" },
-  { label: "Install WireGuard (Fedora)", command: "sudo dnf install wireguard-tools" },
-  { label: "Install WireGuard (macOS)", command: "brew install wireguard-tools wireguard-go" },
-  { label: "Install WireGuard (Windows)", command: "winget install WireGuard.WireGuard" },
-  { label: "Install zeroconf/mDNS (pip)", command: "pip install wireseal[network]" },
-  { label: "Install Avahi mDNS (Debian)", command: "sudo apt install avahi-daemon avahi-utils libnss-mdns" },
-  { label: "Install Avahi mDNS (Arch)", command: "sudo pacman -S avahi nss-mdns" },
-  { label: "Install GUI deps (Debian)", command: "sudo apt install python3-gi gir1.2-webkit2-4.1 python3-gi-cairo" },
-  { label: "Install GUI deps (Arch)", command: "sudo pacman -S webkit2gtk python-gobject python-cairo" },
-  { label: "Enable IP Forwarding (Linux)", command: "sudo sysctl -w net.ipv4.ip_forward=1" },
-  { label: "Start WireGuard tunnel", command: "sudo wg-quick up wg0" },
-  { label: "Check WireGuard status", command: "sudo wg show" },
-  { label: "Start WireSeal API", command: "sudo wireseal serve" },
-  { label: "Install WireSeal service", command: "sudo wireseal service install" },
-];
 
 // ── Main Component ─────────────────────────────────────────────────────────
 
 export function Troubleshoot() {
   const [groups, setGroups] = useState<CheckGroup[]>([]);
   const [running, setRunning] = useState(false);
+  const [lastRun, setLastRun] = useState<Date | null>(null);
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
-  const [showInstall, setShowInstall] = useState(false);
+  const [actionResults, setActionResults] = useState<Record<string, { msg: string; ok: boolean }>>({});
+  const [confirmFixAll, setConfirmFixAll] = useState(false);
 
   const runAllChecks = useCallback(async () => {
     setRunning(true);
+    setActionResults({});
     try {
-      const [apiCheck, vaultCheck, wgCheck, clientCheck, securityChecks, networkChecks, serviceCheck, dnsCheck] =
+      const [apiR, vaultR, wgR, clientR, secR, netR, svcR, dnsR] =
         await Promise.allSettled([
           runApiCheck(), runVaultCheck(), runWireGuardCheck(), runClientCheck(),
           runSecurityCheck(), runNetworkCheck(), runServiceCheck(), runDnsCheck(),
         ]);
 
-      const getValue = <T,>(r: PromiseSettledResult<T>, fallback: T): T =>
-        r.status === "fulfilled" ? r.value : fallback;
+      const v = <T,>(r: PromiseSettledResult<T>, fb: T): T =>
+        r.status === "fulfilled" ? r.value : fb;
 
-      const result: CheckGroup[] = [
+      setGroups([
         {
           title: "Core Services",
           icon: Server,
           checks: [
-            getValue(apiCheck, { id: "api", label: "API Server", severity: "fail" as Severity, message: "Check failed" }),
-            getValue(vaultCheck, { id: "vault", label: "Vault", severity: "fail" as Severity, message: "Check failed" }),
-            getValue(wgCheck, { id: "wg", label: "WireGuard", severity: "fail" as Severity, message: "Check failed" }),
-            getValue(serviceCheck, { id: "service", label: "Service", severity: "fail" as Severity, message: "Check failed" }),
+            v(apiR, { id: "api", label: "API Server", severity: "fail" as Severity, message: "Check failed" }),
+            v(vaultR, { id: "vault", label: "Vault", severity: "fail" as Severity, message: "Check failed" }),
+            v(wgR, { id: "wg", label: "WireGuard", severity: "fail" as Severity, message: "Check failed" }),
+            v(svcR, { id: "service", label: "Service", severity: "fail" as Severity, message: "Check failed" }),
           ],
         },
         {
           title: "VPN Configuration",
           icon: Wifi,
           checks: [
-            getValue(clientCheck, { id: "clients", label: "Clients", severity: "fail" as Severity, message: "Check failed" }),
-            getValue(dnsCheck, { id: "dns", label: "DNS", severity: "fail" as Severity, message: "Check failed" }),
+            v(clientR, { id: "clients", label: "Clients", severity: "fail" as Severity, message: "Check failed" }),
+            v(dnsR, { id: "dns", label: "DNS", severity: "fail" as Severity, message: "Check failed" }),
           ],
         },
-        {
-          title: "Network & Discovery",
-          icon: Globe,
-          checks: getValue(networkChecks, []),
-        },
-        {
-          title: "Security",
-          icon: Shield,
-          checks: getValue(securityChecks, []),
-        },
-      ];
-
-      setGroups(result);
+        { title: "Network & Discovery", icon: Globe, checks: v(netR, []) },
+        { title: "Security", icon: Shield, checks: v(secR, []) },
+      ]);
+      setLastRun(new Date());
     } finally {
       setRunning(false);
     }
   }, []);
 
-  useEffect(() => {
-    runAllChecks();
-  }, [runAllChecks]);
+  useEffect(() => { runAllChecks(); }, [runAllChecks]);
 
-  const totalChecks = groups.reduce((sum, g) => sum + g.checks.length, 0);
-  const passCount = groups.reduce((sum, g) => sum + g.checks.filter(c => c.severity === "pass").length, 0);
-  const failCount = groups.reduce((sum, g) => sum + g.checks.filter(c => c.severity === "fail").length, 0);
-  const warnCount = groups.reduce((sum, g) => sum + g.checks.filter(c => c.severity === "warn").length, 0);
+  const totalChecks = groups.reduce((s, g) => s + g.checks.length, 0);
+  const passCount = groups.reduce((s, g) => s + g.checks.filter(c => c.severity === "pass").length, 0);
+  const failCount = groups.reduce((s, g) => s + g.checks.filter(c => c.severity === "fail").length, 0);
+  const warnCount = groups.reduce((s, g) => s + g.checks.filter(c => c.severity === "warn").length, 0);
 
   const overallColor = failCount > 0 ? "text-red-600" : warnCount > 0 ? "text-yellow-600" : "text-green-600";
   const overallBg = failCount > 0 ? "bg-red-50 border-red-200" : warnCount > 0 ? "bg-yellow-50 border-yellow-200" : "bg-green-50 border-green-200";
-  const overallLabel = failCount > 0 ? "Issues Found" : warnCount > 0 ? "Warnings" : "All Good";
-  const OverallIcon = failCount > 0 ? XCircle : warnCount > 0 ? AlertTriangle : CheckCircle;
+  const overallLabel = failCount > 0 ? "Issues Detected" : warnCount > 0 ? "Warnings" : "System Healthy";
+  const OverallIcon = failCount > 0 ? XCircle : warnCount > 0 ? AlertTriangle : ShieldCheck;
+
+  const fixableChecks = groups.flatMap(g => g.checks.filter(c => c.action && c.severity !== "pass"));
+
+  const fixAll = async () => {
+    setConfirmFixAll(false);
+    for (const check of fixableChecks) {
+      if (!check.action) continue;
+      try {
+        const msg = await check.action();
+        setActionResults(prev => ({ ...prev, [check.id]: { msg, ok: true } }));
+      } catch (e: unknown) {
+        setActionResults(prev => ({ ...prev, [check.id]: { msg: sanitizeError(e), ok: false } }));
+      }
+    }
+    setTimeout(runAllChecks, 2000);
+  };
 
   return (
-    <div>
+    <div className="max-w-3xl mx-auto">
       {/* Header */}
-      <div className="flex items-center justify-between mb-8">
+      <div className="flex items-center justify-between mb-6">
         <div className="flex items-center gap-3">
           <div className="w-10 h-10 bg-orange-100 rounded-xl flex items-center justify-center">
             <Wrench className="w-5 h-5 text-orange-600" />
           </div>
           <div>
-            <h1 className="text-xl font-bold text-gray-900">Server Troubleshoot</h1>
-            <p className="text-sm text-gray-500">Diagnose and fix common server issues</p>
+            <h1 className="text-xl font-bold text-gray-900">System Diagnostics</h1>
+            <p className="text-sm text-gray-500">Server health checks and remediation</p>
           </div>
         </div>
-        <button
-          onClick={runAllChecks}
-          disabled={running}
-          className="flex items-center gap-2 px-4 py-2 bg-orange-600 text-white rounded-lg hover:bg-orange-700 disabled:opacity-50 text-sm"
-        >
-          {running ? <Loader2 className="w-4 h-4 animate-spin" /> : <RefreshCw className="w-4 h-4" />}
-          {running ? "Running..." : "Re-run Checks"}
-        </button>
+        <div className="flex items-center gap-2">
+          {fixableChecks.length > 0 && (
+            <button
+              onClick={() => setConfirmFixAll(true)}
+              className="flex items-center gap-2 px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 text-sm font-medium transition-colors"
+            >
+              <Zap className="w-4 h-4" />
+              Fix All ({fixableChecks.length})
+            </button>
+          )}
+          <button
+            onClick={runAllChecks}
+            disabled={running}
+            className="flex items-center gap-2 px-4 py-2 bg-gray-800 text-white rounded-lg hover:bg-gray-900 disabled:opacity-50 text-sm font-medium transition-colors"
+          >
+            {running ? <Loader2 className="w-4 h-4 animate-spin" /> : <RefreshCw className="w-4 h-4" />}
+            {running ? "Scanning..." : "Re-scan"}
+          </button>
+        </div>
       </div>
 
-      {/* Score banner */}
+      {/* Confirm Fix All dialog */}
+      {confirmFixAll && (
+        <ConfirmDialog
+          message={`This will attempt to fix ${fixableChecks.length} issue(s): ${fixableChecks.map(c => c.actionLabel || c.label).join(", ")}. Each action will be applied sequentially. Continue?`}
+          onConfirm={fixAll}
+          onCancel={() => setConfirmFixAll(false)}
+        />
+      )}
+
+      {/* Status banner */}
       {totalChecks > 0 && (
         <div className={`rounded-xl border p-5 mb-6 ${overallBg}`}>
-          <div className="flex items-center gap-4">
-            <OverallIcon className={`w-8 h-8 ${overallColor}`} />
-            <div>
-              <p className={`text-lg font-bold ${overallColor}`}>{overallLabel}</p>
-              <p className="text-sm text-gray-600">
-                {passCount} passed, {warnCount} warning{warnCount !== 1 ? "s" : ""}, {failCount} failed — {totalChecks} total checks
-              </p>
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-4">
+              <OverallIcon className={`w-8 h-8 ${overallColor}`} />
+              <div>
+                <p className={`text-lg font-bold ${overallColor}`}>{overallLabel}</p>
+                <p className="text-sm text-gray-600">
+                  {passCount} passed, {warnCount} warning{warnCount !== 1 ? "s" : ""}, {failCount} failed
+                </p>
+              </div>
             </div>
+            {lastRun && (
+              <div className="flex items-center gap-1.5 text-xs text-gray-400">
+                <Clock className="w-3.5 h-3.5" />
+                {lastRun.toLocaleTimeString()}
+              </div>
+            )}
           </div>
         </div>
       )}
 
       {/* Check groups */}
       {groups.map((group) => {
-        const groupFails = group.checks.filter(c => c.severity === "fail").length;
-        const groupWarns = group.checks.filter(c => c.severity === "warn").length;
+        const gFail = group.checks.filter(c => c.severity === "fail").length;
+        const gWarn = group.checks.filter(c => c.severity === "warn").length;
+        const gPass = group.checks.filter(c => c.severity === "pass").length;
         const GroupIcon = group.icon;
 
         return (
-          <div key={group.title} className="bg-white rounded-xl border border-gray-200 mb-4 overflow-hidden">
+          <div key={group.title} className="bg-white rounded-xl border border-gray-200 mb-4 overflow-hidden shadow-sm">
             <div className="px-5 py-4 border-b border-gray-100 flex items-center justify-between">
               <div className="flex items-center gap-3">
-                <GroupIcon className="w-4 h-4 text-gray-500" />
-                <h2 className="font-semibold text-gray-900">{group.title}</h2>
+                <GroupIcon className="w-4 h-4 text-gray-400" />
+                <h2 className="font-semibold text-gray-800 text-sm tracking-wide uppercase">{group.title}</h2>
               </div>
-              <div className="flex items-center gap-2 text-xs">
-                {groupFails > 0 && <span className="px-2 py-0.5 bg-red-100 text-red-700 rounded-full">{groupFails} failed</span>}
-                {groupWarns > 0 && <span className="px-2 py-0.5 bg-yellow-100 text-yellow-700 rounded-full">{groupWarns} warning{groupWarns !== 1 ? "s" : ""}</span>}
+              <div className="flex items-center gap-1.5 text-xs">
+                {gPass > 0 && <span className="px-2 py-0.5 bg-green-50 text-green-700 rounded-full">{gPass}</span>}
+                {gWarn > 0 && <span className="px-2 py-0.5 bg-yellow-50 text-yellow-700 rounded-full">{gWarn}</span>}
+                {gFail > 0 && <span className="px-2 py-0.5 bg-red-50 text-red-700 rounded-full">{gFail}</span>}
               </div>
             </div>
 
             <div className="divide-y divide-gray-50">
               {group.checks.map((check) => {
                 const isExpanded = expanded[check.id] ?? (check.severity === "fail" || check.severity === "warn");
-                const hasFix = check.fix || check.command || check.details;
+                const hasFix = check.fix || check.action || check.details;
+                const result = actionResults[check.id];
 
                 return (
-                  <div key={check.id} className="px-5 py-3">
+                  <div key={check.id} className="px-5 py-3 hover:bg-gray-50/50 transition-colors">
                     <button
                       onClick={() => hasFix && setExpanded(prev => ({ ...prev, [check.id]: !isExpanded }))}
                       className={`flex items-center gap-3 w-full text-left ${hasFix ? "cursor-pointer" : "cursor-default"}`}
@@ -426,23 +558,45 @@ export function Troubleshoot() {
                         <p className="text-sm font-medium text-gray-900">{check.label}</p>
                         <p className="text-xs text-gray-500 truncate">{check.message}</p>
                       </div>
+                      {check.action && check.severity !== "pass" && !result?.ok && (
+                        <span className="px-2 py-0.5 bg-orange-50 text-orange-600 border border-orange-200 rounded text-xs font-medium">
+                          Action Available
+                        </span>
+                      )}
+                      {result?.ok && (
+                        <span className="px-2 py-0.5 bg-green-50 text-green-600 border border-green-200 rounded text-xs font-medium">
+                          Fixed
+                        </span>
+                      )}
                       {hasFix && (
                         isExpanded
-                          ? <ChevronDown className="w-4 h-4 text-gray-400" />
-                          : <ChevronRight className="w-4 h-4 text-gray-400" />
+                          ? <ChevronDown className="w-4 h-4 text-gray-300" />
+                          : <ChevronRight className="w-4 h-4 text-gray-300" />
                       )}
                     </button>
 
                     {isExpanded && hasFix && (
-                      <div className="mt-2 ml-7 p-3 bg-gray-50 rounded-lg text-sm space-y-2">
-                        {check.fix && <p className="text-gray-700">{check.fix}</p>}
-                        {check.details && <p className="text-gray-500 text-xs">{check.details}</p>}
-                        {check.command && (
-                          <div className="flex items-start gap-1">
-                            <pre className="bg-gray-900 text-green-400 px-3 py-2 rounded text-xs font-mono whitespace-pre-wrap flex-1">
-                              {check.command}
-                            </pre>
-                            <CopyButton text={check.command} />
+                      <div className="mt-2 ml-7 p-4 bg-gray-50 rounded-lg text-sm space-y-3 border border-gray-100">
+                        {check.fix && <p className="text-gray-700 leading-relaxed">{check.fix}</p>}
+                        {check.details && <p className="text-gray-500 text-xs leading-relaxed">{check.details}</p>}
+
+                        {check.action && check.severity !== "pass" && (
+                          <div className="flex items-center gap-3 pt-1">
+                            <FixButton
+                              action={check.action}
+                              label={check.actionLabel || "Apply Fix"}
+                              confirmRequired={check.confirmRequired}
+                              confirmMessage={check.confirmMessage}
+                              onDone={(msg, ok) => {
+                                setActionResults(prev => ({ ...prev, [check.id]: { msg, ok } }));
+                                if (ok) setTimeout(runAllChecks, 2000);
+                              }}
+                            />
+                            {result && (
+                              <span className={`text-xs font-medium ${result.ok ? "text-green-600" : "text-red-600"}`}>
+                                {result.msg}
+                              </span>
+                            )}
                           </div>
                         )}
                       </div>
@@ -454,36 +608,6 @@ export function Troubleshoot() {
           </div>
         );
       })}
-
-      {/* Install commands reference */}
-      <div className="bg-white rounded-xl border border-gray-200 mt-6 overflow-hidden">
-        <button
-          onClick={() => setShowInstall(!showInstall)}
-          className="w-full px-5 py-4 flex items-center justify-between hover:bg-gray-50"
-        >
-          <div className="flex items-center gap-3">
-            <Terminal className="w-4 h-4 text-gray-500" />
-            <h2 className="font-semibold text-gray-900">Install Commands Reference</h2>
-          </div>
-          {showInstall
-            ? <ChevronDown className="w-4 h-4 text-gray-400" />
-            : <ChevronRight className="w-4 h-4 text-gray-400" />}
-        </button>
-
-        {showInstall && (
-          <div className="px-5 pb-4 space-y-2">
-            {INSTALL_COMMANDS.map(({ label, command }) => (
-              <div key={label} className="flex items-center gap-2">
-                <span className="text-xs text-gray-500 w-48 flex-shrink-0">{label}</span>
-                <pre className="bg-gray-900 text-green-400 px-3 py-1.5 rounded text-xs font-mono flex-1 truncate">
-                  {command}
-                </pre>
-                <CopyButton text={command} />
-              </div>
-            ))}
-          </div>
-        )}
-      </div>
     </div>
   );
 }

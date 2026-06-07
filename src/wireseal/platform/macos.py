@@ -172,7 +172,18 @@ class MacOSAdapter(AbstractPlatformAdapter):
         """
         missing: list[str] = []
 
-        if not shutil.which("wg-quick") or not shutil.which("wg"):
+        # Homebrew paths may not be on PATH in launchd service contexts.
+        _brew_fallbacks = [
+            "/opt/homebrew/bin",   # Apple Silicon
+            "/usr/local/bin",     # Intel Mac
+        ]
+
+        def _has(tool: str) -> bool:
+            if shutil.which(tool):
+                return True
+            return any(Path(d, tool).exists() for d in _brew_fallbacks)
+
+        if not _has("wg-quick") or not _has("wg"):
             raise PrerequisiteError(
                 "Missing: wireguard-tools. Run: brew install wireguard-tools"
             )
@@ -212,7 +223,10 @@ class MacOSAdapter(AbstractPlatformAdapter):
             SetupError: If running as root without SUDO_USER.
             PrerequisiteError: If Homebrew is not installed.
         """
-        if shutil.which("wg-quick"):
+        if shutil.which("wg-quick") or any(
+            Path(d, "wg-quick").exists()
+            for d in ("/opt/homebrew/bin", "/usr/local/bin")
+        ):
             return  # Idempotent -- already installed
 
         sudo_user = os.environ.get("SUDO_USER")

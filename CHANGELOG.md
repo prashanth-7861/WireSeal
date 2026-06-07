@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.9.41] — 2026-06-07
+
+### Fixed
+- **WireGuard "not found or no config" error** — `shutil.which("wg")` fails in service contexts (systemd, launchd, Task Scheduler) where `PATH` is minimal. Added `_resolve_wg_tool()` helper that probes platform-specific fallback paths (`/usr/sbin`, `/opt/homebrew/bin`, etc.) before giving up. All bare `wg`/`wg-quick` subprocess calls across `_shared.py`, `clients.py`, `vault.py` now use the resolver.
+- **Windows WireGuard detection** — new `_find_wireguard_exe()` checks default install path, Windows Registry (`HKLM`/`HKCU`), `shutil.which`, and common alternative locations (winget, scoop). `WG_EXE` resolved dynamically at module load.
+- **DPAPI config lifecycle** — Windows WireGuard service converts `.conf` to `.conf.dpapi` and deletes the original. Service restart now detects `.conf.dpapi` and restarts the tunnel service instead of attempting reinstall with missing `.conf`.
+- **Split error messages** — vague "WireGuard not found or no config" replaced with two distinct errors: "WireGuard is not installed" vs "WireGuard config not found at {path}".
+- **Linux/macOS WireGuard PATH fallbacks** — `check_prerequisites` on both platforms now probes fallback directories (`/usr/sbin/wg`, `/sbin/wg`, `/opt/homebrew/bin/wg`) before reporting WireGuard as missing.
+
+### Security
+- **Troubleshoot page hardening (admin + client)** — both diagnostic pages now include:
+  - `sanitizeError()` — strips internal file paths, stack traces, and truncates long messages before display
+  - `ConfirmDialog` — modal confirmation required before any destructive/state-changing action
+  - `FixButton` with 2-second cooldown via `useRef` — prevents double-click and rapid-fire API calls
+  - `confirmRequired` + `confirmMessage` on all action buttons (Start Tunnel, Harden Server, Install Service, Connect, Disconnect, Re-scan mDNS)
+  - Fix All requires confirmation listing all pending actions
+- **Error message sanitization** — API error messages displayed to users are filtered for internal paths (`/home/`, `C:\`, `/etc/`), stack traces, and line numbers
+
+### Changed
+- **Troubleshoot pages redesigned** — professional "System Diagnostics" / "Client Diagnostics" titles, uppercase section headers, shadow-sm cards, hover transitions, "Action Available" / "Fixed" badges, last-scan timestamp display
+- **Version bump** to 0.9.41.
+
+---
+
 ## [0.9.40] — 2026-06-07
 
 ### Added

@@ -344,7 +344,7 @@ def _h_revoke_client(req: "_Handler", groups: tuple) -> dict:
             pubkey = pubkey.expose_secret().decode("ascii")
         if pubkey:
             import subprocess
-            cmd = ["wg", "set", _WG_IFACE, "peer", str(pubkey), "remove"]
+            cmd = [_resolve_wg_tool("wg"), "set", _WG_IFACE, "peer", str(pubkey), "remove"]
             if sys.platform != "win32":
                 cmd = _sudo(cmd)
             try:
@@ -404,7 +404,7 @@ def _h_suspend_client(req: "_Handler", groups: tuple) -> dict:
                 pubkey = pubkey.expose_secret().decode("ascii")
             if pubkey:
                 import subprocess
-                cmd = ["wg", "set", _WG_IFACE, "peer", str(pubkey), "remove"]
+                cmd = [_resolve_wg_tool("wg"), "set", _WG_IFACE, "peer", str(pubkey), "remove"]
                 if sys.platform != "win32":
                     cmd = _sudo(cmd)
                 try:

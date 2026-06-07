@@ -33,6 +33,7 @@ import io
 import json
 import logging
 import os
+import shutil
 
 logging.basicConfig(
     level=logging.WARNING,
@@ -836,6 +837,27 @@ def _sudo(cmd: list[str]) -> list[str]:
     return ["sudo", "-n"] + cmd  # -n = non-interactive (no password prompt)
 
 
+def _resolve_wg_tool(tool: str) -> str:
+    """Resolve wg/wg-quick to absolute path, probing fallback locations.
+
+    On Linux/macOS, systemd services and launchd agents have minimal PATH
+    that may exclude /usr/sbin or /opt/homebrew/bin where WireGuard tools
+    are installed.
+    """
+    found = shutil.which(tool)
+    if found:
+        return found
+    if sys.platform == "darwin":
+        fallbacks = ["/opt/homebrew/bin", "/usr/local/bin"]
+    else:
+        fallbacks = ["/usr/sbin", "/usr/bin", "/sbin", "/usr/local/bin", "/usr/local/sbin"]
+    for d in fallbacks:
+        candidate = os.path.join(d, tool)
+        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            return candidate
+    return tool  # bare name — let subprocess raise FileNotFoundError
+
+
 def _require_admin_role() -> None:
     """Require admin or owner role for the current session (write operations).
 
@@ -1500,14 +1522,23 @@ def _reload_wireguard(interface: str = "wg0") -> str:
         from wireseal.platform.detect import get_adapter as _get_adapter
         _adapter = _get_adapter()
         config_path = _adapter.get_config_path(interface)
-        wg_exe = Path(r"C:\Program Files\WireGuard\wireguard.exe")
+        from wireseal.platform.windows import WG_EXE as wg_exe
+        dpapi_path = config_path.with_suffix(".conf.dpapi")
         if config_path.exists() and wg_exe.exists():
+            # Plain .conf available — full uninstall/reinstall cycle
             subprocess.run(
                 [str(wg_exe), "/uninstalltunnelservice", interface],
                 check=False, capture_output=True, timeout=10, creationflags=_no_win,
             )
             subprocess.run(
                 [str(wg_exe), "/installtunnelservice", str(config_path)],
+                check=False, capture_output=True, timeout=10, creationflags=_no_win,
+            )
+        elif dpapi_path.exists():
+            # Only DPAPI-encrypted config exists — service was previously
+            # installed.  Cannot reinstall without plain .conf, just restart.
+            subprocess.run(
+                ["sc.exe", "start", svc],
                 check=False, capture_output=True, timeout=10, creationflags=_no_win,
             )
         else:
@@ -1530,7 +1561,7 @@ def _reload_wireguard(interface: str = "wg0") -> str:
     if check.returncode != 0:
         # Interface not up â€” bring it up
         result = subprocess.run(
-            _sudo(["wg-quick", "up", interface]),
+            _sudo([_resolve_wg_tool("wg-quick"), "up", interface]),
             shell=False, check=False, capture_output=True, timeout=30,
         )
         if result.returncode != 0:
@@ -1543,7 +1574,7 @@ def _reload_wireguard(interface: str = "wg0") -> str:
     sync_err = ""
     try:
         strip_result = subprocess.run(
-            _sudo(["wg-quick", "strip", str(config_path)]),
+            _sudo([_resolve_wg_tool("wg-quick"), "strip", str(config_path)]),
             shell=False, check=True, capture_output=True, timeout=10,
         )
         with tempfile.NamedTemporaryFile(
@@ -1554,7 +1585,7 @@ def _reload_wireguard(interface: str = "wg0") -> str:
         try:
             os.chmod(tmp_path, 0o600)
             result = subprocess.run(
-                _sudo(["wg", "syncconf", interface, tmp_path]),
+                _sudo([_resolve_wg_tool("wg"), "syncconf", interface, tmp_path]),
                 shell=False, check=False, capture_output=True, timeout=10,
             )
             if result.returncode == 0:
@@ -1573,11 +1604,11 @@ def _reload_wireguard(interface: str = "wg0") -> str:
     # Fallback: full restart (brief disconnect but guarantees config is loaded)
     print("[wireseal] Falling back to wg-quick down/up...", file=sys.stderr)
     subprocess.run(
-        _sudo(["wg-quick", "down", interface]),
+        _sudo([_resolve_wg_tool("wg-quick"), "down", interface]),
         shell=False, check=False, capture_output=True, timeout=15,
     )
     result = subprocess.run(
-        _sudo(["wg-quick", "up", interface]),
+        _sudo([_resolve_wg_tool("wg-quick"), "up", interface]),
         shell=False, check=False, capture_output=True, timeout=30,
     )
     if result.returncode == 0:
@@ -1675,7 +1706,7 @@ def _h_ready(req: "_Handler", _groups: tuple) -> dict:
         try:
             import subprocess as _sp
             _sp.run(
-                ["wg", "show", _WG_IFACE],
+                [_resolve_wg_tool("wg"), "show", _WG_IFACE],
                 capture_output=True, timeout=5, check=True,
             )
             wg_running = True
@@ -1701,7 +1732,7 @@ def _h_status(req: "_Handler", _groups: tuple) -> dict:
 
     try:
         result = subprocess.run(
-            _sudo(["wg", "show", _WG_IFACE]), capture_output=True, text=True, timeout=5,
+            _sudo([_resolve_wg_tool("wg"), "show", _WG_IFACE]), capture_output=True, text=True, timeout=5,
             creationflags=_SP_FLAGS,
         )
         if result.returncode == 0 and result.stdout.strip():

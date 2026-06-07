@@ -737,7 +737,7 @@ def _h_fresh_start(req: "_Handler", _groups: tuple) -> dict:
             subprocess.run(["sc.exe", "stop", svc], check=False, capture_output=True, timeout=10, creationflags=_SP_FLAGS)
         except Exception as _exc:
             logging.getLogger("wireseal").warning("Failed to stop WireGuard service: %s", _exc)
-        wg_exe = Path(r"C:\Program Files\WireGuard\wireguard.exe")
+        from wireseal.platform.windows import WG_EXE as wg_exe
         if wg_exe.exists():
             try:
                 subprocess.run([str(wg_exe), "/uninstalltunnelservice", _WG_IFACE], check=False, capture_output=True, timeout=10, creationflags=_SP_FLAGS)
@@ -745,7 +745,7 @@ def _h_fresh_start(req: "_Handler", _groups: tuple) -> dict:
                 logging.getLogger("wireseal").warning("Failed to uninstall WireGuard tunnel service: %s", _exc)
     else:
         try:
-            subprocess.run(_sudo(["wg-quick", "down", _WG_IFACE]), check=False, capture_output=True, timeout=10)
+            subprocess.run(_sudo([_resolve_wg_tool("wg-quick"), "down", _WG_IFACE]), check=False, capture_output=True, timeout=10)
         except Exception as _exc:
             logging.getLogger("wireseal").warning("Failed to bring down wg-quick: %s", _exc)
 

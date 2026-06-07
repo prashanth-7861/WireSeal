@@ -59,7 +59,7 @@ interface ChangelogEntry {
 
 const CHANGELOG: ChangelogEntry[] = [
   {
-    version: "0.9.40",
+    version: "0.9.41",
     date: "2026-06-05",
     highlights: [
       "Split-LAN DNS fix: auto-detects actual router gateway instead of assuming first subnet IP",

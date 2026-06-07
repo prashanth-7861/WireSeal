@@ -134,14 +134,30 @@ def _h_start_server(req: "_Handler", _groups: tuple) -> dict:
         if b"RUNNING" in (check.stdout or b""):
             return {"ok": True, "note": "already running"}
         svc = f"WireGuardTunnel${_WG_IFACE}"
-        wg_exe = Path(r"C:\Program Files\WireGuard\wireguard.exe")
         from wireseal.platform.detect import get_adapter
         adapter = get_adapter()
+        from wireseal.platform.windows import WG_EXE as wg_exe
         config_path = adapter.get_config_path(_WG_IFACE)
+        # DPAPI: wireguard.exe encrypts .conf → .conf.dpapi on service
+        # install, then deletes the original .conf.  Check both forms.
+        dpapi_path = config_path.with_suffix(".conf.dpapi")
+        config_exists = config_path.exists() or dpapi_path.exists()
         service_exists = check.returncode == 0
         if not service_exists:
-            if not (wg_exe.exists() and config_path.exists()):
-                raise _ApiError("WireGuard not found or no config.", 500)
+            if not wg_exe.exists():
+                raise _ApiError(
+                    "WireGuard is not installed. Install from "
+                    "https://www.wireguard.com/install/ and restart "
+                    "the application.",
+                    500,
+                )
+            if not config_exists:
+                raise _ApiError(
+                    f"WireGuard config not found at {config_path}. "
+                    "Configure the server first (Settings → Generate "
+                    "Config), then try again.",
+                    500,
+                )
             try:
                 adapter.enable_tunnel_service(_WG_IFACE)
             except Exception as exc:
@@ -173,7 +189,7 @@ def _h_start_server(req: "_Handler", _groups: tuple) -> dict:
         return {"ok": True, "note": "already running"}
     try:
         result = subprocess.run(
-            _sudo(["wg-quick", "up", _WG_IFACE]),
+            _sudo([_resolve_wg_tool("wg-quick"), "up", _WG_IFACE]),
             check=False, capture_output=True, timeout=30,
         )
         if result.returncode == 0:
@@ -202,7 +218,7 @@ def _h_terminate(req: "_Handler", _groups: tuple) -> dict:
         return {"ok": True}
     try:
         subprocess.run(
-            _sudo(["wg-quick", "down", _WG_IFACE]),
+            _sudo([_resolve_wg_tool("wg-quick"), "down", _WG_IFACE]),
             check=True, capture_output=True, timeout=15,
         )
         AuditLog(_s._AUDIT_PATH).log("terminate", {"interface": _WG_IFACE},

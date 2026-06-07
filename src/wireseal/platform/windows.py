@@ -42,12 +42,58 @@ def _validate_script_path(script_path: Path) -> None:
 # Module-level constants
 # ---------------------------------------------------------------------------
 
-WG_EXE = Path(r"C:\Program Files\WireGuard\wireguard.exe")
 WG_CONFIG_DIR_BASE = Path(os.environ.get("ProgramData", r"C:\ProgramData"))
 if not WG_CONFIG_DIR_BASE.is_dir():
     WG_CONFIG_DIR_BASE = Path(r"C:\ProgramData")
 WG_CONFIG_DIR = WG_CONFIG_DIR_BASE / "WireGuard"
 WG_SERVICE_PREFIX = "WireGuardTunnel$"
+
+
+def _find_wireguard_exe() -> Path:
+    """Locate wireguard.exe by checking multiple sources.
+
+    Search order:
+      1. Default install path (C:\\Program Files\\WireGuard)
+      2. Registry (HKLM\\SOFTWARE\\WireGuard — InstallationPath)
+      3. shutil.which() for wireguard.exe on PATH
+      4. Common alternative locations (x86, user-profile)
+
+    Returns the first existing path, or the default path if none found
+    (callers check .exists() before using).
+    """
+    default = Path(r"C:\Program Files\WireGuard\wireguard.exe")
+    if default.exists():
+        return default
+
+    # Check Windows registry for custom install path
+    for hive in (winreg.HKEY_LOCAL_MACHINE, winreg.HKEY_CURRENT_USER):
+        for key_path in (r"SOFTWARE\WireGuard", r"SOFTWARE\WOW6432Node\WireGuard"):
+            try:
+                with winreg.OpenKey(hive, key_path) as key:
+                    val, _ = winreg.QueryValueEx(key, "InstallationPath")
+                    candidate = Path(str(val)) / "wireguard.exe"
+                    if candidate.exists():
+                        return candidate
+            except OSError:
+                pass
+
+    # Check PATH
+    on_path = shutil.which("wireguard")
+    if on_path:
+        return Path(on_path)
+
+    # Common alternative locations
+    for alt in (
+        Path(r"C:\Program Files (x86)\WireGuard\wireguard.exe"),
+        Path(os.environ.get("LOCALAPPDATA", "")) / "WireGuard" / "wireguard.exe",
+    ):
+        if alt.exists():
+            return alt
+
+    return default
+
+
+WG_EXE = _find_wireguard_exe()
 
 # Prevent subprocess calls from flashing a visible console window when
 # the app is running as a GUI (PyInstaller console=False / pywebview).
@@ -713,7 +759,8 @@ class WindowsAdapter(AbstractPlatformAdapter):
             SetupError: If the config file does not exist.
         """
         config_path = self.get_config_path(interface)
-        if not config_path.exists():
+        dpapi_path = config_path.with_suffix(".conf.dpapi")
+        if not config_path.exists() and not dpapi_path.exists():
             raise SetupError(
                 f"Config not found: {config_path}. Deploy config first."
             )
@@ -726,6 +773,11 @@ class WindowsAdapter(AbstractPlatformAdapter):
             shell=False, capture_output=True, timeout=30, creationflags=_NO_WIN,
         )
         newly_installed = existing.returncode != 0
+        if newly_installed and not config_path.exists():
+            # DPAPI-encrypted config exists but plain .conf was deleted.
+            # Cannot re-register without the plain file — the tunnel service
+            # should already be registered.  Fall through to reconfigure.
+            newly_installed = False
         if newly_installed:
             # Install the tunnel service (creates WireGuardTunnel$wg0 and
             # triggers DPAPI encryption). NOTE: `wireguard.exe
