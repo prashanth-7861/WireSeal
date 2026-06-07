@@ -841,6 +841,15 @@ export const api = {
   sftpCopy: (sessionId: string, path: string, newPath: string) =>
     _fetch<{ ok: boolean; path: string; new_path: string }>("POST", "/sftp/copy", { session_id: sessionId, path, new_path: newPath }),
 
+  sftpChmod: (sessionId: string, path: string, mode: number) =>
+    _fetch<{ ok: boolean; path: string; mode: string }>("POST", "/sftp/chmod", { session_id: sessionId, path, mode }),
+
+  sftpStat: (sessionId: string, path: string) =>
+    _fetch<{ path: string; size?: number; permissions?: number; permissions_octal?: string; is_dir?: boolean; is_link?: boolean; uid?: number; gid?: number; modified?: number; accessed?: number }>("POST", "/sftp/stat", { session_id: sessionId, path }),
+
+  sftpExists: (sessionId: string, path: string) =>
+    _fetch<{ exists: boolean; path: string }>("POST", "/sftp/exists", { session_id: sessionId, path }),
+
   // ── Client settings ─────────────────────────────────────────────────────────
   clientSettingsGet: () =>
     _fetch<ClientSettings>("GET", "/client/settings"),

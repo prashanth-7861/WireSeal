@@ -9,7 +9,7 @@ set -euo pipefail
 #   chmod +x wireseal-macos.sh
 #   ./wireseal-macos.sh
 
-VERSION="0.3.7"
+VERSION="0.9.39"
 REPO="https://github.com/prashanth-7861/WireSeal.git"
 INSTALL_DIR="$HOME/.wireseal"
 VENV_DIR="$INSTALL_DIR/.venv"
@@ -92,8 +92,7 @@ setup_venv() {
 
     info "Installing Python dependencies..."
     "$VENV_DIR/bin/pip" install --quiet --upgrade pip
-    "$VENV_DIR/bin/pip" install --quiet -e "$INSTALL_DIR"
-    "$VENV_DIR/bin/pip" install --quiet pywebview
+    "$VENV_DIR/bin/pip" install --quiet -e "$INSTALL_DIR[network]"
 
     # Build dashboard if Node.js available
     if [[ ! -d "$INSTALL_DIR/Dashboard/dist" ]]; then

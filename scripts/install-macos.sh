@@ -191,7 +191,7 @@ VENV_PIP="$VENV_DIR/bin/pip"
 info "Installing Python dependencies (this may take a minute)..."
 "$VENV_PIP" install --quiet --upgrade pip
 "$VENV_PIP" install --quiet -r "$REPO_DIR/requirements-dev.txt"
-"$VENV_PIP" install --quiet -e "$REPO_DIR"
+"$VENV_PIP" install --quiet -e "$REPO_DIR[network]"
 
 # ---------------------------------------------------------------------------
 # 7. Install system-wide wrapper

@@ -138,20 +138,37 @@ install_system_deps() {
     info "Installing system dependencies (distro: $DISTRO)..."
     case "$DISTRO" in
         arch)
-            pacman -Sy --noconfirm wireguard-tools nftables python python-pip ;;
+            pacman -Sy --noconfirm wireguard-tools nftables python python-pip \
+                avahi nss-mdns \
+                webkit2gtk python-gobject python-cairo \
+                libappindicator-gtk3 \
+                gcc openssl libffi ;;
         fedora)
-            dnf install -y wireguard-tools nftables python3 python3-pip ;;
+            dnf install -y wireguard-tools nftables python3 python3-pip \
+                avahi avahi-tools nss-mdns \
+                webkit2gtk4.1 python3-gobject python3-cairo \
+                libappindicator-gtk3 \
+                gcc openssl-devel libffi-devel python3-devel ;;
         debian)
             apt-get update -qq
-            apt-get install -y wireguard wireguard-tools nftables python3 python3-pip python3-venv ;;
+            apt-get install -y wireguard wireguard-tools nftables python3 python3-pip python3-venv \
+                avahi-daemon avahi-utils libnss-mdns \
+                python3-gi gir1.2-webkit2-4.1 python3-gi-cairo \
+                gir1.2-ayatanaappindicator3-0.1 \
+                gcc libssl-dev libffi-dev python3-dev ;;
         *)
-            warn "Unknown distro. Install wireguard-tools, nftables, python3 >= 3.12 manually."
+            warn "Unknown distro. Install wireguard-tools, nftables, avahi, webkit2gtk, python3 >= 3.12 manually."
             ;;
     esac
+
+    # Enable Avahi for mDNS/Bonjour device discovery on the LAN
+    if command -v systemctl &>/dev/null; then
+        systemctl enable --now avahi-daemon 2>/dev/null || true
+    fi
 }
 
-# Only install if wireguard-tools or python missing
-if ! command -v wg &>/dev/null || ! command -v python3 &>/dev/null; then
+# Install system deps if wireguard-tools, python, or pywebview GTK deps are missing
+if ! command -v wg &>/dev/null || ! command -v python3 &>/dev/null || ! python3 -c "import gi" &>/dev/null; then
     install_system_deps
 fi
 
@@ -193,7 +210,7 @@ VENV_PIP="$VENV_DIR/bin/pip"
 info "Installing Python dependencies (this may take a minute)..."
 "$VENV_PIP" install --quiet --upgrade pip
 "$VENV_PIP" install --quiet -r "$REPO_DIR/requirements-dev.txt"
-"$VENV_PIP" install --quiet -e "$REPO_DIR"
+"$VENV_PIP" install --quiet -e "$REPO_DIR[network]"
 
 # ---------------------------------------------------------------------------
 # 6. Install wireseal system-wide wrapper

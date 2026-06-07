@@ -248,6 +248,26 @@ def append_known_host(known_hosts_path: Path, host: str, port: int, key_b64: str
     else:
         key_type, key_data = "ssh-ed25519", parts[0]
 
+    # Validate key type against known SSH algorithms
+    _VALID_KEY_TYPES = {
+        "ssh-ed25519", "ssh-rsa", "ssh-dss",
+        "ecdsa-sha2-nistp256", "ecdsa-sha2-nistp384", "ecdsa-sha2-nistp521",
+        "sk-ssh-ed25519@openssh.com", "sk-ecdsa-sha2-nistp256@openssh.com",
+    }
+    if key_type not in _VALID_KEY_TYPES:
+        log.warning("Rejected unknown key type: %s", key_type)
+        raise ValueError(f"Unknown SSH key type: {key_type}")
+    # Validate base64 data and reject newline injection
+    if "\n" in key_data or "\r" in key_data:
+        log.warning("Rejected key data with embedded newlines")
+        raise ValueError("Key data contains newline characters")
+    import base64 as _b64mod
+    try:
+        _b64mod.b64decode(key_data)
+    except Exception:
+        log.warning("Rejected invalid base64 key data")
+        raise ValueError("Invalid base64 key data")
+
     if port == 22:
         host_field = host
     else:

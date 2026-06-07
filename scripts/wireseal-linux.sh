@@ -9,7 +9,7 @@ set -euo pipefail
 #   chmod +x wireseal-linux.sh
 #   sudo ./wireseal-linux.sh
 
-VERSION="0.3.7"
+VERSION="0.9.39"
 REPO="https://github.com/prashanth-7861/WireSeal.git"
 INSTALL_DIR="/opt/wireseal"
 VENV_DIR="$INSTALL_DIR/.venv"
@@ -133,22 +133,29 @@ install_packages() {
     case "$DISTRO" in
         arch)
             pacman -Sy --needed --noconfirm \
-                python python-pip python-gobject \
+                python python-pip python-gobject python-cairo \
                 webkit2gtk wireguard-tools git nftables openssh \
+                avahi nss-mdns libappindicator-gtk3 \
+                gcc openssl libffi \
                 fail2ban 2>&1 | tail -3
             ;;
         debian)
             apt-get update -qq
             apt-get install -y \
-                python3 python3-pip python3-venv python3-gi \
+                python3 python3-pip python3-venv python3-gi python3-gi-cairo \
                 gir1.2-webkit2-4.1 gir1.2-gtk-3.0 libwebkit2gtk-4.1-dev \
+                gir1.2-ayatanaappindicator3-0.1 \
                 wireguard-tools git nftables openssh-server \
+                avahi-daemon avahi-utils libnss-mdns \
+                gcc libssl-dev libffi-dev python3-dev \
                 fail2ban 2>&1 | tail -3
             ;;
         fedora)
             dnf install -y \
-                python3 python3-pip python3-gobject \
+                python3 python3-pip python3-gobject python3-cairo \
                 webkit2gtk4.1 wireguard-tools git nftables openssh-server \
+                avahi avahi-tools nss-mdns libappindicator-gtk3 \
+                gcc openssl-devel libffi-devel python3-devel \
                 fail2ban 2>&1 | tail -3
             ;;
         *)
@@ -167,9 +174,13 @@ command -v sshd      &>/dev/null || { command -v /usr/sbin/sshd &>/dev/null || M
 command -v python3   &>/dev/null || MISSING_PKGS+=" python3"
 command -v fail2ban-client &>/dev/null || MISSING_PKGS+=" fail2ban"
 
-if [[ -n "$MISSING_PKGS" ]]; then
+if [[ -n "$MISSING_PKGS" ]] || ! python3 -c "import gi" &>/dev/null; then
     info "Missing:$MISSING_PKGS — installing..."
     install_packages
+    # Enable Avahi for mDNS/Bonjour device discovery on the LAN
+    if command -v systemctl &>/dev/null; then
+        systemctl enable --now avahi-daemon 2>/dev/null || true
+    fi
     fixed "System packages installed."
 else
     ok "All system packages present."
@@ -271,8 +282,7 @@ fi
 
 info "Installing dependencies..."
 "$VENV_DIR/bin/pip" install --quiet --upgrade pip 2>&1 | tail -1
-"$VENV_DIR/bin/pip" install --quiet -e "$INSTALL_DIR" 2>&1 | tail -1
-"$VENV_DIR/bin/pip" install --quiet pywebview 2>&1 | tail -1
+"$VENV_DIR/bin/pip" install --quiet -e "$INSTALL_DIR[network]" 2>&1 | tail -1
 ok "Python dependencies installed."
 
 # ═══════════════════════════════════════════════════════════════════════════

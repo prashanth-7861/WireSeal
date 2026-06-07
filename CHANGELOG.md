@@ -7,6 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.9.40] — 2026-06-07
+
+### Added
+- **Troubleshoot pages** — server-side and client-side diagnostic pages with auto-running health checks, severity-rated results, expandable fix instructions with copy-to-clipboard commands, and overall score banner.
+  - Server page checks: API server, vault, WireGuard tunnel, clients, security audit, network/mDNS, background service, dynamic DNS.
+  - Client page checks: API connectivity, vault access, VPN tunnel, configs, SSH sessions/keys, network discovery, client settings. Includes "Common Issues & Fixes" FAQ section.
+- **SFTP file browser enhancements** — chmod dialog with visual rwx permission display, file properties modal (size, perms, uid, gid, timestamps), overwrite confirmation on upload, go-to-path dialog (Ctrl+G), keyboard navigation (arrows, Enter, F2 rename, F5 refresh, Backspace up), editor size guard (1 MB max), filename sanitization.
+- **SFTP backend endpoints** — `chmod`, `stat`, `exists` API handlers with path validation.
+- **SFTP TOFU host key verification** — user-facing fingerprint challenge modal instead of silent auto-accept; captures unknown host key via `SftpTofuRequired` exception, surfaces fingerprint to frontend for explicit accept/reject.
+
+### Fixed
+- **SFTP connection required prior SSH terminal session** — SFTP bridge lacked TOFU handling; unknown host keys caused silent failure. Added `SftpTofuRequired` exception and `_TofuCapturingClient` to capture and surface host key fingerprints.
+- **SFTP empty directory after connect** — React stale closure bug: `setSessionId()` is async but `loadDir()` was called immediately after with stale null value. Fixed by passing session ID directly as parameter.
+- **SFTP path traversal bypass** — `_validate_sftp_path` checked `startswith("..")` but `posixpath.normpath("/../etc/passwd")` normalized to `/etc/passwd` and passed. Fixed by checking `".." in parts` after split, plus null byte and non-printable ASCII rejection.
+
+### Security
+- **SFTP read/copy size caps** — read capped at 10 MB, copy at 50 MB to prevent memory exhaustion.
+- **SFTP directory listing cap** — max 10,000 entries with `truncated` flag.
+- **SFTP rate-limit cleanup** — disconnect now cleans up per-session rate-limit state.
+- **SSH known_hosts injection prevention** — key type allowlist, newline injection check, base64 validation in `append_known_host`.
+- **SSH private key wipe** — `SshTicket.wipe()` now clears `key_pem` material.
+- **SFTP connect hardening** — hostname regex validation, SSH target allowlist enforcement, sanitized error messages (no raw exception leak).
+- **Modern cipher restrictions** — SFTP connections restricted to AES-256-GCM, ChaCha20-Poly1305, Curve25519 kex, Ed25519/ECDSA host keys.
+
+### Changed
+- **Install scripts** — updated `install-linux.sh`, `install-macos.sh`, `install-windows.ps1` with new dependency support.
+- **Launcher scripts** — updated `wireseal-linux.sh`, `wireseal-macos.sh`, `wireseal-windows.ps1` with improved runtime checks.
+- **Dashboard nav** — added Troubleshoot links to both server and client sidebar layouts.
+- **Version bump** to 0.9.40.
+
+---
+
 ## [0.9.39] — 2026-06-05
 
 ### Fixed

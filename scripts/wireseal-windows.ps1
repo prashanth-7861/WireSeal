@@ -18,7 +18,7 @@
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$Version     = "0.3.7"
+$Version     = "0.9.39"
 $Repo        = "https://github.com/prashanth-7861/WireSeal.git"
 $InstallDir  = "$env:ProgramFiles\WireSeal"
 $VenvDir     = Join-Path $InstallDir '.venv'
@@ -126,8 +126,22 @@ $VenvPython = Join-Path $VenvDir 'Scripts\python.exe'
 
 Write-Info "Installing Python dependencies..."
 & $VenvPip install --quiet --upgrade pip
-& $VenvPip install --quiet -e $InstallDir
-& $VenvPip install --quiet pywebview
+& $VenvPip install --quiet -e "$InstallDir[network]"
+
+# Ensure Edge WebView2 runtime (required by pywebview GUI)
+$webview2Key = 'HKLM:\SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BEF-535EB6278025}'
+if (-not (Test-Path $webview2Key -ErrorAction SilentlyContinue)) {
+    Write-Info "Installing Edge WebView2 runtime (required for GUI)..."
+    if (Get-Command winget -ErrorAction SilentlyContinue) {
+        winget install --id Microsoft.EdgeWebView2Runtime --silent --accept-source-agreements --accept-package-agreements 2>$null
+        Write-Ok "Edge WebView2 runtime installed."
+    } else {
+        Write-Warn "Edge WebView2 not found and winget unavailable."
+        Write-Warn "GUI will not work. Install from https://developer.microsoft.com/en-us/microsoft-edge/webview2/"
+    }
+} else {
+    Write-Ok "Edge WebView2 runtime already installed."
+}
 
 # Build dashboard if npm available
 $DashDist = Join-Path $InstallDir 'Dashboard\dist'

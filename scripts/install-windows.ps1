@@ -164,7 +164,7 @@ $VenvPython = Join-Path $VenvDir 'Scripts\python.exe'
 Write-Info "Installing Python dependencies (this may take a minute)..."
 & $VenvPip install --quiet --upgrade pip
 & $VenvPip install --quiet -r (Join-Path $RepoDir 'requirements-dev.txt')
-& $VenvPip install --quiet -e $RepoDir
+& $VenvPip install --quiet -e "$RepoDir[network]"
 
 # Locate the installed wireseal entry-point script
 $WireSealExe = Join-Path $VenvDir 'Scripts\wireseal.exe'
@@ -197,7 +197,23 @@ if ($SysPath -notlike "*$InstallDir*") {
 }
 
 # ---------------------------------------------------------------------------
-# 7. Windows Firewall - deferred to runtime
+# 7. Ensure Edge WebView2 runtime is available (required by pywebview GUI)
+# ---------------------------------------------------------------------------
+$webview2Key = 'HKLM:\SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BEF-535EB6278025}'
+if (-not (Test-Path $webview2Key -ErrorAction SilentlyContinue)) {
+    Write-Info "Installing Edge WebView2 runtime (required for GUI)..."
+    if (Get-Command winget -ErrorAction SilentlyContinue) {
+        winget install --id Microsoft.EdgeWebView2Runtime --silent --accept-source-agreements --accept-package-agreements 2>$null
+    } else {
+        Write-Warn "Edge WebView2 not found and winget unavailable."
+        Write-Warn "GUI will not work. Install WebView2 from https://developer.microsoft.com/en-us/microsoft-edge/webview2/"
+    }
+} else {
+    Write-Info "Edge WebView2 runtime already installed"
+}
+
+# ---------------------------------------------------------------------------
+# 8. Windows Firewall - deferred to runtime
 #
 # We previously pre-opened UDP 51820 here, but that hardcoded the port and
 # left a stale rule behind when the user picked a different one at vault
@@ -208,7 +224,7 @@ if ($SysPath -notlike "*$InstallDir*") {
 Write-Info "Firewall rule will be added by 'wireseal init' using your chosen port."
 
 # ---------------------------------------------------------------------------
-# 8. Run self-test
+# 9. Run self-test
 # ---------------------------------------------------------------------------
 Write-Info "Running unit tests to verify installation..."
 $PytestExe = Join-Path $VenvDir 'Scripts\pytest.exe'
@@ -236,5 +252,5 @@ Write-Host "               full      (route ALL traffic through server)"
 Write-Host ""
 Write-Host "Note: WireGuard on Windows uses the Tunnel Service (wintun driver)."
 Write-Host "      'wireseal init' creates the tunnel, enables NAT, and sets firewall rules."
-Write-Host "      A reboot may be required for IP forwarding to take effect."
+Write-Host "      IP forwarding is enabled at runtime (no reboot required)."
 Write-Host ""

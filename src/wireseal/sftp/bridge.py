@@ -20,7 +20,55 @@ from pathlib import Path
 
 import asyncssh
 
+import logging
+
+log = logging.getLogger(__name__)
+
 _IDLE_TIMEOUT = 900  # 15 minutes
+
+
+class SftpTofuRequired(Exception):
+    """Raised when SFTP connection hits an unknown host key.
+
+    The API handler should surface ``fingerprint`` and ``key_export``
+    to the frontend so the user can explicitly accept.
+    """
+
+    def __init__(self, host: str, port: int, fingerprint: str, key_export: str) -> None:
+        self.host = host
+        self.port = port
+        self.fingerprint = fingerprint
+        self.key_export = key_export
+        super().__init__(f"Unknown host key for {host}:{port}: {fingerprint}")
+
+
+class _TofuCapturingClient(asyncssh.SSHClient):
+    """Captures an unknown server host key for TOFU verification."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._captured_key: object = None
+
+    def validate_host_public_key(self, host: str, addr: str, port: int, key: object) -> bool:
+        self._captured_key = key
+        return False
+
+    def fingerprint(self) -> str:
+        if self._captured_key is None:
+            return "<unknown fingerprint>"
+        try:
+            return self._captured_key.get_fingerprint()  # type: ignore[attr-defined]
+        except (AttributeError, OSError):
+            return "<unknown fingerprint>"
+
+    def key_export(self) -> str:
+        if self._captured_key is None:
+            return ""
+        try:
+            raw: bytes = self._captured_key.export_public_key()  # type: ignore[attr-defined]
+            return raw.decode("utf-8").strip()
+        except (AttributeError, UnicodeDecodeError, OSError):
+            return ""
 
 
 class SftpSession:
@@ -106,11 +154,32 @@ class SftpSessionManager:
             _known_hosts_path.touch()
 
         async def _open() -> SftpSession:
-            connect_kwargs = {
+            connect_kwargs: dict = {
                 "host": host,
                 "port": port,
                 "username": username,
                 "known_hosts": str(_known_hosts_path),
+                # Restrict to modern algorithms
+                "encryption_algs": [
+                    "aes256-gcm@openssh.com",
+                    "chacha20-poly1305@openssh.com",
+                    "aes128-gcm@openssh.com",
+                    "aes256-ctr",
+                    "aes128-ctr",
+                ],
+                "kex_algs": [
+                    "curve25519-sha256",
+                    "curve25519-sha256@libssh.org",
+                    "ecdh-sha2-nistp256",
+                    "ecdh-sha2-nistp384",
+                ],
+                "server_host_key_algs": [
+                    "ssh-ed25519",
+                    "ecdsa-sha2-nistp256",
+                    "ecdsa-sha2-nistp384",
+                    "rsa-sha2-512",
+                    "rsa-sha2-256",
+                ],
             }
             if password:
                 connect_kwargs["password"] = password
@@ -121,7 +190,21 @@ class SftpSessionManager:
                 except Exception:
                     pass
 
-            conn = await asyncssh.connect(**connect_kwargs)
+            try:
+                conn = await asyncssh.connect(**connect_kwargs)
+            except asyncssh.HostKeyNotVerifiable:
+                # TOFU: host key not in known_hosts. Capture fingerprint
+                # and raise so the API layer can surface it to the user.
+                tofu_client = _TofuCapturingClient()
+                try:
+                    await asyncssh.connect(
+                        **{**connect_kwargs, "client_factory": lambda: tofu_client}
+                    )
+                except asyncssh.HostKeyNotVerifiable:
+                    pass
+                fp = tofu_client.fingerprint()
+                key_export = tofu_client.key_export()
+                raise SftpTofuRequired(host, port, fp, key_export)
             sftp = await conn.start_sftp_client()
             return SftpSession(conn, sftp, host, port, username)
 

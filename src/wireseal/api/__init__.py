@@ -327,6 +327,12 @@ _ROUTES: list[tuple[str, re.Pattern, Any]] = [
 
     ("POST",   re.compile(r"^/api/sftp/copy$"),                           _h_sftp_copy),
 
+    ("POST",   re.compile(r"^/api/sftp/chmod$"),                          _h_sftp_chmod),
+
+    ("POST",   re.compile(r"^/api/sftp/stat$"),                           _h_sftp_stat),
+
+    ("POST",   re.compile(r"^/api/sftp/exists$"),                         _h_sftp_exists),
+
     # Network discovery (device & service enumeration)
 
     ("GET",    re.compile(r"^/api/network/devices$"),                     _h_network_devices),

@@ -15,6 +15,8 @@ import { Connect } from "./pages/client/Connect";
 import { Terminal } from "./pages/client/Terminal";
 import { Sftp } from "./pages/client/Sftp";
 import { ClientSettings } from "./pages/client/ClientSettings";
+import { Troubleshoot } from "./pages/Troubleshoot";
+import { ClientTroubleshoot } from "./pages/client/Troubleshoot";
 
 export const router = createBrowserRouter([
   {
@@ -32,12 +34,14 @@ export const router = createBrowserRouter([
       { path: "network", Component: Network },
       { path: "two-factor", Component: TwoFactor },
       { path: "backup", Component: Backup },
+      { path: "troubleshoot", Component: Troubleshoot },
       // Client mode routes
       { path: "client", Component: Connect },
       { path: "client/terminal", Component: Terminal },
       { path: "client/sftp", Component: Sftp },
       { path: "client/network", Component: Network },
       { path: "client/settings", Component: ClientSettings },
+      { path: "client/troubleshoot", Component: ClientTroubleshoot },
       // Shared routes
       { path: "about", Component: About },
     ],

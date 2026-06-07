@@ -60,6 +60,9 @@ class SshTicket:
                 self.password.wipe()
             except Exception:
                 pass
+        # Clear private key material
+        if self.key_pem is not None:
+            self.key_pem = None
 
 
 class SshSessionManager:

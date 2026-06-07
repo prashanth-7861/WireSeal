@@ -6,6 +6,7 @@ import {
   Plug, PlugZap, Grid3X3, List, Search, X, ChevronRight,
   Edit3, Copy, FilePlus, TerminalSquare, Eye, EyeOff,
   Star, Clock, Key, ExternalLink, ImageIcon, Loader,
+  Shield, Info as InfoIcon,
 } from "lucide-react";
 import { useSearchParams } from "react-router";
 import { api } from "../../api";
@@ -86,6 +87,10 @@ function connLabel(c: SftpSavedConnection): string {
 
 const TEXT_EXTS = new Set(["txt","md","json","xml","yml","yaml","toml","ini","cfg","conf","sh","py","js","ts","jsx","tsx","rb","go","rs","java","kt","c","cpp","h","hpp","cs","swift","html","css","scss","sql","r","lua","log","env","csv","tsv","gitignore","dockerfile","makefile"]);
 
+function sanitizeFilename(name: string): string {
+  return name.replace(/[/\\:*?"<>|]/g, "_").replace(/\.\./g, "_");
+}
+
 export function Sftp() {
   const [host, setHost] = useState("10.0.0.1");
   const [port, setPort] = useState(22);
@@ -121,7 +126,17 @@ export function Sftp() {
   const [previewFile, setPreviewFile] = useState<string | null>(null);
   const [previewData, setPreviewData] = useState<string | null>(null);
   const [uploadProgress, setUploadProgress] = useState<string | null>(null);
+  const [tofu, setTofu] = useState<{ host: string; port: number; fingerprint: string; key_export: string } | null>(null);
+  const [tofuPending, setTofuPending] = useState<{ pw: string; k?: string } | null>(null);
+  const [goToPath, setGoToPath] = useState(false);
+  const [goToPathVal, setGoToPathVal] = useState("");
+  const [chmodTarget, setChmodTarget] = useState<{ name: string; path: string } | null>(null);
+  const [chmodVal, setChmodVal] = useState("");
+  const [fileStat, setFileStat] = useState<Record<string, unknown> | null>(null);
+  const [overwriteConfirm, setOverwriteConfirm] = useState<{ files: File[]; existing: string[] } | null>(null);
+  const [focusIdx, setFocusIdx] = useState(-1);
   const searchRef = useRef<HTMLInputElement>(null);
+  const listRef = useRef<HTMLDivElement>(null);
   const connected = sessionId !== null;
 
   useEffect(() => {
@@ -143,11 +158,12 @@ export function Sftp() {
     if (u) setUsername(u);
   }, [searchParams]);
 
-  const loadDir = useCallback(async (path: string) => {
-    if (!sessionId) return;
+  const loadDir = useCallback(async (path: string, overrideSessionId?: string) => {
+    const sid = overrideSessionId ?? sessionId;
+    if (!sid) return;
     setLoading(true); setError(null); setSelected(new Set());
     try {
-      const res = await api.sftpList(sessionId, path);
+      const res = await api.sftpList(sid, path);
       setCurrentPath(res.path); setEntries(res.entries);
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : "Failed to load");
@@ -162,12 +178,24 @@ export function Sftp() {
     const k = connKey ?? (authMode === "key" ? selectedKey : undefined);
     if (!h || !u) { setError("Host and username required"); return; }
     if (authMode === "key" && !k) { setError("Select an SSH key"); return; }
-    setLoading(true); setError(null);
+    setLoading(true); setError(null); setTofu(null);
     try {
-      const res = await api.sftpConnect(h, p, u, pw, k);
-      setSessionId(res.session_id);
+      const res = await api.sftpConnect(h, p, u, pw, k) as Record<string, unknown>;
+      if (res.tofu_required) {
+        // Host key not yet trusted — show fingerprint to user
+        setTofu({
+          host: String(res.host),
+          port: Number(res.port),
+          fingerprint: String(res.fingerprint),
+          key_export: String(res.key_export),
+        });
+        setTofuPending({ pw, k });
+        setHost(h); setPort(p); setUsername(u);
+        return;
+      }
+      setSessionId(res.session_id as string);
       setHost(h); setPort(p); setUsername(u);
-      await loadDir("/");
+      await loadDir("/", res.session_id as string);
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : "Connection failed");
     } finally { setLoading(false); }
@@ -219,7 +247,7 @@ export function Sftp() {
   };
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
-    if (e.key === "Escape") { setSelected(new Set()); setContextMenu(null); setPreviewFile(null); setPreviewData(null); }
+    if (e.key === "Escape") { setSelected(new Set()); setContextMenu(null); setPreviewFile(null); setPreviewData(null); setFocusIdx(-1); }
     if (e.ctrlKey && e.key === "a") { e.preventDefault(); setSelected(new Set(filtered.map(x => x.name))); }
     if (e.key === "Delete" && selected.size > 0) {
       if (confirm(`Delete ${selected.size} selected items?`)) {
@@ -233,6 +261,40 @@ export function Sftp() {
       }
     }
     if (e.key === "Home") { e.preventDefault(); loadDir("/"); }
+    // Arrow key navigation
+    if (e.key === "ArrowDown" && sorted.length > 0) {
+      e.preventDefault();
+      const next = Math.min(focusIdx + 1, sorted.length - 1);
+      setFocusIdx(next);
+      setSelected(new Set([sorted[next].name]));
+    }
+    if (e.key === "ArrowUp" && sorted.length > 0) {
+      e.preventDefault();
+      const prev = Math.max(focusIdx - 1, 0);
+      setFocusIdx(prev);
+      setSelected(new Set([sorted[prev].name]));
+    }
+    // Enter to open directory or download file
+    if (e.key === "Enter" && focusIdx >= 0 && focusIdx < sorted.length) {
+      e.preventDefault();
+      const entry = sorted[focusIdx];
+      if (entry.type === "dir") navigate(entry.name);
+      else downloadFile(entry.name);
+    }
+    // F2 to rename
+    if (e.key === "F2" && selected.size === 1) {
+      e.preventDefault();
+      const name = [...selected][0];
+      setRenaming(name); setRenameVal(name);
+    }
+    // F5 to refresh
+    if (e.key === "F5") { e.preventDefault(); loadDir(currentPath); }
+    // Backspace to go up
+    if (e.key === "Backspace" && currentPath !== "/" && !editorFile && !renaming) {
+      e.preventDefault(); goUp();
+    }
+    // Ctrl+G for go-to-path
+    if (e.ctrlKey && e.key === "g") { e.preventDefault(); setGoToPath(true); setGoToPathVal(currentPath); }
   };
 
   useEffect(() => {
@@ -266,21 +328,7 @@ export function Sftp() {
     input.onchange = async () => {
       const files = input.files;
       if (!files || files.length === 0) return;
-      for (const file of Array.from(files)) {
-        setUploadProgress(`Uploading ${file.name}...`);
-        const reader = new FileReader();
-        await new Promise<void>((resolve) => {
-          reader.onload = async () => {
-            try {
-              await api.sftpWrite(sessionId!, fp(file.name), (reader.result as string).split(",")[1]);
-            } catch (e: unknown) { setError(e instanceof Error ? e.message : `Upload failed: ${file.name}`); }
-            resolve();
-          };
-          reader.readAsDataURL(file);
-        });
-      }
-      setUploadProgress(null);
-      loadDir(currentPath);
+      await uploadWithOverwriteCheck(Array.from(files));
     };
     input.click();
   };
@@ -320,8 +368,15 @@ export function Sftp() {
     catch (e: unknown) { setError(e instanceof Error ? e.message : "Copy failed"); }
   };
 
+  const MAX_EDIT_SIZE = 1024 * 1024; // 1 MB max for text editor
   const editFile = async (name: string) => {
     try {
+      // Check size first to avoid loading huge files
+      const stat = await api.sftpStat(sessionId!, fp(name));
+      if (stat.size && stat.size > MAX_EDIT_SIZE) {
+        setError(`File too large to edit (${formatSize(stat.size)}). Max: 1 MB. Download instead.`);
+        return;
+      }
       const res = await api.sftpRead(sessionId!, fp(name));
       setEditorFile({ name, content: atob(res.content_b64) });
       setEditorContent(atob(res.content_b64));
@@ -334,6 +389,57 @@ export function Sftp() {
     try { await api.sftpWrite(sessionId!, fp(editorFile.name), btoa(editorContent)); setEditorFile(null); }
     catch (e: unknown) { setError(e instanceof Error ? e.message : "Save failed"); }
     finally { setSaving(false); }
+  };
+
+  const doChmod = async () => {
+    if (!chmodTarget || !chmodVal.trim()) return;
+    const mode = parseInt(chmodVal.trim(), 8);
+    if (isNaN(mode) || mode < 0 || mode > 0o7777) { setError("Invalid octal permissions (e.g. 755)"); return; }
+    try {
+      await api.sftpChmod(sessionId!, chmodTarget.path, mode);
+      setChmodTarget(null); setChmodVal(""); loadDir(currentPath);
+    } catch (e: unknown) { setError(e instanceof Error ? e.message : "chmod failed"); }
+  };
+
+  const showProperties = async (name: string) => {
+    try {
+      const stat = await api.sftpStat(sessionId!, fp(name));
+      setFileStat({ name, ...stat });
+    } catch (e: unknown) { setError(e instanceof Error ? e.message : "Failed to get properties"); }
+  };
+
+  const uploadWithOverwriteCheck = async (files: File[]) => {
+    // Check which files already exist
+    const existing: string[] = [];
+    for (const file of files) {
+      try {
+        const res = await api.sftpExists(sessionId!, fp(sanitizeFilename(file.name)));
+        if (res.exists) existing.push(file.name);
+      } catch { /* ignore — proceed with upload */ }
+    }
+    if (existing.length > 0) {
+      setOverwriteConfirm({ files, existing });
+      return;
+    }
+    await doUploadFiles(files);
+  };
+
+  const doUploadFiles = async (files: File[]) => {
+    for (const file of files) {
+      setUploadProgress(`Uploading ${file.name}...`);
+      const reader = new FileReader();
+      await new Promise<void>((resolve) => {
+        reader.onload = async () => {
+          try {
+            await api.sftpWrite(sessionId!, fp(sanitizeFilename(file.name)), (reader.result as string).split(",")[1]);
+          } catch (e: unknown) { setError(e instanceof Error ? e.message : `Upload failed: ${file.name}`); }
+          resolve();
+        };
+        reader.readAsDataURL(file);
+      });
+    }
+    setUploadProgress(null);
+    loadDir(currentPath);
   };
 
   const openImagePreview = async (name: string) => {
@@ -448,6 +554,52 @@ export function Sftp() {
             {error && <div className="flex items-center gap-2 text-red-600 text-sm bg-red-50 rounded-lg p-3 border border-red-100"><AlertTriangle className="w-4 h-4 flex-shrink-0" />{error}</div>}
           </div>
         </div>
+
+        {/* TOFU host key verification modal */}
+        {tofu && (
+          <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50">
+            <div className="bg-white rounded-xl shadow-2xl p-6 w-full max-w-md mx-4">
+              <div className="flex items-center gap-3 mb-4">
+                <div className="w-12 h-12 bg-amber-100 rounded-full flex items-center justify-center">
+                  <AlertTriangle className="w-6 h-6 text-amber-600" />
+                </div>
+                <div>
+                  <h2 className="text-lg font-semibold text-gray-900">Unknown Host Key</h2>
+                  <p className="text-sm text-gray-500">First connection to {tofu.host}:{tofu.port}</p>
+                </div>
+              </div>
+              <div className="bg-gray-50 rounded-lg p-3 mb-4">
+                <p className="text-xs text-gray-500 mb-1">SHA-256 Fingerprint</p>
+                <p className="text-sm font-mono text-gray-800 break-all">{tofu.fingerprint}</p>
+              </div>
+              <p className="text-sm text-gray-600 mb-4">
+                Verify this fingerprint matches the server. Accepting will save it for future connections.
+              </p>
+              <div className="flex gap-3">
+                <button onClick={() => { setTofu(null); setTofuPending(null); }}
+                  className="flex-1 px-4 py-2.5 border border-gray-300 rounded-lg hover:bg-gray-50 text-sm">
+                  Reject
+                </button>
+                <button onClick={async () => {
+                  try {
+                    await api.sshAcceptHostKey({ host: tofu.host, port: tofu.port, key_export: tofu.key_export });
+                    setTofu(null);
+                    // Retry connection now that host key is trusted
+                    if (tofuPending) {
+                      await connect(host, port, username, tofuPending.pw, tofuPending.k);
+                      setTofuPending(null);
+                    }
+                  } catch (e: unknown) {
+                    setError(e instanceof Error ? e.message : "Failed to accept host key");
+                    setTofu(null); setTofuPending(null);
+                  }
+                }} className="flex-1 px-4 py-2.5 bg-amber-600 text-white rounded-lg hover:bg-amber-700 text-sm font-medium">
+                  Trust &amp; Connect
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
     );
   }
@@ -458,22 +610,7 @@ export function Sftp() {
       onDragLeave={() => setDragOver(false)}
       onDrop={async e => {
         e.preventDefault(); setDragOver(false);
-        const files = Array.from(e.dataTransfer.files);
-        for (const file of files) {
-          setUploadProgress(`Uploading ${file.name}...`);
-          const reader = new FileReader();
-          await new Promise<void>((resolve) => {
-            reader.onload = async () => {
-              try {
-                await api.sftpWrite(sessionId!, fp(file.name), (reader.result as string).split(",")[1]);
-              } catch {}
-              resolve();
-            };
-            reader.readAsDataURL(file);
-          });
-        }
-        setUploadProgress(null);
-        loadDir(currentPath);
+        await uploadWithOverwriteCheck(Array.from(e.dataTransfer.files));
       }}>
       {dragOver && (
         <div className="absolute inset-0 z-50 bg-blue-500/10 border-2 border-dashed border-blue-400 rounded-lg flex items-center justify-center pointer-events-none">
@@ -568,7 +705,7 @@ export function Sftp() {
         <button onClick={() => setShowHidden(!showHidden)} className={`flex items-center gap-1 px-2 py-0.5 rounded transition-colors ${showHidden ? "bg-gray-200 text-gray-700" : "text-gray-400 hover:text-gray-600"}`} title="Toggle hidden files">
           {showHidden ? <EyeOff className="w-3 h-3" /> : <Eye className="w-3 h-3" />}
         </button>
-        <button onClick={() => window.open(`/client/terminal?host=${host}&port=${port}&user=${username}`, "_blank")}
+        <button onClick={() => { const p = new URLSearchParams({ host, port: String(port), user: username }); window.open(`/client/terminal?${p.toString()}`, "_blank"); }}
           className="flex items-center gap-1 px-2 py-0.5 bg-blue-50 text-blue-700 rounded hover:bg-blue-100 transition-colors">
           <TerminalSquare className="w-3 h-3" /> Terminal Here
         </button>
@@ -732,6 +869,8 @@ export function Sftp() {
             { label: "Edit", icon: Edit3, fn: () => editFile(contextMenu.name), hidden: !TEXT_EXTS.has(contextMenu.name.includes(".") ? contextMenu.name.split(".").pop() || "" : "") },
             { label: "Rename", icon: Edit3, fn: () => { setRenaming(contextMenu.name); setRenameVal(contextMenu.name); }, hidden: false },
             { label: "Copy To...", icon: Copy, fn: () => { setCopyTarget(contextMenu.name); setCopyDest(fp("copy_of_" + contextMenu.name)); }, hidden: false },
+            { label: "Chmod", icon: Shield, fn: () => { setChmodTarget({ name: contextMenu.name, path: fp(contextMenu.name) }); setChmodVal(""); }, hidden: false },
+            { label: "Properties", icon: InfoIcon, fn: () => showProperties(contextMenu.name), hidden: false },
             { label: "Delete", icon: Trash2, fn: () => deleteItem(contextMenu.name), hidden: false },
           ].filter(a => !a.hidden).map((a, i) => (
             <button key={i} onClick={() => { a.fn(); setContextMenu(null); }}
@@ -771,6 +910,105 @@ export function Sftp() {
               <div className="flex gap-2 justify-end">
                 <button type="button" onClick={() => setCopyTarget(null)} className="px-3 py-1.5 text-sm border rounded-lg hover:bg-gray-50">Cancel</button>
                 <button type="submit" disabled={!copyDest} className="px-3 py-1.5 text-sm bg-purple-600 text-white rounded-lg hover:bg-purple-700">Copy</button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* Chmod modal */}
+      {chmodTarget && (
+        <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50" onClick={() => setChmodTarget(null)}>
+          <div className="bg-white rounded-xl p-5 w-full max-w-sm shadow-xl" onClick={e => e.stopPropagation()}>
+            <h3 className="text-sm font-semibold mb-1 flex items-center gap-2"><Shield className="w-4 h-4 text-blue-600" />Change Permissions</h3>
+            <p className="text-xs text-gray-500 mb-3 truncate">{chmodTarget.name}</p>
+            <form onSubmit={e => { e.preventDefault(); doChmod(); }}>
+              <label className="text-xs text-gray-500 mb-1 block">Octal mode (e.g. 755, 644)</label>
+              <input value={chmodVal} onChange={e => { if (/^[0-7]{0,4}$/.test(e.target.value)) setChmodVal(e.target.value); }}
+                className="w-full border rounded-lg px-3 py-2 text-sm mb-2 font-mono text-center text-lg tracking-widest focus:ring-2 focus:ring-blue-500"
+                placeholder="755" maxLength={4} autoFocus />
+              <div className="grid grid-cols-3 gap-2 mb-3 text-xs text-center">
+                {["Owner", "Group", "Other"].map((label, i) => {
+                  const digit = chmodVal.length >= i + 1 ? parseInt(chmodVal[chmodVal.length <= 3 ? i : i + 1] || "0") : 0;
+                  return (
+                    <div key={label} className="bg-gray-50 rounded-lg p-2">
+                      <p className="font-medium text-gray-700 mb-1">{label}</p>
+                      <div className="flex justify-center gap-2 text-gray-500">
+                        <span className={digit & 4 ? "text-green-600 font-bold" : ""}>r</span>
+                        <span className={digit & 2 ? "text-yellow-600 font-bold" : ""}>w</span>
+                        <span className={digit & 1 ? "text-red-600 font-bold" : ""}>x</span>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+              <div className="flex gap-2 justify-end">
+                <button type="button" onClick={() => setChmodTarget(null)} className="px-3 py-1.5 text-sm border rounded-lg hover:bg-gray-50">Cancel</button>
+                <button type="submit" disabled={chmodVal.length < 3} className="px-3 py-1.5 text-sm bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50">Apply</button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* Properties modal */}
+      {fileStat && (
+        <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50" onClick={() => setFileStat(null)}>
+          <div className="bg-white rounded-xl p-5 w-full max-w-sm shadow-xl" onClick={e => e.stopPropagation()}>
+            <h3 className="text-sm font-semibold mb-3 flex items-center gap-2"><InfoIcon className="w-4 h-4 text-blue-600" />Properties: {String(fileStat.name)}</h3>
+            <div className="space-y-2 text-sm">
+              {fileStat.size !== undefined && <div className="flex justify-between"><span className="text-gray-500">Size</span><span className="font-mono">{formatSize(fileStat.size as number)}</span></div>}
+              {fileStat.permissions_octal && <div className="flex justify-between"><span className="text-gray-500">Permissions</span><span className="font-mono">{String(fileStat.permissions_octal)}</span></div>}
+              {fileStat.uid !== undefined && <div className="flex justify-between"><span className="text-gray-500">Owner (UID)</span><span className="font-mono">{String(fileStat.uid)}</span></div>}
+              {fileStat.gid !== undefined && <div className="flex justify-between"><span className="text-gray-500">Group (GID)</span><span className="font-mono">{String(fileStat.gid)}</span></div>}
+              {fileStat.is_dir !== undefined && <div className="flex justify-between"><span className="text-gray-500">Type</span><span>{fileStat.is_dir ? "Directory" : fileStat.is_link ? "Symlink" : "File"}</span></div>}
+              {fileStat.modified && <div className="flex justify-between"><span className="text-gray-500">Modified</span><span>{new Date((fileStat.modified as number) * 1000).toLocaleString()}</span></div>}
+              {fileStat.accessed && <div className="flex justify-between"><span className="text-gray-500">Accessed</span><span>{new Date((fileStat.accessed as number) * 1000).toLocaleString()}</span></div>}
+            </div>
+            <div className="mt-4 flex justify-end">
+              <button onClick={() => setFileStat(null)} className="px-3 py-1.5 text-sm border rounded-lg hover:bg-gray-50">Close</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Overwrite confirmation */}
+      {overwriteConfirm && (
+        <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50">
+          <div className="bg-white rounded-xl p-5 w-full max-w-sm shadow-xl">
+            <h3 className="text-sm font-semibold mb-2 flex items-center gap-2"><AlertTriangle className="w-4 h-4 text-amber-500" />Files Already Exist</h3>
+            <p className="text-xs text-gray-500 mb-3">{overwriteConfirm.existing.length} file(s) will be overwritten:</p>
+            <div className="bg-gray-50 rounded-lg p-2 mb-3 max-h-32 overflow-auto">
+              {overwriteConfirm.existing.map(name => (
+                <p key={name} className="text-xs font-mono text-gray-700 py-0.5">{name}</p>
+              ))}
+            </div>
+            <div className="flex gap-2">
+              <button onClick={() => setOverwriteConfirm(null)}
+                className="flex-1 px-3 py-2 text-sm border rounded-lg hover:bg-gray-50">Cancel</button>
+              <button onClick={async () => {
+                const files = overwriteConfirm.files;
+                setOverwriteConfirm(null);
+                await doUploadFiles(files);
+              }} className="flex-1 px-3 py-2 text-sm bg-amber-600 text-white rounded-lg hover:bg-amber-700 font-medium">
+                Overwrite
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Go-to-path dialog */}
+      {goToPath && (
+        <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50" onClick={() => setGoToPath(false)}>
+          <div className="bg-white rounded-xl p-5 w-full max-w-md shadow-xl" onClick={e => e.stopPropagation()}>
+            <h3 className="text-sm font-semibold mb-3">Go to Path (Ctrl+G)</h3>
+            <form onSubmit={e => { e.preventDefault(); if (goToPathVal.trim()) { loadDir(goToPathVal.trim()); setGoToPath(false); } }}>
+              <input value={goToPathVal} onChange={e => setGoToPathVal(e.target.value)}
+                className="w-full border rounded-lg px-3 py-2 text-sm font-mono focus:ring-2 focus:ring-blue-500" placeholder="/home/user" autoFocus />
+              <div className="flex gap-2 justify-end mt-3">
+                <button type="button" onClick={() => setGoToPath(false)} className="px-3 py-1.5 text-sm border rounded-lg hover:bg-gray-50">Cancel</button>
+                <button type="submit" disabled={!goToPathVal.trim()} className="px-3 py-1.5 text-sm bg-blue-600 text-white rounded-lg hover:bg-blue-700">Go</button>
               </div>
             </form>
           </div>
