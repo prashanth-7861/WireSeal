@@ -348,7 +348,7 @@ def _h_revoke_client(req: "_Handler", groups: tuple) -> dict:
             if sys.platform != "win32":
                 cmd = _sudo(cmd)
             try:
-                subprocess.run(cmd, capture_output=True, timeout=5)
+                subprocess.run(cmd, capture_output=True, timeout=5, creationflags=_SP_FLAGS)
             except Exception as exc:
                 logging.getLogger("wireseal.security").warning("Failed to remove WireGuard peer for revoked client %s: %s", name, exc)
 
@@ -408,7 +408,7 @@ def _h_suspend_client(req: "_Handler", groups: tuple) -> dict:
                 if sys.platform != "win32":
                     cmd = _sudo(cmd)
                 try:
-                    subprocess.run(cmd, capture_output=True, timeout=5)
+                    subprocess.run(cmd, capture_output=True, timeout=5, creationflags=_SP_FLAGS)
                 except Exception as exc:
                     logging.getLogger("wireseal.security").warning("Failed to remove WireGuard peer for suspended client %s: %s", name, exc)
             client["status"] = "suspended"

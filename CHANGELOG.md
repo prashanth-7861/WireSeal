@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.9.42] — 2026-06-07
+
+### Fixed
+- **PowerShell window flash on Windows** — all 8 `subprocess.run` calls in `client/tunnel.py` (connect, disconnect, status) now pass `creationflags=CREATE_NO_WINDOW`, eliminating the console window that appeared on every tunnel operation
+- **"Config not found" auto-recovery** — when WireGuard config is missing (e.g. after DPAPI encryption deleted the `.conf`), `_h_start_server` now auto-redeploys from vault before erroring instead of showing a dead-end message
+- **Internal path leak in error messages** — "WireGuard config not found at C:\ProgramData\WireGuard\wg0.conf" no longer exposes filesystem paths to the UI
+
+### Changed
+- **Version bump** to 0.9.42.
+
+---
+
 ## [0.9.41] — 2026-06-07
 
 ### Fixed

@@ -59,13 +59,21 @@ interface ChangelogEntry {
 
 const CHANGELOG: ChangelogEntry[] = [
   {
-    version: "0.9.41",
-    date: "2026-06-05",
+    version: "0.9.42",
+    date: "2026-06-07",
     highlights: [
-      "Split-LAN DNS fix: auto-detects actual router gateway instead of assuming first subnet IP",
-      "Windows runtime IP forwarding: split-LAN works immediately without reboot",
-      "Gateway detection on all platforms: Linux (ip route), macOS (route), Windows (Get-NetRoute)",
-      "All 6 config export paths updated to use detected gateway for DNS",
+      "Windows: eliminated PowerShell console flash on all tunnel operations",
+      "Auto-recovery: server config re-deployed from vault when missing after DPAPI encryption",
+      "Error messages no longer expose internal filesystem paths to the UI",
+    ],
+  },
+  {
+    version: "0.9.41",
+    date: "2026-06-07",
+    highlights: [
+      "WireGuard PATH resolution for service/daemon environments",
+      "Troubleshoot page security hardening with confirmation dialogs and error sanitization",
+      "DPAPI config lifecycle fix for Windows service detection",
     ],
   },
   {

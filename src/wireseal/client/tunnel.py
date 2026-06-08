@@ -23,6 +23,9 @@ log = logging.getLogger(__name__)
 
 CLIENT_INTERFACE = "wg-client"
 
+# Suppress console window flash on Windows for all subprocess calls.
+_NO_WIN = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
+
 _lock = threading.Lock()
 _state: dict[str, Any] = {
     "active_profile": None,
@@ -101,6 +104,7 @@ def _interface_is_up() -> bool:
             [*_sudo_prefix(), "wg", "show", CLIENT_INTERFACE],
             capture_output=True,
             timeout=5,
+            creationflags=_NO_WIN,
         )
         if proc.returncode != 0:
             return False
@@ -237,6 +241,7 @@ def tunnel_up(
                         check=True,
                         capture_output=True,
                         timeout=30,
+                        creationflags=_NO_WIN,
                     )
                 else:
                     # Fallback: try wg-quick if available
@@ -245,6 +250,7 @@ def tunnel_up(
                         check=True,
                         capture_output=True,
                         timeout=30,
+                        creationflags=_NO_WIN,
                     )
                 # Windows tunnel service starts asynchronously — wait for
                 # the interface to actually appear before returning, otherwise
@@ -261,6 +267,7 @@ def tunnel_up(
                     check=True,
                     capture_output=True,
                     timeout=30,
+                    creationflags=_NO_WIN,
                 )
 
             _state["connected"] = True
@@ -331,6 +338,7 @@ def tunnel_down() -> dict[str, str]:
                         check=True,
                         capture_output=True,
                         timeout=30,
+                        creationflags=_NO_WIN,
                     )
                 else:
                     # Fallback: address by interface name.
@@ -339,6 +347,7 @@ def tunnel_down() -> dict[str, str]:
                         check=True,
                         capture_output=True,
                         timeout=30,
+                        creationflags=_NO_WIN,
                     )
             else:
                 # Prefer interface-name form so a deleted/moved config file
@@ -350,6 +359,7 @@ def tunnel_down() -> dict[str, str]:
                     check=True,
                     capture_output=True,
                     timeout=30,
+                    creationflags=_NO_WIN,
                 )
         except subprocess.CalledProcessError as exc:
             stderr = exc.stderr.decode("utf-8", errors="replace") if exc.stderr else ""
@@ -484,7 +494,7 @@ def tunnel_status() -> dict[str, Any]:
         raw = ""
         try:
             cmd = [*_sudo_prefix(), "wg", "show", CLIENT_INTERFACE]
-            proc = subprocess.run(cmd, capture_output=True, timeout=5)
+            proc = subprocess.run(cmd, capture_output=True, timeout=5, creationflags=_NO_WIN)
             if proc.returncode == 0:
                 raw = proc.stdout.decode("utf-8", errors="replace")
         except (subprocess.TimeoutExpired, FileNotFoundError, OSError):

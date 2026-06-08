@@ -129,6 +129,7 @@ def _h_start_server(req: "_Handler", _groups: tuple) -> dict:
         _sudo(["ip", "link", "show", _WG_IFACE]) if sys.platform != "win32"
         else ["sc.exe", "query", f"WireGuardTunnel${_WG_IFACE}"],
         capture_output=True, timeout=5,
+        creationflags=_SP_FLAGS,
     )
     if sys.platform == "win32":
         if b"RUNNING" in (check.stdout or b""):
@@ -152,12 +153,42 @@ def _h_start_server(req: "_Handler", _groups: tuple) -> dict:
                     500,
                 )
             if not config_exists:
-                raise _ApiError(
-                    f"WireGuard config not found at {config_path}. "
-                    "Configure the server first (Settings → Generate "
-                    "Config), then try again.",
-                    500,
-                )
+                # Auto-recover: re-deploy config from vault if unlocked.
+                recovered = False
+                try:
+                    with _lock:
+                        vault = _session.get("vault")
+                        pp   = _session.get("passphrase")
+                    if vault and pp:
+                        from wireseal.core.config_builder import ConfigBuilder
+                        state = vault.load(pp)
+                        srv   = state.get("server") or {}
+                        if srv.get("private_key"):
+                            _extract = lambda v: v.expose_secret().decode("ascii") if hasattr(v, "expose_secret") else str(v)
+                            peers = [
+                                {"name": n, "public_key": _extract(d["public_key"]),
+                                 "psk": _extract(d["psk"]), "ip": d["ip"]}
+                                for n, d in (state.get("clients") or {}).items()
+                                if d.get("status", "active") == "active"
+                            ]
+                            cfg = ConfigBuilder().render_server_config(
+                                server_private_key=_extract(srv["private_key"]),
+                                server_ip=srv["ip"],
+                                prefix_length=int((state.get("ip_pool") or {}).get("subnet", "10.0.0.0/24").split("/")[1]),
+                                server_port=srv.get("port", 51820),
+                                clients=peers,
+                            )
+                            adapter.deploy_config(cfg)
+                            recovered = True
+                except Exception:
+                    pass
+                if not recovered:
+                    raise _ApiError(
+                        "WireGuard configuration not found. "
+                        "Configure the server first (Settings \u2192 Generate "
+                        "Config), then try again.",
+                        500,
+                    )
             try:
                 adapter.enable_tunnel_service(_WG_IFACE)
             except Exception as exc:
