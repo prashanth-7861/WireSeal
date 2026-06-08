@@ -450,8 +450,42 @@ def _h_unlock(req: "_Handler", _groups: tuple) -> dict:
         except Exception as _audit_exc:
             logging.getLogger("wireseal.audit").warning("Audit log write failed: %s", _audit_exc)
 
-        # Server mode: tunnel is NOT auto-started on unlock. The user
-        # controls the WireGuard server via Dashboard Start/Stop buttons.
+        # Server mode: auto-deploy WireGuard config if missing on disk.
+        # This handles DPAPI wipe, accidental deletion, or fresh machine.
+        # Tunnel is NOT auto-started — user controls via Dashboard buttons.
+        if cache.get("mode") == "server":
+            try:
+                from wireseal.platform.detect import get_adapter
+                _adapter = get_adapter()
+                _cfg_path = _adapter.get_config_path("wg0")
+                _dpapi    = _cfg_path.with_suffix(".conf.dpapi")
+                if not _cfg_path.exists() and not _dpapi.exists():
+                    srv = cache.get("server") or {}
+                    if srv.get("ip"):
+                        with vault.open(passphrase, admin_id=admin_id) as _st:
+                            _srv = _st.data.get("server") or {}
+                            _pk  = _srv.get("private_key")
+                            if _pk:
+                                _ext = lambda v: v.expose_secret().decode("ascii") if hasattr(v, "expose_secret") else str(v)
+                                _clients = [
+                                    {"name": n, "public_key": _ext(d["public_key"]),
+                                     "psk": _ext(d["psk"]), "ip": d["ip"]}
+                                    for n, d in (_st.data.get("clients") or {}).items()
+                                    if d.get("status", "active") == "active"
+                                ]
+                                from wireseal.core.config_builder import ConfigBuilder
+                                _cfg = ConfigBuilder().render_server_config(
+                                    server_private_key=_ext(_pk),
+                                    server_ip=srv["ip"],
+                                    prefix_length=int((cache.get("ip_pool") or {}).get("subnet", "10.0.0.0/24").split("/")[1]),
+                                    server_port=srv.get("port", 51820),
+                                    clients=_clients,
+                                )
+                                _adapter.deploy_config(_cfg)
+                                logging.getLogger("wireseal.vault").info("Auto-deployed WireGuard config on unlock (was missing)")
+            except Exception as _deploy_exc:
+                logging.getLogger("wireseal.vault").warning("Config auto-deploy on unlock failed: %s", _deploy_exc)
+
         # Client mode: honour auto_connect_profile setting if configured.
         auto_profile = None
         if cache.get("mode") == "client":

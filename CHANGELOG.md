@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.9.43] — 2026-06-08
+
+### Fixed
+- **Auto-deploy WireGuard config on vault unlock** — when the server `.conf` file is missing (DPAPI wipe, accidental deletion, fresh machine), the unlock handler now re-deploys the config from vault state automatically instead of requiring a manual server start to trigger recovery
+
+### Changed
+- **Version bump** to 0.9.43.
+
+---
+
 ## [0.9.42] — 2026-06-07
 
 ### Fixed

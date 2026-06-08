@@ -59,6 +59,14 @@ interface ChangelogEntry {
 
 const CHANGELOG: ChangelogEntry[] = [
   {
+    version: "0.9.43",
+    date: "2026-06-08",
+    highlights: [
+      "Auto-deploy WireGuard config on vault unlock when .conf is missing",
+      "Eliminates dead-end 'config not found' after DPAPI wipe or accidental deletion",
+    ],
+  },
+  {
     version: "0.9.42",
     date: "2026-06-07",
     highlights: [
