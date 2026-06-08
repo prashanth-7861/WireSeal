@@ -264,6 +264,10 @@ class LinuxAdapter(AbstractPlatformAdapter):
         Uses atomic_write from security/atomic.py to ensure the file is never
         world-readable at any point during the write.
 
+        When firewalld is NOT active and the config lacks PostUp/PostDown,
+        injects iptables-based NAT masquerade rules so VPN clients can
+        reach the internet after every ``wg-quick up``.
+
         Args:
             config_content: WireGuard INI configuration as a UTF-8 string.
             interface:      Interface name (default wg0).
@@ -271,6 +275,38 @@ class LinuxAdapter(AbstractPlatformAdapter):
         Returns:
             The Path where the config was written.
         """
+        # Inject PostUp/PostDown for NAT if missing and firewalld is absent.
+        if "PostUp" not in config_content and not _has_firewalld():
+            try:
+                pub_iface = self.detect_outbound_interface()
+                post_up = (
+                    f"iptables -A FORWARD -i %i -j ACCEPT; "
+                    f"iptables -A FORWARD -o %i -j ACCEPT; "
+                    f"iptables -t nat -A POSTROUTING -o {pub_iface} -j MASQUERADE"
+                )
+                post_down = (
+                    f"iptables -D FORWARD -i %i -j ACCEPT; "
+                    f"iptables -D FORWARD -o %i -j ACCEPT; "
+                    f"iptables -t nat -D POSTROUTING -o {pub_iface} -j MASQUERADE"
+                )
+                # Insert after ListenPort line
+                config_content = config_content.replace(
+                    f"ListenPort = ",
+                    f"ListenPort = ",  # keep as-is, inject after full line
+                )
+                lines = config_content.split("\n")
+                new_lines = []
+                for line in lines:
+                    new_lines.append(line)
+                    if line.strip().startswith("ListenPort"):
+                        new_lines.append(f"PostUp = {post_up}")
+                        new_lines.append(f"PostDown = {post_down}")
+                config_content = "\n".join(new_lines)
+            except Exception as _exc:
+                logging.getLogger("wireseal.platform").warning(
+                    "Could not inject PostUp/PostDown NAT rules: %s", _exc
+                )
+
         path = self.get_config_path(interface)
         parent = path.parent
 

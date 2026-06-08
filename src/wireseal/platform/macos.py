@@ -254,6 +254,9 @@ class MacOSAdapter(AbstractPlatformAdapter):
     def deploy_config(self, config_content: str, interface: str = "wg0") -> Path:
         """Write WireGuard config to the Homebrew-prefix wireguard directory.
 
+        When the config lacks PostUp/PostDown, injects pfctl NAT rules so
+        VPN clients can reach the internet after every ``wg-quick up``.
+
         Args:
             config_content: WireGuard INI configuration as a string.
             interface:       Interface name (default ``wg0``).
@@ -261,6 +264,30 @@ class MacOSAdapter(AbstractPlatformAdapter):
         Returns:
             Path where the config was written.
         """
+        if "PostUp" not in config_content:
+            try:
+                pub_iface = self.detect_outbound_interface()
+                post_up = (
+                    f'echo "nat on {pub_iface} from %a to any -> ({pub_iface})" | '
+                    f"pfctl -a com.apple/wireguard -f - -e 2>/dev/null; sysctl -w net.inet.ip.forwarding=1"
+                )
+                post_down = (
+                    f"pfctl -a com.apple/wireguard -F all 2>/dev/null"
+                )
+                lines = config_content.split("\n")
+                new_lines = []
+                for line in lines:
+                    new_lines.append(line)
+                    if line.strip().startswith("ListenPort"):
+                        new_lines.append(f"PostUp = {post_up}")
+                        new_lines.append(f"PostDown = {post_down}")
+                config_content = "\n".join(new_lines)
+            except Exception as _exc:
+                import logging
+                logging.getLogger("wireseal.platform").warning(
+                    "Could not inject PostUp/PostDown NAT rules: %s", _exc
+                )
+
         path = self.get_config_path(interface)
         parent = path.parent
         if not parent.exists():

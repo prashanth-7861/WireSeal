@@ -9,7 +9,7 @@ tokens, or secrets are exposed.
 
 [![CI](https://github.com/prashanth-7861/WireSeal/actions/workflows/build.yml/badge.svg)](https://github.com/prashanth-7861/WireSeal/actions/workflows/build.yml)
 [![Python](https://img.shields.io/badge/python-3.12%20%E2%80%93%203.14-blue)](https://python.org)
-[![Version](https://img.shields.io/badge/version-0.9.44-green)](https://github.com/prashanth-7861/WireSeal/releases)
+[![Version](https://img.shields.io/badge/version-0.9.45-green)](https://github.com/prashanth-7861/WireSeal/releases)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 [![Website](https://img.shields.io/badge/website-wireseal.vercel.app-blue)](https://wireseal.vercel.app)
 

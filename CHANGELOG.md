@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.9.45] — 2026-06-08
+
+### Fixed
+- **Missing NAT masquerade after reboot** — `wg0.conf` had no `PostUp`/`PostDown` rules, so NAT (internet access for VPN clients) was lost on reboot. `deploy_config` on Linux/macOS now auto-injects iptables/pfctl NAT rules when firewalld is absent, ensuring `wg-quick up` always configures masquerading
+- **"Handshake never" for iPhone clients** — caused by the above: no NAT meant packets from VPN clients couldn't route to the internet, preventing handshake completion
+
+### Changed
+- **Version bump** to 0.9.45.
+
+---
+
 ## [0.9.44] — 2026-06-08
 
 ### Fixed

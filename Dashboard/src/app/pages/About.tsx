@@ -59,12 +59,12 @@ interface ChangelogEntry {
 
 const CHANGELOG: ChangelogEntry[] = [
   {
-    version: "0.9.44",
+    version: "0.9.45",
     date: "2026-06-08",
     highlights: [
-      "Fixed vault.load() bug that silently broke all config auto-recovery",
-      "New Regenerate Config button in Settings for manual config recovery",
-      "Error messages now point to actual UI actions instead of non-existent buttons",
+      "Auto-inject NAT masquerade (PostUp/PostDown) into wg0.conf on Linux/macOS",
+      "Fixes 'handshake never' and no internet for VPN clients after reboot",
+      "Regenerate Config button in Settings for manual config recovery",
     ],
   },
   {
