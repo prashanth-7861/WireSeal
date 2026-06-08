@@ -546,6 +546,9 @@ export const api = {
   updateEndpoint: (endpoint?: string) =>
     _fetch<{ ok: boolean; endpoint: string }>("POST", "/update-endpoint", { endpoint }),
 
+  regenerateConfig: () =>
+    _fetch<{ ok: boolean; path?: string }>("POST", "/regenerate-config"),
+
   changePort: (port: number, confirm_warning: boolean = false) =>
     _fetch<{
       ok: boolean;

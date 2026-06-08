@@ -155,38 +155,45 @@ def _h_start_server(req: "_Handler", _groups: tuple) -> dict:
             if not config_exists:
                 # Auto-recover: re-deploy config from vault if unlocked.
                 recovered = False
+                _recover_log = logging.getLogger("wireseal.service")
                 try:
                     with _lock:
-                        vault = _session.get("vault")
-                        pp   = _session.get("passphrase")
-                    if vault and pp:
+                        _vault = _session.get("vault")
+                        _pp    = _session.get("passphrase")
+                        _aid   = _session.get("admin_id", "owner")
+                    if _vault and _pp:
                         from wireseal.core.config_builder import ConfigBuilder
-                        state = vault.load(pp)
-                        srv   = state.get("server") or {}
-                        if srv.get("private_key"):
-                            _extract = lambda v: v.expose_secret().decode("ascii") if hasattr(v, "expose_secret") else str(v)
-                            peers = [
-                                {"name": n, "public_key": _extract(d["public_key"]),
-                                 "psk": _extract(d["psk"]), "ip": d["ip"]}
-                                for n, d in (state.get("clients") or {}).items()
-                                if d.get("status", "active") == "active"
-                            ]
-                            cfg = ConfigBuilder().render_server_config(
-                                server_private_key=_extract(srv["private_key"]),
-                                server_ip=srv["ip"],
-                                prefix_length=int((state.get("ip_pool") or {}).get("subnet", "10.0.0.0/24").split("/")[1]),
-                                server_port=srv.get("port", 51820),
-                                clients=peers,
-                            )
-                            adapter.deploy_config(cfg)
-                            recovered = True
-                except Exception:
-                    pass
+                        with _vault.open(_pp, admin_id=_aid) as _st:
+                            srv = _st.data.get("server") or {}
+                            if srv.get("private_key"):
+                                _extract = lambda v: v.expose_secret().decode("ascii") if hasattr(v, "expose_secret") else str(v)
+                                peers = [
+                                    {"name": n, "public_key": _extract(d["public_key"]),
+                                     "psk": _extract(d["psk"]), "ip": d["ip"]}
+                                    for n, d in (_st.data.get("clients") or {}).items()
+                                    if d.get("status", "active") == "active"
+                                ]
+                                cfg = ConfigBuilder().render_server_config(
+                                    server_private_key=_extract(srv["private_key"]),
+                                    server_ip=srv["ip"],
+                                    prefix_length=int((_st.data.get("ip_pool") or {}).get("subnet", "10.0.0.0/24").split("/")[1]),
+                                    server_port=srv.get("port", 51820),
+                                    clients=peers,
+                                )
+                                adapter.deploy_config(cfg)
+                                recovered = True
+                                _recover_log.info("Auto-deployed WireGuard config (was missing)")
+                            else:
+                                _recover_log.warning("Vault has no server private_key — cannot auto-deploy config")
+                    else:
+                        _recover_log.warning("Vault not unlocked — cannot auto-deploy config")
+                except Exception as _exc:
+                    _recover_log.error("Config auto-deploy failed: %s", _exc)
                 if not recovered:
                     raise _ApiError(
                         "WireGuard configuration not found. "
-                        "Configure the server first (Settings \u2192 Generate "
-                        "Config), then try again.",
+                        "Go to Settings \u2192 Regenerate Config to "
+                        "re-deploy from vault, then try again.",
                         500,
                     )
             try:
@@ -602,3 +609,69 @@ def _h_uninstall(req: "_Handler", _groups: tuple) -> dict:
                 "Refresh this page after a few seconds -- it should fail "
                 "to connect once the service is gone.",
     }
+
+
+# ------------------------------------------------------------------
+# Regenerate WireGuard config from vault
+# ------------------------------------------------------------------
+
+def _h_regenerate_config(req: "_Handler", _groups: tuple) -> dict:
+    """Re-deploy wg0.conf from vault state.
+
+    Useful when the config file is missing (DPAPI wipe, accidental
+    deletion, fresh machine) and auto-recovery didn't trigger.
+    """
+    _require_unlocked()
+    _require_server_mode()
+    from wireseal.security.audit import AuditLog
+    from wireseal.platform.detect import get_adapter
+    from wireseal.core.config_builder import ConfigBuilder
+
+    adapter = get_adapter()
+    log = logging.getLogger("wireseal.service")
+
+    with _lock:
+        vault = _session.get("vault")
+        pp    = _session.get("passphrase")
+        aid   = _session.get("admin_id", "owner")
+    if not vault or not pp:
+        raise _ApiError("Vault is not unlocked.", 401)
+
+    try:
+        with vault.open(pp, admin_id=aid) as st:
+            srv = st.data.get("server") or {}
+            pk  = srv.get("private_key")
+            if not pk:
+                raise _ApiError(
+                    "Vault has no server private key. "
+                    "Run initial setup again (Fresh Start → re-initialise).",
+                    500,
+                )
+            _ext = lambda v: v.expose_secret().decode("ascii") if hasattr(v, "expose_secret") else str(v)
+            peers = [
+                {"name": n, "public_key": _ext(d["public_key"]),
+                 "psk": _ext(d["psk"]), "ip": d["ip"]}
+                for n, d in (st.data.get("clients") or {}).items()
+                if d.get("status", "active") == "active"
+            ]
+            pool = st.data.get("ip_pool") or {}
+            cfg = ConfigBuilder().render_server_config(
+                server_private_key=_ext(pk),
+                server_ip=srv["ip"],
+                prefix_length=int(pool.get("subnet", "10.0.0.0/24").split("/")[1]),
+                server_port=srv.get("port", 51820),
+                clients=peers,
+            )
+            path = adapter.deploy_config(cfg)
+    except _ApiError:
+        raise
+    except Exception as exc:
+        log.error("Config regeneration failed: %s", exc)
+        raise _ApiError(f"Config regeneration failed: {exc}", 500)
+
+    log.info("WireGuard config regenerated manually via API")
+    AuditLog(_s._AUDIT_PATH).log(
+        "regenerate-config", {"path": str(path)},
+        actor=_session.get("admin_id", "owner"),
+    )
+    return {"ok": True, "path": str(path)}

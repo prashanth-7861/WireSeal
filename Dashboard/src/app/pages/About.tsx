@@ -59,11 +59,19 @@ interface ChangelogEntry {
 
 const CHANGELOG: ChangelogEntry[] = [
   {
+    version: "0.9.44",
+    date: "2026-06-08",
+    highlights: [
+      "Fixed vault.load() bug that silently broke all config auto-recovery",
+      "New Regenerate Config button in Settings for manual config recovery",
+      "Error messages now point to actual UI actions instead of non-existent buttons",
+    ],
+  },
+  {
     version: "0.9.43",
     date: "2026-06-08",
     highlights: [
       "Auto-deploy WireGuard config on vault unlock when .conf is missing",
-      "Eliminates dead-end 'config not found' after DPAPI wipe or accidental deletion",
     ],
   },
   {

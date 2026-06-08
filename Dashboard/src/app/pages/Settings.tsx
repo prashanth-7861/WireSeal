@@ -90,6 +90,9 @@ export function Settings() {
     recommended: { port: number; label: string }[];
   } | null>(null);
 
+  // Regenerate config
+  const [regenLoading, setRegenLoading] = useState(false);
+
   // Terminate
   const [terminateLoading, setTerminateLoading] = useState(false);
 
@@ -259,6 +262,19 @@ export function Settings() {
     }
   };
 
+  const handleRegenerateConfig = async () => {
+    if (!confirm("Re-deploy WireGuard config from vault? This overwrites the current wg0.conf.")) return;
+    setRegenLoading(true);
+    try {
+      await api.regenerateConfig();
+      flash("WireGuard config regenerated from vault");
+    } catch (e: unknown) {
+      flashError(e instanceof Error ? e.message : "Failed to regenerate config");
+    } finally {
+      setRegenLoading(false);
+    }
+  };
+
   const handleTerminate = async () => {
     if (!confirm("Stop the WireGuard interface (wg-quick down)? Clients will disconnect.")) return;
     setTerminateLoading(true);
@@ -403,6 +419,22 @@ export function Settings() {
           >
             <PowerOff className="w-4 h-4" />
             {terminateLoading ? "Stopping…" : "Stop Server"}
+          </button>
+        </div>
+        <div className="p-6 flex items-center justify-between border-t border-gray-100">
+          <div>
+            <h3 className="font-medium text-gray-900 mb-1">Regenerate Config</h3>
+            <p className="text-sm text-gray-500">
+              Re-deploy <code className="text-xs bg-gray-100 px-1 py-0.5 rounded">wg0.conf</code> from vault — fixes missing or corrupted config
+            </p>
+          </div>
+          <button
+            onClick={handleRegenerateConfig}
+            disabled={regenLoading}
+            className="px-4 py-2 bg-gray-700 text-white rounded-lg hover:bg-gray-800 transition-colors flex items-center gap-2 disabled:opacity-60"
+          >
+            <RotateCcw className="w-4 h-4" />
+            {regenLoading ? "Regenerating…" : "Regenerate Config"}
           </button>
         </div>
       </div>

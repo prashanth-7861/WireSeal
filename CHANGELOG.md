@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.9.44] — 2026-06-08
+
+### Fixed
+- **`vault.load()` → `vault.open()` bug** — auto-recovery in `_h_start_server` was silently failing because `Vault` has no `.load()` method; now uses the correct `.open()` context manager
+- **Misleading error message** — "Settings → Generate Config" replaced with "Settings → Regenerate Config" which now actually exists
+
+### Added
+- **`POST /api/regenerate-config` endpoint** — manually re-deploys `wg0.conf` from vault state; available when vault is unlocked
+- **Regenerate Config button** in Settings → Server Control — gives users a manual recovery path when auto-deploy fails or config is missing
+
+### Changed
+- **Version bump** to 0.9.44.
+
+---
+
 ## [0.9.43] — 2026-06-08
 
 ### Fixed

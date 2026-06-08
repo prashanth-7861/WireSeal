@@ -179,6 +179,8 @@ _ROUTES: list[tuple[str, re.Pattern, Any]] = [
 
     ("POST",   re.compile(r"^/api/change-port$"),            _h_change_port),
 
+    ("POST",   re.compile(r"^/api/regenerate-config$"),      _h_regenerate_config),
+
     ("GET",    re.compile(r"^/api/port-policy$"),            _h_port_policy),
 
     ("GET",    re.compile(r"^/api/service/status$"),         _h_service_status),
