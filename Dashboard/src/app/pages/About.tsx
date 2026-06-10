@@ -398,9 +398,7 @@ function useAutoUpdate() {
     setError("");
     setMessage("");
     try {
-      const res = await fetch("/api/update/check");
-      if (!res.ok) throw new Error(`Server returned ${res.status}`);
-      const data = await res.json();
+      const data = await api.updateCheck();
       setInfo({
         latestVersion: data.latest_version,
         releaseUrl: data.release_url,
@@ -425,12 +423,7 @@ function useAutoUpdate() {
     try {
       // Brief pause so UI shows "downloading" state
       setState("installing");
-      const res = await fetch("/api/update/install", { method: "POST" });
-      if (!res.ok) {
-        const data = await res.json().catch(() => ({ error: `HTTP ${res.status}` }));
-        throw new Error(data.error || `Install failed (${res.status})`);
-      }
-      const data = await res.json();
+      const data = await api.updateInstall();
       setMessage(data.message);
       setState("done");
     } catch (err: unknown) {

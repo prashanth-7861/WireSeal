@@ -43,10 +43,33 @@ def _validate_script_path(script_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 _NFTABLES_DIR = Path("/etc/nftables.d")
+_NFTABLES_CONF = Path("/etc/nftables.conf")
 _WIREGUARD_DIR = Path("/etc/wireguard")
 _SYSCTL_DROP_IN = Path("/etc/sysctl.d/99-wireguard.conf")
 _CRON_FILE = Path("/etc/cron.d/wireseal")
 _NFT_RULES_FILE = _NFTABLES_DIR / "wireguard.nft"
+
+
+def _ensure_nftables_conf_includes() -> None:
+    """Ensure /etc/nftables.conf sources /etc/nftables.d/*.nft on boot.
+
+    Many distros ship an nftables.conf that does NOT include the .d directory,
+    so saved rules in /etc/nftables.d/wireguard.nft would be silently ignored
+    on reboot even when nftables.service is enabled.
+    """
+    _include = 'include "/etc/nftables.d/*.nft"'
+    if _NFTABLES_CONF.exists():
+        content = _NFTABLES_CONF.read_text(encoding="utf-8", errors="replace")
+        if "nftables.d" not in content:
+            with _NFTABLES_CONF.open("a", encoding="utf-8") as fh:
+                fh.write(f"\n{_include}\n")
+    else:
+        _NFTABLES_CONF.write_text(
+            "#!/usr/sbin/nft -f\nflush ruleset\n"
+            f"{_include}\n",
+            encoding="utf-8",
+        )
+        _NFTABLES_CONF.chmod(0o644)
 
 
 def _has_firewalld() -> bool:
@@ -276,19 +299,35 @@ class LinuxAdapter(AbstractPlatformAdapter):
             The Path where the config was written.
         """
         # Inject PostUp/PostDown for NAT if missing and firewalld is absent.
+        # Prefer nftables commands when nft is available; fall back to iptables.
         if "PostUp" not in config_content and not _has_firewalld():
             try:
                 pub_iface = self.detect_outbound_interface()
-                post_up = (
-                    f"iptables -A FORWARD -i %i -j ACCEPT; "
-                    f"iptables -A FORWARD -o %i -j ACCEPT; "
-                    f"iptables -t nat -A POSTROUTING -o {pub_iface} -j MASQUERADE"
-                )
-                post_down = (
-                    f"iptables -D FORWARD -i %i -j ACCEPT; "
-                    f"iptables -D FORWARD -o %i -j ACCEPT; "
-                    f"iptables -t nat -D POSTROUTING -o {pub_iface} -j MASQUERADE"
-                )
+                if shutil.which("nft"):
+                    post_up = (
+                        f"nft add table ip wg_nat 2>/dev/null; "
+                        f"nft 'add chain ip wg_nat postrouting {{ type nat hook postrouting priority 100; policy accept; }}' 2>/dev/null; "
+                        f"nft add rule ip wg_nat postrouting iifname %i masquerade 2>/dev/null; "
+                        f"nft add table inet wg_forward 2>/dev/null; "
+                        f"nft 'add chain inet wg_forward forward {{ type filter hook forward priority 0; policy accept; }}' 2>/dev/null; "
+                        f"nft add rule inet wg_forward forward iifname %i oifname {pub_iface} accept 2>/dev/null; "
+                        f"nft add rule inet wg_forward forward iifname {pub_iface} oifname %i ct state established,related accept 2>/dev/null"
+                    )
+                    post_down = (
+                        f"nft delete table ip wg_nat 2>/dev/null; "
+                        f"nft delete table inet wg_forward 2>/dev/null"
+                    )
+                else:
+                    post_up = (
+                        f"iptables -A FORWARD -i %i -j ACCEPT; "
+                        f"iptables -A FORWARD -o %i -j ACCEPT; "
+                        f"iptables -t nat -A POSTROUTING -o {pub_iface} -j MASQUERADE"
+                    )
+                    post_down = (
+                        f"iptables -D FORWARD -i %i -j ACCEPT; "
+                        f"iptables -D FORWARD -o %i -j ACCEPT; "
+                        f"iptables -t nat -D POSTROUTING -o {pub_iface} -j MASQUERADE"
+                    )
                 # Insert after ListenPort line
                 config_content = config_content.replace(
                     f"ListenPort = ",
@@ -409,6 +448,10 @@ class LinuxAdapter(AbstractPlatformAdapter):
 
         atomic_write(_NFT_RULES_FILE, generated_rules.encode("utf-8"), mode=0o644)
 
+        # Ensure /etc/nftables.conf sources the rules directory so the
+        # saved rules survive reboot via nftables.service.
+        _ensure_nftables_conf_includes()
+
         try:
             # nft -f loads the entire ruleset atomically from a temp-written file;
             # this avoids the delete-before-create race window (LIN-09)
@@ -419,6 +462,15 @@ class LinuxAdapter(AbstractPlatformAdapter):
         except subprocess.CalledProcessError as exc:
             stderr = exc.stderr.decode("utf-8", errors="replace") if exc.stderr else ""
             raise SetupError(f"Failed to apply nftables rules: {stderr}") from exc
+
+        # Enable nftables.service so rules reload on boot
+        try:
+            subprocess.run(
+                ["systemctl", "enable", "nftables"],
+                shell=False, capture_output=True, timeout=30,
+            )
+        except (subprocess.CalledProcessError, FileNotFoundError):
+            pass  # Non-systemd or service not available
 
     def _configure_firewalld_full(
         self, wg_port: int, wg_interface: str, pub_iface: str, subnet: str = "192.168.1.0/24"

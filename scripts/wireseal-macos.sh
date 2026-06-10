@@ -9,7 +9,7 @@ set -euo pipefail
 #   chmod +x wireseal-macos.sh
 #   ./wireseal-macos.sh
 
-VERSION="0.9.39"
+VERSION="0.9.46"
 REPO="https://github.com/prashanth-7861/WireSeal.git"
 INSTALL_DIR="$HOME/.wireseal"
 VENV_DIR="$INSTALL_DIR/.venv"
@@ -162,7 +162,7 @@ setup_network() {
     echo ""
     echo -e "${BOLD}── Network Doctor ──${NC}"
 
-    # IP forwarding
+    # IP forwarding — enable now + persist via launchd
     info "Checking IP forwarding..."
     IP_FWD=$(sysctl -n net.inet.ip.forwarding 2>/dev/null || echo "0")
     if [[ "$IP_FWD" != "1" ]]; then
@@ -170,6 +170,36 @@ setup_network() {
         ok "IP forwarding enabled."
     else
         ok "IP forwarding: enabled"
+    fi
+
+    # Persist IP forwarding across reboots via launchd
+    PLIST="/Library/LaunchDaemons/com.wireseal.sysctl.plist"
+    if [[ ! -f "$PLIST" ]]; then
+        cat > "$PLIST" << 'PLIST_EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.wireseal.sysctl</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/sbin/sysctl</string>
+        <string>-w</string>
+        <string>net.inet.ip.forwarding=1</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>LaunchOnlyOnce</key>
+    <true/>
+</dict>
+</plist>
+PLIST_EOF
+        chown root:wheel "$PLIST"
+        chmod 644 "$PLIST"
+        launchctl bootstrap system "$PLIST" 2>/dev/null || \
+            launchctl load "$PLIST" 2>/dev/null || true
+        ok "IP forwarding: persistent via launchd"
     fi
 
     # Enable Remote Login (SSH)
@@ -205,14 +235,36 @@ setup_network() {
     # Detect outbound interface
     PUB_IFACE=$(route -n get default 2>/dev/null | grep 'interface:' | awk '{print $2}' || echo "")
 
-    # NAT for VPN subnet via pf anchor
+    # NAT for VPN subnet via pf anchor — apply now + persist
     if [[ -n "$PUB_IFACE" ]]; then
         info "Configuring pf NAT for VPN subnet..."
         PF_ANCHOR="com.apple/wireguard"
-        PF_RULES="nat from 10.0.0.0/24 to any -> ($PUB_IFACE)"
+        PF_RULES="nat on $PUB_IFACE from 10.0.0.0/24 to any -> ($PUB_IFACE)"
+
+        # Apply immediately
         echo "$PF_RULES" | pfctl -a "$PF_ANCHOR" -f - 2>/dev/null && \
             ok "pf NAT: 10.0.0.0/24 → $PUB_IFACE" || \
             warn "pf NAT setup skipped (may be configured during wireseal init)."
+
+        # Persist: write anchor file and ensure /etc/pf.conf loads it on boot
+        ANCHOR_FILE="/etc/pf.anchors/wireseal"
+        echo "$PF_RULES" > "$ANCHOR_FILE" 2>/dev/null
+        chmod 644 "$ANCHOR_FILE" 2>/dev/null
+
+        # Add anchor references to /etc/pf.conf if not already present
+        if [[ -f /etc/pf.conf ]]; then
+            if ! grep -q 'wireseal' /etc/pf.conf 2>/dev/null; then
+                # Insert NAT anchor before any existing rules, rdr-anchor after
+                {
+                    echo ""
+                    echo "# WireSeal VPN NAT — managed by wireseal installer"
+                    echo "nat-anchor \"wireseal\""
+                    echo "anchor \"wireseal\""
+                    echo "load anchor \"wireseal\" from \"/etc/pf.anchors/wireseal\""
+                } >> /etc/pf.conf
+                ok "pf NAT: persistent via /etc/pf.conf anchor"
+            fi
+        fi
     fi
 
     # Summary

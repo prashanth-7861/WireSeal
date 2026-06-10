@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.9.46] — 2026-06-09
+
+### Security
+- **HTTP security headers on all API responses** — added `Content-Security-Policy` (`default-src 'self'`, `script-src 'self'`, `frame-ancestors 'none'`, `object-src 'none'`), `X-Frame-Options: DENY`, `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`, `Cross-Origin-Opener-Policy: same-origin`, and `Permissions-Policy` to both JSON and static (dashboard) responses. Blocks clickjacking, MIME-sniffing, and script injection from local browser-based attackers
+- **Windows client config ACL hardening** — `os.chmod(0o600)` is a no-op on Windows, leaving the WireGuard private key world-readable until DPAPI encryption. Client config deploy now restricts the file ACL to SYSTEM + Administrators via `icacls /inheritance:r`
+- **Server hardening now requires admin role** — `POST /api/harden-server` mutates firewall/sysctl/system state; it now calls `_require_admin_role()` so a read-only admin can no longer trigger it (previously gated on vault-unlock only)
+
+### Fixed
+- **Linux boot persistence** — `/etc/nftables.conf` now sources `/etc/nftables.d/*.nft`, `nftables.service` is enabled, and NAT/forward rules prefer `nft` over `iptables` when available, so firewall + masquerade survive reboot
+- **macOS boot persistence** — pfctl anchor rules are persisted to `/etc/pf.anchors/wireseal` with a launchd boot plist (`com.wireseal.pfctl`) that reloads them on boot; `remove_firewall_rules()` now tears the plist + rules file down so stale rules do not silently reload after uninstall
+- **Troubleshoot pages (server + client)** — vault state checks now use the real `initialized`/`locked` API fields instead of a non-existent `state` string; server DNS check now reads `dnsmasq_running`/`mappings` instead of a phantom `provider` field
+- **TwoFactor multi-admin disable** — the "Disable" action now awaits `totpDisable()` before refreshing the table (was fire-and-forget)
+- **About update flow** — `updateCheck()`/`updateInstall()` now route through `api.ts`, restoring CSRF token, 15s timeout, and 401 handling that the raw `fetch()` calls bypassed
+- **vault-info** — removed inaccurate hardcoded `admin_id: "owner"` field
+
+### Changed
+- **Version bump** to 0.9.46
+
+---
+
 ## [0.9.45] — 2026-06-08
 
 ### Fixed

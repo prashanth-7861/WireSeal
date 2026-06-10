@@ -159,10 +159,10 @@ async function checkApiServer(): Promise<CheckResult> {
 async function checkVaultUnlocked(): Promise<CheckResult> {
   try {
     const info = await api.vaultInfo();
-    if (info.state === "unlocked") {
+    if (info.initialized && !info.locked) {
       return { id: "vault", label: "Vault Access", severity: "pass", message: "Vault is unlocked — configs available" };
     }
-    if (info.state === "locked") {
+    if (info.initialized && info.locked) {
       return {
         id: "vault", label: "Vault Access", severity: "warn",
         message: "Vault is locked — unlock to access VPN configs",

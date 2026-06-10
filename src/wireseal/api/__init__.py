@@ -89,9 +89,12 @@ for ``from wireseal.api import ...``.
 """
 
 
+import logging as _logging
 import re
 from http.server import BaseHTTPRequestHandler
 from typing import Any
+
+_api_log = _logging.getLogger("wireseal.api")
 
 _ROUTES: list[tuple[str, re.Pattern, Any]] = [
 
@@ -425,6 +428,30 @@ class _Handler(BaseHTTPRequestHandler):
 
             raise _ApiError("Invalid JSON in request body.", 400)
 
+    # SEC-027: defense-in-depth HTTP security headers applied to every response.
+    # Server is loopback-only (127.0.0.1) but these still block clickjacking,
+    # MIME-sniffing, and script injection from any local browser-based attacker.
+    # No HSTS: the server speaks plain HTTP on loopback, so HSTS is inapplicable.
+    def _security_headers(self) -> None:
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("X-Frame-Options", "DENY")
+        self.send_header("Referrer-Policy", "no-referrer")
+        self.send_header("Cross-Origin-Opener-Policy", "same-origin")
+        self.send_header("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
+        self.send_header(
+            "Content-Security-Policy",
+            "default-src 'self'; "
+            "script-src 'self'; "
+            "style-src 'self' 'unsafe-inline'; "
+            "img-src 'self' data:; "
+            "font-src 'self' data:; "
+            "connect-src 'self'; "
+            "frame-ancestors 'none'; "
+            "base-uri 'self'; "
+            "form-action 'self'; "
+            "object-src 'none'",
+        )
+
     def _send(self, data: Any, status: int = 200) -> None:
 
         body = json.dumps(data, default=str).encode()
@@ -434,6 +461,8 @@ class _Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type",   "application/json")
 
         self.send_header("Content-Length", str(len(body)))
+
+        self._security_headers()
 
         self._cors()
 
@@ -656,6 +685,8 @@ class _Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(data)))
 
         self.send_header("Cache-Control", cache)
+
+        self._security_headers()
 
         self.end_headers()
 

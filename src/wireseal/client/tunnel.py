@@ -78,7 +78,30 @@ def _deploy_config(config_text: str) -> Path:
 
     # Rename is atomic on the same filesystem.
     os.replace(tmp_path, config_path)
-    if sys.platform != "win32":
+    if sys.platform == "win32":
+        # Restrict ACL to SYSTEM + Administrators only — os.chmod(0o600) is a
+        # no-op on Windows, and without this the private key is readable by all
+        # local users until wireguard.exe encrypts it via DPAPI.
+        try:
+            subprocess.run(
+                [
+                    "icacls", str(config_path),
+                    "/inheritance:r",
+                    "/grant", "SYSTEM:(R,W)",
+                    "/grant", "Administrators:(R,W)",
+                ],
+                shell=False,
+                capture_output=True,
+                creationflags=_NO_WIN,
+                timeout=10,
+            )
+        except (subprocess.CalledProcessError, FileNotFoundError, OSError) as exc:
+            log.warning(
+                "icacls ACL failed on %s — private key file may be world-readable: %s",
+                config_path,
+                exc,
+            )
+    else:
         try:
             os.chmod(config_path, 0o600)
         except OSError as exc:

@@ -549,6 +549,12 @@ export const api = {
   regenerateConfig: () =>
     _fetch<{ ok: boolean; path?: string }>("POST", "/regenerate-config"),
 
+  updateCheck: () =>
+    _fetch<{ update_available: boolean; latest_version?: string; release_url?: string; published_at?: string; asset_name?: string }>("GET", "/update/check"),
+
+  updateInstall: () =>
+    _fetch<{ ok: boolean; message?: string }>("POST", "/update/install"),
+
   changePort: (port: number, confirm_warning: boolean = false) =>
     _fetch<{
       ok: boolean;

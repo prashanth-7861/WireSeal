@@ -27,7 +27,6 @@ def _h_vault_info(req: "_Handler", _groups: tuple) -> dict:
     return {
         "initialized":  _s._VAULT_PATH.exists(),
         "locked":       locked,
-        "admin_id":     "owner" if not locked else None,
         "interface":    _WG_IFACE,
         "pin_set":      _s._PIN_PATH.exists(),
         "multi_admin":  multi_admin,

@@ -645,8 +645,7 @@ def _h_add_client(req: "_Handler", _groups: tuple) -> dict:
             adapter.deploy_config(server_config)
             wg_warning = _reload_wireguard()
         except Exception as exc:
-            import traceback
-            traceback.print_exc()
+            _clients_log.exception("WireGuard setup failed")
             wg_warning = f"WireGuard setup failed: {exc}"
 
         import time as _time
@@ -942,7 +941,7 @@ def _h_client_self_config(req: "_Handler", _groups: tuple) -> dict:
     except Exception as _audit_exc:
         logging.getLogger("wireseal.audit").warning("Audit log write failed: %s", _audit_exc)
 
-    return {"name": client_name, "config": config_str, "heartbeat_token": heartbeat_token}
+    return {"name": client_name, "config": config_str}
 
 
 def _h_client_config(req: "_Handler", groups: tuple) -> dict:

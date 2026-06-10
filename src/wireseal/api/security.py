@@ -160,6 +160,9 @@ def _h_security_status(req: "_Handler", _groups: tuple) -> dict:
 def _h_harden_server(req: "_Handler", _groups: tuple) -> dict:
     """Apply server hardening (cross-platform)."""
     _require_unlocked()
+    # SEC-028: server hardening mutates firewall/sysctl/system state — gate it
+    # behind admin role so a read-only admin cannot trigger it.
+    _mod._require_admin_role()
     try:
         from wireseal.platform.detect import get_adapter
         adapter = get_adapter()

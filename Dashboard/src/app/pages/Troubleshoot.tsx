@@ -161,14 +161,14 @@ async function runApiCheck(): Promise<CheckResult> {
 async function runVaultCheck(): Promise<CheckResult> {
   try {
     const info = await api.vaultInfo();
-    if (info.state === "uninitialized") {
+    if (!info.initialized) {
       return {
         id: "vault", label: "Vault", severity: "warn",
         message: "Vault not initialized",
         fix: "No server configuration exists yet. Go to the Setup page to initialize.",
       };
     }
-    if (info.state === "locked") {
+    if (info.locked) {
       return {
         id: "vault", label: "Vault", severity: "info",
         message: "Vault is locked",
@@ -362,13 +362,17 @@ async function runServiceCheck(): Promise<CheckResult> {
 async function runDnsCheck(): Promise<CheckResult> {
   try {
     const dns = await api.getDns();
-    if (dns.provider && dns.provider !== "none") {
-      return { id: "dns", label: "Dynamic DNS", severity: "pass", message: `Provider: ${dns.provider}` };
+    if (dns.dnsmasq_running) {
+      const count = Object.keys(dns.mappings ?? {}).length;
+      return { id: "dns", label: "DNS", severity: "pass", message: `dnsmasq running (${count} mapping${count !== 1 ? "s" : ""})` };
+    }
+    if (Object.keys(dns.mappings ?? {}).length > 0) {
+      return { id: "dns", label: "DNS", severity: "warn", message: "Mappings configured but dnsmasq not running" };
     }
     return {
-      id: "dns", label: "Dynamic DNS", severity: "info",
+      id: "dns", label: "DNS", severity: "info",
       message: "Not configured (optional)",
-      fix: "Configure Dynamic DNS if your server's public IP address changes. Visit the DNS settings page.",
+      fix: "Configure DNS mappings if you want custom hostnames for VPN clients. Visit the DNS page.",
     };
   } catch {
     return { id: "dns", label: "Dynamic DNS", severity: "info", message: "Cannot check DNS configuration" };

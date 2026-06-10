@@ -47,6 +47,9 @@ class MacOSAdapter(AbstractPlatformAdapter):
     _PF_TOKEN_PATH = Path("/var/run/wireseal/pf_token")
     # Anchor name -- never use /etc/pf.conf
     _PF_ANCHOR = "com.apple/wireguard"
+    # Persisted anchor rules file -- loaded on boot by launchd plist
+    _PF_RULES_FILE = Path("/etc/pf.anchors/wireseal")
+    _PF_LAUNCHD_PLIST = Path("/Library/LaunchDaemons/com.wireseal.pfctl.plist")
 
     def __init__(self) -> None:
         self._brew_prefix: str | None = None
@@ -384,6 +387,13 @@ class MacOSAdapter(AbstractPlatformAdapter):
             capture_output=True,
         )
 
+        # Persist anchor rules to disk so they survive reboots.
+        # A companion launchd plist reloads them into the anchor at boot.
+        self._PF_RULES_FILE.parent.mkdir(parents=True, exist_ok=True)
+        atomic_write(self._PF_RULES_FILE, rules.encode("utf-8"), mode=0o644)
+        self._chown_root_wheel(self._PF_RULES_FILE)
+        self._ensure_pf_boot_plist()
+
         # Write pf token for cleanup
         token_path = self._PF_TOKEN_PATH
         if not token_path.parent.exists():
@@ -415,6 +425,53 @@ class MacOSAdapter(AbstractPlatformAdapter):
                 token_path.unlink(missing_ok=True)
             except OSError:
                 pass
+
+        # Tear down boot persistence so flushed rules do not silently reload on
+        # the next reboot. Unload the launchd daemon, then delete the plist and
+        # the persisted anchor rules file.
+        if self._PF_LAUNCHD_PLIST.exists():
+            subprocess.run(
+                ["launchctl", "bootout", "system", str(self._PF_LAUNCHD_PLIST)],
+                shell=False,
+                capture_output=True,
+            )
+            try:
+                self._PF_LAUNCHD_PLIST.unlink(missing_ok=True)
+            except OSError:
+                pass
+        try:
+            self._PF_RULES_FILE.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+    def _ensure_pf_boot_plist(self) -> None:
+        """Create a launchd plist that reloads pfctl anchor rules on boot.
+
+        The plist runs ``pfctl -a com.apple/wireguard -f /etc/pf.anchors/wireseal``
+        at boot time, ensuring the firewall + NAT rules persist across reboots
+        without modifying /etc/pf.conf.
+        """
+        if self._PF_LAUNCHD_PLIST.exists():
+            return  # Already installed
+        plist_data = {
+            "Label": "com.wireseal.pfctl",
+            "ProgramArguments": [
+                "/sbin/pfctl",
+                "-a", self._PF_ANCHOR,
+                "-f", str(self._PF_RULES_FILE),
+            ],
+            "RunAtLoad": True,
+            "LaunchOnlyOnce": True,
+        }
+        plist_bytes = plistlib.dumps(plist_data)
+        atomic_write(self._PF_LAUNCHD_PLIST, plist_bytes, mode=0o644)
+        self._chown_root_wheel(self._PF_LAUNCHD_PLIST)
+
+        # Load the plist (ignore "already loaded" error)
+        subprocess.run(
+            ["launchctl", "bootstrap", "system", str(self._PF_LAUNCHD_PLIST)],
+            shell=False, capture_output=True,
+        )
 
     # ------------------------------------------------------------------
     # 7. IP forwarding (runtime sysctl + launchd boot persistence)

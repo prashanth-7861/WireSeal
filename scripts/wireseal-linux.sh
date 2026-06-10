@@ -9,7 +9,7 @@ set -euo pipefail
 #   chmod +x wireseal-linux.sh
 #   sudo ./wireseal-linux.sh
 
-VERSION="0.9.39"
+VERSION="0.9.46"
 REPO="https://github.com/prashanth-7861/WireSeal.git"
 INSTALL_DIR="/opt/wireseal"
 VENV_DIR="$INSTALL_DIR/.venv"
@@ -437,11 +437,21 @@ if command -v nft &>/dev/null; then
     # Prevent the default nftables config from restoring the rogue table on reboot
     if [[ -f /etc/nftables.conf ]] && grep -q "policy drop" /etc/nftables.conf 2>/dev/null; then
         if [[ "$FIREWALL_SYSTEM" == "firewalld" ]]; then
-            # Back up and replace with empty config — firewalld handles everything
+            # Back up and replace — firewalld handles everything
             cp /etc/nftables.conf /etc/nftables.conf.bak.wireseal 2>/dev/null
-            echo '#!/usr/sbin/nft -f' > /etc/nftables.conf
-            echo '# Cleared by WireSeal — firewalld manages all firewall rules' >> /etc/nftables.conf
+            cat > /etc/nftables.conf << 'NFTCONF_CLEAN'
+#!/usr/sbin/nft -f
+# Cleared by WireSeal — firewalld manages all firewall rules
+flush ruleset
+NFTCONF_CLEAN
             fixed "Cleared /etc/nftables.conf (was restoring 'policy drop' on reboot)."
+        else
+            # Non-firewalld: surgically remove 'policy drop' chains but keep
+            # includes and other rules so /etc/nftables.d/*.nft still loads
+            cp /etc/nftables.conf /etc/nftables.conf.bak.wireseal 2>/dev/null
+            # Remove the inet filter table block that has policy drop
+            sed -i '/table inet filter/,/^}/d' /etc/nftables.conf 2>/dev/null
+            fixed "Removed 'policy drop' table from /etc/nftables.conf (preserved includes)."
         fi
     fi
 
@@ -540,12 +550,45 @@ NFT_RULES
             # Persist rules so they survive reboot
             mkdir -p /etc/nftables.d
             nft list ruleset > /etc/nftables.d/wireguard.nft 2>/dev/null
-            ok "nftables: forward + NAT rules applied"
+
+            # Ensure /etc/nftables.conf sources the rules directory.
+            # Many distros don't include /etc/nftables.d/* by default, so the
+            # saved rules file would be ignored on reboot without this.
+            NFTCONF="/etc/nftables.conf"
+            if [[ -f "$NFTCONF" ]]; then
+                if ! grep -q 'include.*nftables.d' "$NFTCONF" 2>/dev/null; then
+                    echo 'include "/etc/nftables.d/*.nft"' >> "$NFTCONF"
+                    fixed "Added include directive to $NFTCONF for /etc/nftables.d/"
+                fi
+            else
+                # No nftables.conf at all — create a minimal one
+                cat > "$NFTCONF" << 'NFTCONF_EOF'
+#!/usr/sbin/nft -f
+# Managed by WireSeal — loads saved rules from /etc/nftables.d/
+flush ruleset
+include "/etc/nftables.d/*.nft"
+NFTCONF_EOF
+                fixed "Created $NFTCONF with include for /etc/nftables.d/"
+            fi
+
+            # Enable nftables service so rules reload on boot
+            systemctl enable --now nftables 2>/dev/null || true
+            ok "nftables: forward + NAT rules applied (service enabled, boot-persistent)"
         elif command -v iptables &>/dev/null && [[ -n "$PUB_IFACE" ]]; then
             info "Applying iptables forward + NAT rules..."
             iptables -A FORWARD -i "$WG_IFACE" -o "$PUB_IFACE" -j ACCEPT 2>/dev/null
             iptables -A FORWARD -i "$PUB_IFACE" -o "$WG_IFACE" -m state --state RELATED,ESTABLISHED -j ACCEPT 2>/dev/null
             iptables -t nat -A POSTROUTING -o "$PUB_IFACE" -j MASQUERADE 2>/dev/null
+
+            # Persist iptables rules across reboot
+            if command -v netfilter-persistent &>/dev/null; then
+                netfilter-persistent save 2>/dev/null
+                fixed "iptables: rules saved via netfilter-persistent"
+            elif command -v iptables-save &>/dev/null; then
+                mkdir -p /etc/iptables
+                iptables-save > /etc/iptables/rules.v4 2>/dev/null
+                fixed "iptables: rules saved to /etc/iptables/rules.v4"
+            fi
             ok "iptables: forward + NAT rules applied"
         else
             warn "No firewall tool available and no outbound interface detected."
