@@ -1736,9 +1736,66 @@ def rotate_server_keys() -> None:
         wipe_string(passphrase_str)
 
 
+def _update_dns_non_interactive() -> None:
+    """Refresh DuckDNS using the system updater credentials file (no vault).
+
+    Invoked by the scheduled cron job, which runs as the non-root ``wireseal``
+    user and cannot read the root-owned vault. Reads the DuckDNS domain+token
+    from the protected env file written during ``wireseal duckdns`` setup,
+    resolves the current public IP, and pushes the update. The token is kept in
+    SecretBytes and used in-process only.
+    """
+    from wireseal.platform.detect import get_adapter
+    from wireseal.dns.ip_resolver import resolve_public_ip, IPConsensusError
+    from wireseal.dns.duckdns import update_dns as _update_dns, DuckDNSError
+
+    adapter = get_adapter()
+    if not hasattr(adapter, "read_duckdns_credentials"):
+        raise click.ClickException(
+            "--non-interactive DuckDNS updates are not supported on this platform."
+        )
+    creds = adapter.read_duckdns_credentials()
+    if creds is None:
+        raise click.ClickException(
+            "DuckDNS updater not configured. Run 'wireseal duckdns <domain>' first."
+        )
+    domain, token_secret = creds
+    try:
+        public_ip = resolve_public_ip()
+    except IPConsensusError as exc:
+        raise click.ClickException(str(exc)) from exc
+    try:
+        result = _update_dns(domain, token_secret, str(public_ip))
+    except DuckDNSError as exc:
+        click.echo(f"DNS update failed: {exc}")
+        sys.exit(1)
+    # Best-effort audit: the cron user may not be able to write the vault dir.
+    try:
+        from wireseal.security.audit import AuditLog
+        AuditLog(DEFAULT_AUDIT_LOG_PATH).log(
+            action="update-dns",
+            metadata={
+                "domain": result.get("domain"),
+                "ip": result.get("ip"),
+                "success": result.get("success"),
+                "mode": "non-interactive",
+            },
+        )
+    except Exception:
+        pass
+    click.echo(f"DNS updated: {result['domain']}.duckdns.org -> {result['ip']}")
+
+
 @cli.command("update-dns")
-def update_dns() -> None:
+@click.option("--non-interactive", "non_interactive", is_flag=True, default=False,
+              help="Read DuckDNS credentials from the system updater file "
+                   "(no vault passphrase prompt). Used by the scheduled cron job.")
+def update_dns(non_interactive: bool) -> None:
     """Push the current public IP to DuckDNS (2-of-3 consensus)."""
+    if non_interactive:
+        _update_dns_non_interactive()
+        return
+
     # Step 1: Collect passphrase — CLI-02
     passphrase_str: str = click.prompt("Vault passphrase", hide_input=True)
 
@@ -1822,6 +1879,129 @@ def update_dns() -> None:
     finally:
         passphrase.wipe()
         wipe_string(passphrase_str)
+
+
+@cli.command("duckdns")
+@click.argument("domain")
+@click.option("--interval", default=5, show_default=True, type=int,
+              help="Minutes between automatic DNS refreshes.")
+def duckdns(domain: str, interval: int) -> None:
+    """Configure DuckDNS dynamic DNS on an existing vault.
+
+    Stores the DuckDNS domain + token in the vault (so client configs use
+    <domain>.duckdns.org), installs an unattended refresh job, and pushes the
+    current IP immediately. Use this when your public IP is dynamic so the
+    tunnel endpoint never goes stale.
+
+    \b
+    Example:
+      sudo wireseal duckdns myhome
+    """
+    if interval < 1 or interval > 60:
+        raise click.ClickException("Interval must be between 1 and 60 minutes.")
+
+    # Step 1: Collect secrets — vault passphrase and DuckDNS token (CLI-02)
+    passphrase_str: str = click.prompt("Vault passphrase", hide_input=True)
+    token_str: str = click.prompt("DuckDNS token", hide_input=True)
+
+    from wireseal.security.secret_types import SecretBytes
+    from wireseal.security.secrets_wipe import wipe_string
+
+    passphrase = SecretBytes(bytearray(passphrase_str.encode("utf-8")))
+    token_secret = SecretBytes(bytearray(token_str.encode("utf-8")))
+    try:
+        # Step 1b: Validate the token at the boundary. The format is not fixed
+        # (each user supplies their own DuckDNS token), so accept any visible
+        # ASCII value but reject whitespace/control characters that could break
+        # the env-file format or inject an extra line.
+        if (
+            not token_str
+            or len(token_str) > 200
+            or any(c.isspace() or ord(c) < 0x20 or ord(c) == 0x7F for c in token_str)
+        ):
+            raise click.ClickException(
+                "DuckDNS token must be non-empty visible ASCII with no spaces "
+                "or control characters."
+            )
+
+        # Validate the domain too: it is written to the env file and used in
+        # the update URL, so reject newline/'='/'#'/whitespace that could
+        # inject an extra env line or redirect updates.
+        from wireseal.dns.dnsmasq import validate_hostname
+        try:
+            validate_hostname(domain)
+        except ValueError as exc:
+            raise click.ClickException(f"Invalid DuckDNS domain: {exc}") from exc
+
+        from wireseal.security.vault import Vault
+        from wireseal.security.audit import AuditLog
+        from wireseal.platform.detect import get_adapter
+        from wireseal.dns.ip_resolver import resolve_public_ip, IPConsensusError
+        from wireseal.dns.duckdns import update_dns as _update_dns, DuckDNSError
+
+        # Step 2: Store domain + token in the vault so client configs resolve to
+        # <domain>.duckdns.org (see _resolve_client_endpoint). A fresh
+        # SecretBytes is stored so token_secret stays usable below.
+        vault = Vault(DEFAULT_VAULT_PATH)
+        with vault.open(passphrase) as state:
+            state.server["duckdns_domain"] = domain
+            state.server["duckdns_token"] = SecretBytes(
+                bytearray(token_str.encode("utf-8"))
+            )
+            vault.save(state, passphrase)
+
+        # Step 3: Wire the unattended updater (system user + cron + creds file).
+        adapter = get_adapter()
+        if hasattr(adapter, "setup_dns_updater") and hasattr(
+            adapter, "write_duckdns_credentials"
+        ):
+            try:
+                launcher = (
+                    adapter._find_wireseal_launcher()
+                    if hasattr(adapter, "_find_wireseal_launcher")
+                    else "wireseal"
+                )
+                adapter.setup_dns_updater(Path(launcher), interval)
+                adapter.write_duckdns_credentials(domain, token_secret)
+                click.echo(f"Auto-refresh scheduled every {interval} min.")
+            except Exception as exc:
+                click.echo(f"Warning: could not schedule auto-refresh: {exc}")
+        else:
+            click.echo(
+                "Note: automatic refresh is not supported on this platform; "
+                "run 'wireseal update-dns' after the IP changes."
+            )
+
+        # Step 4: Push the current IP immediately.
+        try:
+            public_ip = resolve_public_ip()
+            result = _update_dns(domain, token_secret, str(public_ip))
+            click.echo(f"DNS updated: {domain}.duckdns.org -> {result['ip']}")
+        except (IPConsensusError, DuckDNSError) as exc:
+            click.echo(f"Warning: initial DNS update failed: {exc}")
+
+        try:
+            AuditLog(DEFAULT_AUDIT_LOG_PATH).log(
+                action="duckdns-configure", metadata={"domain": domain}
+            )
+        except Exception:
+            pass
+
+        click.echo("")
+        click.echo(
+            "DuckDNS configured. Re-generate client configs so devices use the "
+            "hostname endpoint:"
+        )
+        click.echo("  sudo wireseal show-qr <client>")
+    except click.ClickException:
+        raise
+    except Exception as exc:
+        raise click.ClickException(str(exc)) from exc
+    finally:
+        passphrase.wipe()
+        token_secret.wipe()
+        wipe_string(passphrase_str)
+        wipe_string(token_str)
 
 
 @cli.command("export")

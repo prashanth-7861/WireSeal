@@ -22,6 +22,7 @@ Usage:
 
 from __future__ import annotations
 
+import re
 import ssl
 import urllib.request
 import urllib.parse
@@ -63,7 +64,7 @@ def _redact(url: str) -> str:
         _redact("https://www.duckdns.org/update?domains=x&token=abc123&ip=1.2.3.4")
         # -> "https://www.duckdns.org/update?domains=x&token=***&ip=1.2.3.4"
     """
-    return urllib.parse.re.sub(  # type: ignore[attr-defined]
+    return re.sub(
         r"((?:^|[&?])token=)[^&]*",
         r"\1***",
         url,
@@ -134,8 +135,15 @@ def update_dns(domain: str, token: "SecretBytes", ip: str) -> dict:
         with urllib.request.urlopen(url, context=ctx, timeout=10) as resp:
             body = resp.read().decode("ascii", errors="replace").strip()
 
-        if body != "OK":
-            # DNS-04: response must be exactly 'OK'
+        # DuckDNS signals success with 'OK' on the first line. Depending on
+        # the 'verbose' flag (or server-side behaviour) the body may be a
+        # single 'OK' or a multi-line response such as "OK\n<ip>\n\nUPDATED".
+        # Both are successes, so validate the first line only rather than
+        # requiring the entire body to equal 'OK' -- otherwise a successful
+        # update is misreported as a failure.
+        first_line = body.split("\n", 1)[0].strip()
+        if first_line != "OK":
+            # DNS-04: first line must be 'OK' ('KO'/empty => failure)
             # Truncate body to 20 chars to avoid leaking token fragments
             safe_prefix = body[:20]
             exc = DuckDNSError(
@@ -150,7 +158,9 @@ def update_dns(domain: str, token: "SecretBytes", ip: str) -> dict:
     except DuckDNSError:
         raise
     except Exception as exc:
-        err_msg = str(exc)
+        # Belt-and-suspenders: redact any token fragment that an exception
+        # message could conceivably echo back from the request URL.
+        err_msg = _redact(str(exc))
         result["error"] = err_msg
         raise DuckDNSError(f"DuckDNS update failed: {err_msg}") from exc
 

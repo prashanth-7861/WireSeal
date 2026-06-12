@@ -9,7 +9,7 @@ set -euo pipefail
 #   chmod +x wireseal-linux.sh
 #   sudo ./wireseal-linux.sh
 
-VERSION="0.9.46"
+VERSION="0.9.47"
 REPO="https://github.com/prashanth-7861/WireSeal.git"
 INSTALL_DIR="/opt/wireseal"
 VENV_DIR="$INSTALL_DIR/.venv"

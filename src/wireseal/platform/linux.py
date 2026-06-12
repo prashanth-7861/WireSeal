@@ -49,6 +49,15 @@ _SYSCTL_DROP_IN = Path("/etc/sysctl.d/99-wireguard.conf")
 _CRON_FILE = Path("/etc/cron.d/wireseal")
 _NFT_RULES_FILE = _NFTABLES_DIR / "wireguard.nft"
 
+# Credentials for the unattended DuckDNS updater (cron runs as the non-root
+# `wireseal` user, which cannot read the root-owned vault). The token lives
+# here in a 0600 file owned by the `wireseal` user so `update-dns
+# --non-interactive` can refresh DNS without a vault passphrase. The token is
+# read into memory and used in-process only -- never passed as a CLI argument.
+_WIRESEAL_ETC_DIR = Path("/etc/wireseal")
+_DUCKDNS_ENV_FILE = _WIRESEAL_ETC_DIR / "duckdns.env"
+_DNS_UPDATER_USER = "wireseal"
+
 
 def _ensure_nftables_conf_includes() -> None:
     """Ensure /etc/nftables.conf sources /etc/nftables.d/*.nft on boot.
@@ -305,16 +314,16 @@ class LinuxAdapter(AbstractPlatformAdapter):
                 pub_iface = self.detect_outbound_interface()
                 if shutil.which("nft"):
                     post_up = (
-                        f"nft add table ip wg_nat 2>/dev/null; "
-                        f"nft 'add chain ip wg_nat postrouting {{ type nat hook postrouting priority 100; policy accept; }}' 2>/dev/null; "
-                        f"nft add rule ip wg_nat postrouting iifname %i masquerade 2>/dev/null; "
+                        f"nft add table ip wg_postup_nat 2>/dev/null; "
+                        f"nft 'add chain ip wg_postup_nat postrouting {{ type nat hook postrouting priority 100; policy accept; }}' 2>/dev/null; "
+                        f"nft add rule ip wg_postup_nat postrouting iifname %i masquerade 2>/dev/null; "
                         f"nft add table inet wg_forward 2>/dev/null; "
                         f"nft 'add chain inet wg_forward forward {{ type filter hook forward priority 0; policy accept; }}' 2>/dev/null; "
                         f"nft add rule inet wg_forward forward iifname %i oifname {pub_iface} accept 2>/dev/null; "
                         f"nft add rule inet wg_forward forward iifname {pub_iface} oifname %i ct state established,related accept 2>/dev/null"
                     )
                     post_down = (
-                        f"nft delete table ip wg_nat 2>/dev/null; "
+                        f"nft delete table ip wg_postup_nat 2>/dev/null; "
                         f"nft delete table inet wg_forward 2>/dev/null"
                     )
                 else:
@@ -1280,6 +1289,87 @@ class LinuxAdapter(AbstractPlatformAdapter):
             parent.mkdir(parents=True, mode=0o755, exist_ok=True)
 
         atomic_write(_CRON_FILE, cron_content.encode("utf-8"), mode=0o640)
+
+    # ------------------------------------------------------------------
+    # 10b. DuckDNS updater credentials (for unattended --non-interactive)
+    # ------------------------------------------------------------------
+
+    def write_duckdns_credentials(self, domain: str, token: object) -> None:
+        """Persist DuckDNS credentials for the unattended cron updater.
+
+        Writes ``/etc/wireseal/duckdns.env`` (0600, owned by the ``wireseal``
+        system user when present) so ``update-dns --non-interactive`` can
+        refresh DNS without the vault passphrase. The token is written to a
+        protected file only -- never passed as a process argument.
+
+        Args:
+            domain: DuckDNS subdomain (without the .duckdns.org suffix).
+            token:  SecretBytes containing the DuckDNS API token.
+        """
+        from ..security.secret_types import SecretBytes
+        from ..security.secrets_wipe import wipe_string
+
+        # Defence in depth: reject a domain that could inject an extra env line
+        # even though callers are expected to validate first.
+        from ..dns.dnsmasq import validate_hostname
+        validate_hostname(domain)
+
+        token_str = (
+            token.expose_secret().decode("ascii")
+            if isinstance(token, SecretBytes)
+            else str(token)
+        )
+        try:
+            if not _WIRESEAL_ETC_DIR.exists():
+                _WIRESEAL_ETC_DIR.mkdir(parents=True, mode=0o755, exist_ok=True)
+            content = f"DUCKDNS_DOMAIN={domain}\nDUCKDNS_TOKEN={token_str}\n"
+            atomic_write(_DUCKDNS_ENV_FILE, content.encode("utf-8"), mode=0o600)
+            # Hand ownership to the unattended updater user when it exists.
+            if subprocess.run(
+                ["id", _DNS_UPDATER_USER], shell=False,
+                capture_output=True, timeout=10,
+            ).returncode == 0:
+                chown = subprocess.run(
+                    ["chown", f"{_DNS_UPDATER_USER}:{_DNS_UPDATER_USER}",
+                     str(_DUCKDNS_ENV_FILE)],
+                    shell=False, capture_output=True, timeout=10,
+                )
+                if chown.returncode != 0:
+                    # Not a security issue (file stays 0600 root) but the cron
+                    # user would then be unable to read it -- surface it.
+                    print(
+                        f"Warning: could not chown {_DUCKDNS_ENV_FILE} to "
+                        f"{_DNS_UPDATER_USER}; DNS auto-refresh may not run. "
+                        f"{chown.stderr.decode('utf-8', errors='replace').strip()}",
+                        file=sys.stderr,
+                    )
+        finally:
+            wipe_string(token_str)
+
+    def read_duckdns_credentials(self) -> tuple[str, object] | None:
+        """Read DuckDNS credentials written by :meth:`write_duckdns_credentials`.
+
+        Returns:
+            ``(domain, SecretBytes(token))`` if the env file exists and is
+            well-formed, otherwise ``None``.
+        """
+        from ..security.secret_types import SecretBytes
+
+        if not _DUCKDNS_ENV_FILE.exists():
+            return None
+        domain: str | None = None
+        token: str | None = None
+        for line in _DUCKDNS_ENV_FILE.read_text(encoding="utf-8").splitlines():
+            key, sep, value = line.partition("=")
+            if not sep:
+                continue
+            if key == "DUCKDNS_DOMAIN":
+                domain = value.strip()
+            elif key == "DUCKDNS_TOKEN":
+                token = value.strip()
+        if not domain or not token:
+            return None
+        return domain, SecretBytes(bytearray(token.encode("ascii")))
 
     # ------------------------------------------------------------------
     # 11. Config path resolution

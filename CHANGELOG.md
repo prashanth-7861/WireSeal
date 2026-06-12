@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.9.47] — 2026-06-11
+
+### Added
+- **`wireseal duckdns <domain>` command** — configure DuckDNS dynamic DNS on an existing vault without re-running `init`. Stores the domain + token in the vault (client configs then use `<domain>.duckdns.org` so the tunnel endpoint never goes stale when the ISP rotates the IP), installs the unattended refresh job, and pushes the current public IP immediately
+- **`update-dns --non-interactive`** — refreshes DuckDNS from a root-only credentials file (`/etc/wireseal/duckdns.env`, `0600`, owned by the `wireseal` system user) instead of prompting for the vault passphrase, so the scheduled cron updater can actually run unattended. The token stays in `SecretBytes` and is never passed as a process argument (preserves DNS-03)
+
+### Fixed
+- **DuckDNS success misreported as failure** — `update_dns` now validates only the first response line (`OK`), accepting DuckDNS's verbose `OK\n<ip>` body. Previously any response that was not a bare `OK` raised `DuckDNSError` even though the DNS update had succeeded, so `wireseal update-dns` always reported failure
+
+### Changed
+- **nftables PostUp NAT table renamed** `wg_nat` → `wg_postup_nat` to avoid colliding with the persistent `wg_nat` table applied by `apply_firewall_rules` (double-definition could clobber the masquerade rule)
+- **Version bump** to 0.9.47
+
+---
+
 ## [0.9.46] — 2026-06-09
 
 ### Security
