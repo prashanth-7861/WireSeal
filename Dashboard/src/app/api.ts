@@ -234,6 +234,15 @@ export interface DnsStatus {
 }
 
 // ── Network Discovery ──────────────────────────────────────────────────────
+export interface OpenPort {
+  port: number;
+  service: string;
+}
+
+export type DeviceType =
+  | "router" | "printer" | "nas" | "media"
+  | "phone" | "computer" | "iot" | "unknown" | "";
+
 export interface NetworkDevice {
   ip: string;
   mac: string;
@@ -241,6 +250,14 @@ export interface NetworkDevice {
   vendor: string;
   source: string;
   last_seen: string;
+  device_type?: DeviceType;
+  open_ports?: OpenPort[];
+}
+
+export interface DevicePortsResponse {
+  ip: string;
+  open_ports: OpenPort[];
+  device_type: DeviceType;
 }
 
 export interface NetworkDevicesResponse {
@@ -276,9 +293,12 @@ export interface NetworkServicesResponse {
   cache_age_seconds: number;
 }
 
+export type BackupSchedule = "off" | "hourly" | "daily" | "weekly";
+
 export interface BackupConfig {
   enabled: boolean;
   destination: "local" | "ssh" | "webdav";
+  schedule?: BackupSchedule;
   local_path: string | null;
   ssh_host: string | null;
   ssh_user: string | null;
@@ -498,8 +518,13 @@ export const api = {
   rotateServerKeys: () =>
     _fetch<{ ok: boolean; client_count: number; warning?: string }>("POST", "/rotate-server-keys"),
 
-  auditLog: () =>
-    _fetch<{ entries: AuditEntry[] }>("GET", "/audit-log"),
+  auditLog: (limit?: number) =>
+    _fetch<{ entries: AuditEntry[]; total?: number; returned?: number }>(
+      "GET", `/audit-log${limit ? `?limit=${limit}` : ""}`),
+
+  auditVerify: () =>
+    _fetch<{ valid: boolean; verified: number; error: string | null }>(
+      "GET", "/audit-log/verify"),
 
   sessionSummary: () =>
     _fetch<SessionSummary>("GET", "/session-summary"),
@@ -709,12 +734,19 @@ export const api = {
   scanNetworkServices: () =>
     _fetch<NetworkServicesResponse>("POST", "/network/services/scan"),
 
-  // ── Backup (7.5 encrypted local backup) ──────────────────────────────────
-  getBackupConfig: (): Promise<{ backup_config: BackupConfig }> =>
-    _fetch<{ backup_config: BackupConfig }>("GET", "/backup/config"),
+  scanDevicePorts: (ip: string, vendor?: string, serviceTypes?: string[]) =>
+    _fetch<DevicePortsResponse>("POST", "/network/device/ports", {
+      ip,
+      vendor: vendor ?? "",
+      service_types: serviceTypes ?? [],
+    }),
 
-  setBackupConfig: (cfg: Partial<BackupConfig>): Promise<{ ok: boolean }> =>
-    _fetch<{ ok: boolean }>("POST", "/backup/config", cfg),
+  // ── Backup (7.5 encrypted local backup) ──────────────────────────────────
+  getBackupConfig: (): Promise<{ backup_config: BackupConfig; schedule_active?: boolean }> =>
+    _fetch<{ backup_config: BackupConfig; schedule_active?: boolean }>("GET", "/backup/config"),
+
+  setBackupConfig: (cfg: Partial<BackupConfig>): Promise<{ ok: boolean; schedule_warning?: string }> =>
+    _fetch<{ ok: boolean; schedule_warning?: string }>("POST", "/backup/config", cfg),
 
   triggerBackup: (): Promise<{ ok: boolean; path: string; size_bytes: number; created_at: number }> =>
     _fetch<{ ok: boolean; path: string; size_bytes: number; created_at: number }>("POST", "/backup/trigger"),

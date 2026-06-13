@@ -6,12 +6,18 @@ import { api } from "../api";
 let _dnsCache: {
   mappings: Record<string, string>;
   dnsmasqAvailable: boolean;
+  dnsmasqRunning: boolean;
   platform: string;
 } | null = null;
+
+// Hostname: letters/digits/hyphen labels, dot-separated. IPv4: 4 octets 0-255.
+const HOSTNAME_RE = /^(?!-)[a-zA-Z0-9-]{1,63}(?<!-)(\.(?!-)[a-zA-Z0-9-]{1,63}(?<!-))*$/;
+const IPV4_RE = /^((25[0-5]|2[0-4]\d|1?\d?\d)\.){3}(25[0-5]|2[0-4]\d|1?\d?\d)$/;
 
 export function Dns() {
   const [mappings, setMappings] = useState<Record<string, string>>(_dnsCache?.mappings ?? {});
   const [dnsmasqAvailable, setDnsmasqAvailable] = useState(_dnsCache?.dnsmasqAvailable ?? false);
+  const [dnsmasqRunning, setDnsmasqRunning] = useState(_dnsCache?.dnsmasqRunning ?? false);
   const [platform, setPlatform] = useState(_dnsCache?.platform ?? "");
   const [newHostname, setNewHostname] = useState("");
   const [newIp, setNewIp] = useState("");
@@ -26,10 +32,12 @@ export function Dns() {
       _dnsCache = {
         mappings: res.mappings,
         dnsmasqAvailable: res.dnsmasq_available,
+        dnsmasqRunning: res.dnsmasq_running,
         platform: res.platform ?? "",
       };
       setMappings(res.mappings);
       setDnsmasqAvailable(res.dnsmasq_available);
+      setDnsmasqRunning(res.dnsmasq_running);
       setPlatform(res.platform ?? "");
     } catch {
       // Vault may be locked — silently skip
@@ -47,6 +55,14 @@ export function Dns() {
     const ip = newIp.trim();
     if (!hostname || !ip) {
       setError("Both hostname and IP address are required.");
+      return;
+    }
+    if (!HOSTNAME_RE.test(hostname)) {
+      setError("Invalid hostname. Use letters, digits, hyphens and dots (e.g. plex.home).");
+      return;
+    }
+    if (!IPV4_RE.test(ip)) {
+      setError("Invalid IPv4 address (e.g. 10.0.0.10).");
       return;
     }
     try {
@@ -81,10 +97,25 @@ export function Dns() {
       <div className="flex items-center gap-3 mb-2">
         <Globe className="w-7 h-7 text-blue-600" />
         <h1 className="text-3xl font-semibold text-gray-900">Split DNS</h1>
+        {isWindows ? (
+          <span className="text-xs px-2.5 py-1 rounded-full bg-blue-100 text-blue-700">Windows mode</span>
+        ) : dnsmasqRunning ? (
+          <span className="text-xs px-2.5 py-1 rounded-full bg-green-100 text-green-700">● dnsmasq running</span>
+        ) : dnsmasqAvailable ? (
+          <span className="text-xs px-2.5 py-1 rounded-full bg-amber-100 text-amber-700">○ dnsmasq installed, stopped</span>
+        ) : (
+          <span className="text-xs px-2.5 py-1 rounded-full bg-gray-100 text-gray-500">dnsmasq not installed</span>
+        )}
       </div>
-      <p className="text-gray-500 mb-6">
-        Internal hostnames resolved for VPN clients only. Changes take effect immediately when dnsmasq is running.
-      </p>
+      <div className="bg-blue-50 border border-blue-200 rounded-lg p-4 mb-6 text-sm text-blue-900 space-y-1.5">
+        <p className="font-medium">How this is used</p>
+        <p className="text-blue-800">
+          Map a friendly name to an internal IP — e.g. <code className="px-1 bg-blue-100 rounded">plex.home → 10.0.0.10</code>.
+          VPN clients can then reach <code className="px-1 bg-blue-100 rounded">http://plex.home</code> instead of
+          memorising IPs. These names resolve <strong>only over the WireGuard tunnel</strong>; they are never exposed publicly.
+          On Linux/macOS dnsmasq applies changes immediately; on Windows they ride the WireGuard <code className="px-1 bg-blue-100 rounded">DNS</code> directive.
+        </p>
+      </div>
 
       {isWindows ? (
         <div className="mb-6 bg-blue-50 border border-blue-200 rounded-lg p-4 flex items-center gap-3">

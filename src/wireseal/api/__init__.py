@@ -158,6 +158,8 @@ _ROUTES: list[tuple[str, re.Pattern, Any]] = [
 
     ("GET",    re.compile(r"^/api/audit-log$"),              _h_audit_log),
 
+    ("GET",    re.compile(r"^/api/audit-log/verify$"),       _h_audit_verify),
+
     ("GET",    re.compile(r"^/api/session-summary$"),         _h_session_summary),
 
     ("GET",    re.compile(r"^/api/file-activity$"),           _h_file_activity),
@@ -349,6 +351,8 @@ _ROUTES: list[tuple[str, re.Pattern, Any]] = [
     ("GET",    re.compile(r"^/api/network/services$"),                    _h_network_services),
 
     ("POST",   re.compile(r"^/api/network/services/scan$"),               _h_network_services_scan),
+
+    ("POST",   re.compile(r"^/api/network/device/ports$"),                _h_network_device_ports),
 
 ]
 

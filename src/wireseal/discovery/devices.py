@@ -33,6 +33,8 @@ class Device:
     vendor: str = ""
     source: str = "arp_table"  # "arp_table" | "ping_sweep"
     last_seen: str = ""  # ISO-8601
+    device_type: str = ""  # router|printer|nas|media|phone|computer|iot|unknown
+    open_ports: list = field(default_factory=list)  # [{"port", "service"}]
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -167,6 +169,11 @@ def read_arp_table() -> list[Device]:
 
     with ThreadPoolExecutor(max_workers=16) as pool:
         list(pool.map(_resolve, devices))
+
+    # Coarse classification from vendor signal (refined later by port scan)
+    from .classify import classify_device
+    for dev in devices:
+        dev.device_type = classify_device(vendor=dev.vendor)
 
     return devices
 

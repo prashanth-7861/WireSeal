@@ -3342,6 +3342,55 @@ def service_status() -> None:
         click.echo(f"  {marker} {k}")
 
 
+@cli.command("backup")
+@click.option("--non-interactive", "non_interactive", is_flag=True, default=False,
+              help="Run an unattended backup using settings from the system "
+                   "backup env file (no passphrase). Used by the scheduler.")
+def backup_cmd(non_interactive: bool) -> None:
+    """Create an encrypted vault backup to the configured destination.
+
+    Reads the out-of-vault backup settings saved from the dashboard Backup
+    page, copies the already-encrypted vault file to the destination, and
+    prunes old backups beyond keep_n. No passphrase is required — the vault is
+    never decrypted.
+    """
+    from pathlib import Path as _Path
+    from wireseal.backup.scheduler import read_backup_env
+    from wireseal.backup.manager import BackupManager
+    from wireseal.security.audit import AuditLog
+
+    cfg = read_backup_env()
+    if not cfg:
+        raise click.ClickException(
+            "Backup is not configured. Open the Backup page in the dashboard, "
+            "choose a destination, enable it, and save."
+        )
+    vault_path = _Path(str(cfg.pop("vault_path")))
+    if not vault_path.exists():
+        raise click.ClickException(f"Vault file not found: {vault_path}")
+
+    mgr = BackupManager()
+    try:
+        entry = mgr.create_backup(vault_path, cfg)
+    except (ValueError, RuntimeError) as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    keep_n = cfg.get("keep_n", 10)
+    if isinstance(keep_n, int) and keep_n > 0:
+        mgr.prune_old(cfg, keep_n)
+
+    try:
+        AuditLog(DEFAULT_AUDIT_LOG_PATH).log(
+            action="backup",
+            metadata={"path": entry.path, "size_bytes": entry.size_bytes,
+                      "trigger": "scheduled" if non_interactive else "cli"},
+        )
+    except Exception:
+        pass
+
+    click.echo(f"Backup created: {entry.path} ({entry.size_bytes} bytes)")
+
+
 if __name__ == "__main__":
     cli.add_command(client)
     cli()

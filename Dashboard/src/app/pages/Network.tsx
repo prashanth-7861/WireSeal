@@ -7,7 +7,9 @@ import { api } from "../api";
 import type {
   NetworkDevice, NetworkDevicesResponse,
   NetworkService, NetworkServicesResponse, ScanStatus,
+  OpenPort, DeviceType,
 } from "../api";
+import { DeviceDetailSheet, deviceTypeMeta } from "../components/network/DeviceDetailSheet";
 
 // Module-level cache — survives navigation
 let _devicesCache: NetworkDevicesResponse | null = null;
@@ -30,7 +32,28 @@ export function Network() {
   const [mdnsAvailable, setMdnsAvailable] = useState(_servicesCache?.mdns_available ?? false);
   const [discoveringServices, setDiscoveringServices] = useState(false);
 
+  const [selectedDevice, setSelectedDevice] = useState<NetworkDevice | null>(null);
+  const [sheetOpen, setSheetOpen] = useState(false);
+
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  const openDevice = (d: NetworkDevice) => {
+    setSelectedDevice(d);
+    setSheetOpen(true);
+  };
+
+  const handleDeviceUpdate = (ip: string, openPorts: OpenPort[], deviceType: DeviceType) => {
+    setDevices(prev => {
+      const next = prev.map(d =>
+        d.ip === ip ? { ...d, open_ports: openPorts, device_type: deviceType } : d);
+      if (_devicesCache) _devicesCache = { ..._devicesCache, devices: next };
+      return next;
+    });
+    setSelectedDevice(prev =>
+      prev && prev.ip === ip
+        ? { ...prev, open_ports: openPorts, device_type: deviceType }
+        : prev);
+  };
 
   const fetchDevices = useCallback(async () => {
     try {
@@ -214,6 +237,7 @@ export function Network() {
           <table className="w-full">
             <thead className="bg-gray-50 border-b border-gray-200">
               <tr>
+                <th className="text-left px-5 py-3 text-sm font-medium text-gray-700">Type</th>
                 <th className="text-left px-5 py-3 text-sm font-medium text-gray-700">IP Address</th>
                 <th className="text-left px-5 py-3 text-sm font-medium text-gray-700">Hostname</th>
                 <th className="text-left px-5 py-3 text-sm font-medium text-gray-700">MAC Address</th>
@@ -221,8 +245,20 @@ export function Network() {
               </tr>
             </thead>
             <tbody className="divide-y divide-gray-200">
-              {filteredDevices.map((d) => (
-                <tr key={`${d.ip}-${d.mac}`} className="hover:bg-gray-50">
+              {filteredDevices.map((d) => {
+                const meta = deviceTypeMeta(d.device_type);
+                return (
+                <tr
+                  key={`${d.ip}-${d.mac}`}
+                  onClick={() => openDevice(d)}
+                  className="hover:bg-blue-50/40 cursor-pointer"
+                >
+                  <td className="px-5 py-3 text-sm text-gray-700">
+                    <span className="inline-flex items-center gap-2">
+                      <meta.Icon className="w-4 h-4 text-gray-400" />
+                      <span className="text-gray-600">{meta.label.split(" ")[0]}</span>
+                    </span>
+                  </td>
                   <td className="px-5 py-3 font-mono text-sm text-gray-900">{d.ip}</td>
                   <td className="px-5 py-3 text-sm text-gray-700">
                     {d.hostname || <span className="text-gray-400 italic">—</span>}
@@ -234,10 +270,11 @@ export function Network() {
                     </span>
                   </td>
                 </tr>
-              ))}
+                );
+              })}
               {filteredDevices.length === 0 && (
                 <tr>
-                  <td colSpan={4} className="px-5 py-12 text-center text-gray-500 text-sm">
+                  <td colSpan={5} className="px-5 py-12 text-center text-gray-500 text-sm">
                     {devices.length === 0
                       ? "No devices found. Try scanning your network."
                       : "No devices match your filter."}
@@ -293,6 +330,14 @@ export function Network() {
           </div>
         </>
       )}
+
+      <DeviceDetailSheet
+        device={selectedDevice}
+        services={services}
+        open={sheetOpen}
+        onOpenChange={setSheetOpen}
+        onDeviceUpdate={handleDeviceUpdate}
+      />
     </div>
   );
 }

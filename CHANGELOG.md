@@ -7,6 +7,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.9.49] — 2026-06-13
+
+### Added
+- **Scheduled (unattended) backups** — the Backup page now has a **Schedule** selector (Off / Hourly / Daily 03:00 / Weekly Sun 03:00). Saving an enabled schedule installs an OS scheduler entry (`/etc/cron.d/wireseal-backup` on Linux/macOS, a `WireSealBackup` Scheduled Task on Windows) that runs `wireseal backup --non-interactive`. Because a backup only **copies the already-encrypted vault file**, the scheduled job needs no passphrase — non-secret settings (plus the WebDAV password, like the DuckDNS token) live in a root-only `0600` env file at `/etc/wireseal/backup.env` (`backup/scheduler.py`)
+- **`wireseal backup [--non-interactive]` CLI command** — creates a vault backup to the configured destination and prunes beyond `keep_n`, reading the out-of-vault env file. Invoked by the scheduler; also runnable manually
+- **Backup page — "What this does" explainer** plus a per-destination **push-only notice**: SSH/rsync and WebDAV backups upload but cannot be listed/restored from the UI (no standard remote listing), so the Existing Backups table + one-click Restore are documented as Local-only
+- **Backup schedule status** — `GET /api/backup/config` now returns `schedule_active`; the UI shows a live "Schedule active / Not installed" badge, and `POST /api/backup/config` returns a `schedule_warning` (surfaced in the UI) when the scheduler can't be installed (e.g. server not running as root) so manual backups keep working
+- **DNS page — live `dnsmasq` status badge** (running / installed-stopped / not-installed / Windows mode) from the existing `dnsmasq_running` field, a **"How this is used" explainer**, and **client-side hostname/IPv4 validation** for instant feedback before the request
+
+### Changed
+- **`backup_config`** gains a `schedule` field (`off|hourly|daily|weekly`); added to the API allow-list and reconciled with the OS scheduler on every config save
+- **Version bump** to 0.9.49
+
+### Added
+- **Audit Log — tamper-evidence surfaced in the UI** — the SEC-025 hash chain was verified only on the CLI; the server-mode Audit Log page now calls a new `GET /api/audit-log/verify` endpoint (wraps `AuditLog.verify_chain()`) and shows a live **"Chain verified (N)"** green badge, or a red **"Tampering detected"** badge with the offending entry when the chain breaks
+- **Audit Log — export** — one-click **CSV** and **JSON** export of the currently-filtered events (client-side download). Wires up the previously-unused `FileDown` icon
+- **Audit Log — view older entries** — `GET /api/audit-log` now accepts `?limit=N` (default 100, capped 2000) and returns `total`/`returned`; the page shows "X of Y events" and a **"Load all"** control when more history exists on disk
+- **Audit Log — "Failures only" filter** — quick toggle to isolate failed actions (failed unlocks, TOTP failures, errored operations) for incident triage
+
+### Fixed
+- **Client SSH Terminal scrolling/sizing** — the xterm host element carried its own `p-2` padding, which broke FitAddon's measurement so rows were mis-sized and the scrollback viewport was effectively dead ("can't scroll"). Padding moved to a wrapper; the host now fills its box cleanly. Added `scrollback: 5000`, `scrollOnUserInput`, and a **ResizeObserver** that refits the grid and resends the PTY size on any container change (sidebar toggle, window resize, form show/hide) — replacing the fragile `window.resize` + one-shot timer. Initial fit deferred via double-`requestAnimationFrame` to avoid a 0-height first measure, and selecting text now copies to the clipboard automatically
+- **Client SFTP browser scrolling** — the connected view used `h-full` but the client `<main>` has no height, so the file list never got a bounded height and the whole page scrolled (sticky header/toolbar scrolled away). Root is now `h-[calc(100vh-4rem)]` so the list scrolls internally with the header pinned. Verified all 12 SFTP endpoints + API client methods align and response shapes (`content_b64`/`mime`) match the UI
+
+### Security
+- Scheduled-backup env values are newline-stripped before writing (`KEY=VALUE` injection guard) and the scheduler refuses to install against an executable path that fails `validate_script_path` (cron-injection guard, mirrors the DuckDNS updater)
+
+---
+
+## [0.9.48] — 2026-06-12
+
+### Added
+- **Per-device port scan** — clicking a device on the Network page opens a detail drawer with a **Scan Ports** button that TCP connect-scans a curated list of ~32 common LAN ports (SSH, HTTP/S, SMB, IPP/9100 printing, Plex/Jellyfin, RDP, VNC, NFS/AFP, MQTT, Home Assistant, …) and lists the open ones with friendly service labels. Bounded concurrency + short timeouts; **restricted to private/link-local addresses** (`is_scannable_ip`) so the scanner can never be pointed at public internet hosts (`discovery/ports.py`)
+- **Device-type classification** — devices are now tagged `router · printer · nas · media · phone · computer · iot · unknown` and shown with an icon + label column. Heuristics combine OUI vendor, open-port signatures, and discovered mDNS/SSDP service types, with priority gateway → service types → ports → vendor (`discovery/classify.py`)
+- **Device detail drawer with device↔service cross-link** — the new `DeviceDetailSheet` shows full identity (IP, hostname, MAC, vendor, source), open ports, and every advertised mDNS/SSDP service whose IP matches that device, so you can see at a glance what each host actually exposes
+- **`POST /api/network/device/ports`** — new endpoint: scans one LAN device's ports and returns `{ip, open_ports, device_type}`. Rejects non-LAN IPs with 400
+
+### Changed
+- **`Device` model** extended with `device_type` and `open_ports` fields (cross-platform; serialized in `/api/network/devices`)
+- **Version bump** to 0.9.48
+
+---
+
 ## [0.9.47] — 2026-06-11
 
 ### Added

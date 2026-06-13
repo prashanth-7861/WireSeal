@@ -84,3 +84,34 @@ def _h_network_services_scan(req, _groups):
 
     result = discover_all_services()
     return result
+
+
+def _h_network_device_ports(req, _groups):
+    """POST /api/network/device/ports — scan one LAN device's ports + classify."""
+    _require_unlocked()
+
+    body = req._json()
+    ip = (body.get("ip") or "").strip()
+    vendor = (body.get("vendor") or "").strip()
+    service_types = body.get("service_types") or []
+    if not isinstance(service_types, list):
+        service_types = []
+
+    from wireseal.discovery.ports import is_scannable_ip, scan_ports
+    from wireseal.discovery.classify import classify_device
+
+    if not ip or not is_scannable_ip(ip):
+        raise _ApiError("Invalid or non-LAN IP address.", 400)
+
+    open_ports = scan_ports(ip)
+    port_nums = [p["port"] for p in open_ports]
+    device_type = classify_device(
+        vendor=vendor,
+        open_ports=port_nums,
+        service_types=[str(s) for s in service_types],
+    )
+    return {
+        "ip": ip,
+        "open_ports": open_ports,
+        "device_type": device_type,
+    }

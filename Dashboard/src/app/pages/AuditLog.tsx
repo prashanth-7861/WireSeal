@@ -105,17 +105,27 @@ export function AuditLog() {
   const [search, setSearch] = useState("");
   const [page, setPage] = useState(0);
   const [expanded, setExpanded] = useState<Set<number>>(new Set());
+  const [integrity, setIntegrity] = useState<{ valid: boolean; verified: number; error: string | null } | null>(null);
+  const [failuresOnly, setFailuresOnly] = useState(false);
+  const [limit, setLimit] = useState(100);
+  const [total, setTotal] = useState(0);
 
   const fetchAll = useCallback(async () => {
     setLoading(true);
-    const [logRes, sumRes, fileRes] = await Promise.allSettled([
-      api.auditLog(), api.sessionSummary(), api.fileActivity(),
+    const [logRes, sumRes, fileRes, verRes] = await Promise.allSettled([
+      api.auditLog(limit), api.sessionSummary(), api.fileActivity(), api.auditVerify(),
     ]);
     const errors: string[] = [];
     if (logRes.status === "fulfilled") {
       setEntries(logRes.value.entries);
+      setTotal(logRes.value.total ?? logRes.value.entries.length);
     } else {
       errors.push("Audit log: " + (logRes.reason instanceof Error ? logRes.reason.message : "Failed"));
+    }
+    if (verRes.status === "fulfilled") {
+      setIntegrity(verRes.value);
+    } else {
+      setIntegrity(null);
     }
     if (sumRes.status === "fulfilled") {
       setSummary(sumRes.value);
@@ -136,7 +146,7 @@ export function AuditLog() {
     }
     setError(errors.join("; "));
     setLoading(false);
-  }, []);
+  }, [limit]);
 
   useEffect(() => { fetchAll(); }, [fetchAll]);
 
@@ -147,6 +157,9 @@ export function AuditLog() {
         .filter(([, v]) => v.category === categoryFilter).map(([k]) => k);
       items = items.filter(e => actionKeys.includes(e.action));
     }
+    if (failuresOnly) {
+      items = items.filter(e => !e.success);
+    }
     if (search.trim()) {
       const q = search.toLowerCase();
       items = items.filter(e =>
@@ -156,13 +169,39 @@ export function AuditLog() {
       );
     }
     return items;
-  }, [entries, categoryFilter, search]);
+  }, [entries, categoryFilter, search, failuresOnly]);
 
   const pageCount = Math.ceil(filtered.length / PAGE_SIZE);
   const paged = filtered.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE);
 
   const toggleExpand = (i: number) => {
     setExpanded(prev => { const n = new Set(prev); n.has(i) ? n.delete(i) : n.add(i); return n; });
+  };
+
+  const exportEvents = (format: "json" | "csv") => {
+    const rows = filtered;
+    const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-");
+    let blob: Blob;
+    let filename: string;
+    if (format === "json") {
+      blob = new Blob([JSON.stringify(rows, null, 2)], { type: "application/json" });
+      filename = `wireseal-audit-${stamp}.json`;
+    } else {
+      const esc = (v: unknown) => `"${String(v ?? "").replace(/"/g, '""')}"`;
+      const lines = ["timestamp,action,success,error,metadata"];
+      for (const e of rows) {
+        lines.push([
+          esc(e.timestamp), esc(e.action), esc(e.success),
+          esc(e.error ?? ""), esc(JSON.stringify(e.metadata)),
+        ].join(","));
+      }
+      blob = new Blob([lines.join("\n")], { type: "text/csv" });
+      filename = `wireseal-audit-${stamp}.csv`;
+    }
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url; a.download = filename; a.click();
+    URL.revokeObjectURL(url);
   };
 
   return (
@@ -174,11 +213,47 @@ export function AuditLog() {
           <p className="text-sm text-gray-500 mt-1">Track every action across the system</p>
         </div>
         <div className="flex items-center gap-3">
+          {/* Tamper-evident chain integrity */}
+          {integrity && (
+            integrity.valid ? (
+              <span
+                className="flex items-center gap-1.5 px-2.5 py-1 text-xs font-medium rounded-full bg-green-100 text-green-700 border border-green-200"
+                title={`Hash chain verified across ${integrity.verified} entries — log is tamper-evident and intact`}
+              >
+                <Shield className="w-3.5 h-3.5" />
+                Chain verified ({integrity.verified})
+              </span>
+            ) : (
+              <span
+                className="flex items-center gap-1.5 px-2.5 py-1 text-xs font-medium rounded-full bg-red-100 text-red-700 border border-red-200"
+                title={integrity.error || "Audit chain verification failed"}
+              >
+                <AlertTriangle className="w-3.5 h-3.5" />
+                Tampering detected
+              </span>
+            )
+          )}
           {tab === "sessions" && summary && (
             <span className="text-xs text-gray-400 tabular-nums">{summary.sessions.length} sessions</span>
           )}
           {tab === "events" && (
-            <span className="text-xs text-gray-400 tabular-nums">{filtered.length} events</span>
+            <span className="text-xs text-gray-400 tabular-nums">
+              {filtered.length} of {total} events
+            </span>
+          )}
+          {tab === "events" && filtered.length > 0 && (
+            <div className="flex items-center gap-1">
+              <button onClick={() => exportEvents("csv")}
+                title="Export filtered events as CSV"
+                className="flex items-center gap-1.5 px-3 py-1.5 text-sm border rounded-lg hover:bg-gray-50">
+                <FileDown className="w-3.5 h-3.5" /> CSV
+              </button>
+              <button onClick={() => exportEvents("json")}
+                title="Export filtered events as JSON"
+                className="flex items-center gap-1.5 px-3 py-1.5 text-sm border rounded-lg hover:bg-gray-50">
+                <FileDown className="w-3.5 h-3.5" /> JSON
+              </button>
+            </div>
           )}
           <button onClick={fetchAll} disabled={loading}
             className="flex items-center gap-1.5 px-3 py-1.5 text-sm border rounded-lg hover:bg-gray-50 disabled:opacity-50">
@@ -246,6 +321,22 @@ export function AuditLog() {
                 </button>
               ))}
             </div>
+            <button
+              onClick={() => { setFailuresOnly(v => !v); setPage(0); }}
+              title="Show only failed actions (failed unlocks, TOTP failures, errors)"
+              className={`px-2.5 py-1 text-xs font-medium rounded-full border transition-colors ${
+                failuresOnly ? "bg-red-100 text-red-700 border-red-300" : "bg-white text-gray-500 border-gray-200 hover:border-gray-300"
+              }`}>
+              Failures only
+            </button>
+            {total > entries.length && (
+              <button
+                onClick={() => setLimit(2000)}
+                title={`Currently showing the latest ${entries.length}. Load all ${total}.`}
+                className="px-2.5 py-1 text-xs font-medium rounded-full border bg-white text-blue-600 border-blue-200 hover:bg-blue-50">
+                Load all {total}
+              </button>
+            )}
             <div className="relative flex-1 max-w-xs ml-auto">
               <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-gray-400" />
               <input value={search} onChange={e => { setSearch(e.target.value); setPage(0); }}

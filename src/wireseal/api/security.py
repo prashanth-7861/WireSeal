@@ -42,20 +42,51 @@ def _h_audit_log(req: "_Handler", _groups: tuple) -> dict:
     without proving they hold the vault passphrase.
     """
     _require_unlocked()
-    if not _s._AUDIT_PATH.exists():
-        return {"entries": []}
+    from urllib.parse import urlsplit, parse_qs
+    qs = parse_qs(urlsplit(getattr(req, "path", "") or "").query)
     try:
-        text    = _s._AUDIT_PATH.read_text()
+        limit = int(qs.get("limit", ["100"])[0])
+    except (ValueError, TypeError):
+        limit = 100
+    limit = max(1, min(limit, 2000))
+
+    if not _s._AUDIT_PATH.exists():
+        return {"entries": [], "total": 0, "returned": 0}
+    try:
+        lines   = _s._AUDIT_PATH.read_text().strip().splitlines()
+        total   = len(lines)
         entries = []
-        for line in text.strip().splitlines()[-100:]:
+        for line in lines[-limit:]:
             try:
                 entries.append(json.loads(line))
             except json.JSONDecodeError:
                 logging.getLogger("wireseal.audit").warning("Malformed audit log entry skipped")
-        return {"entries": list(reversed(entries))}
+        return {
+            "entries": list(reversed(entries)),
+            "total": total,
+            "returned": len(entries),
+        }
     except OSError:
         logging.getLogger("wireseal").warning("Failed to read audit log")
-        return {"entries": [], "error": "Failed to read audit log"}
+        return {"entries": [], "total": 0, "returned": 0, "error": "Failed to read audit log"}
+
+
+def _h_audit_verify(req: "_Handler", _groups: tuple) -> dict:
+    """Verify the tamper-evident hash chain of the on-disk audit log.
+
+    SEC-025: each entry chains to the previous via
+    ``chain_hash = sha256(prev_hash + canonical_body)``. A modified, deleted,
+    or reordered entry breaks the chain. Requires vault unlock (same
+    reconnaissance-sensitivity as reading the log).
+    """
+    _require_unlocked()
+    from wireseal.security.audit import AuditLog
+    try:
+        ok, count, err = AuditLog(_s._AUDIT_PATH).verify_chain()
+    except Exception as exc:  # never 500 the page over a verify failure
+        logging.getLogger("wireseal.audit").warning("Chain verify failed: %s", exc)
+        return {"valid": False, "verified": 0, "error": str(exc)}
+    return {"valid": ok, "verified": count, "error": err}
 
 
 def _h_session_summary(req: "_Handler", _groups: tuple) -> dict:

@@ -605,7 +605,7 @@ export function Sftp() {
   }
 
   return (
-    <div className="h-full flex flex-col bg-gray-50 relative" onKeyDown={handleKeyDown} tabIndex={0}
+    <div className="h-[calc(100vh-4rem)] flex flex-col bg-gray-50 relative overflow-hidden rounded-lg" onKeyDown={handleKeyDown} tabIndex={0}
       onDragOver={e => { e.preventDefault(); setDragOver(true); }}
       onDragLeave={() => setDragOver(false)}
       onDrop={async e => {

@@ -13,7 +13,39 @@ def _h_backup_config_get(req, _groups):
         cache = _session["cache"] or {}
     cfg = cache.get("backup_config", {})
     safe = {k: v for k, v in cfg.items() if k != "webdav_pass"}
-    return {"backup_config": safe}
+    from wireseal.backup.scheduler import schedule_status
+    try:
+        active = schedule_status().get("schedule_active", False)
+    except Exception:
+        active = False
+    return {"backup_config": safe, "schedule_active": active}
+
+
+def _sync_backup_schedule(vault_path) -> str | None:
+    """Reconcile the OS scheduler + out-of-vault env with the saved config.
+
+    Returns a warning string if scheduling could not be applied (e.g. the
+    server is not running as root), otherwise None. Never raises — the manual
+    backup path must keep working regardless.
+    """
+    from wireseal.backup import scheduler
+    with _lock:
+        cache = _session["cache"] or {}
+    cfg = cache.get("backup_config", {}) or {}
+    schedule = cfg.get("schedule", "off")
+    enabled = bool(cfg.get("enabled"))
+    try:
+        if enabled and schedule in scheduler.SCHEDULES and schedule != "off":
+            scheduler.write_backup_env(cfg, vault_path)
+            scheduler.install_schedule(schedule)
+        else:
+            scheduler.remove_schedule()
+            scheduler.remove_backup_env()
+    except scheduler.ScheduleError as exc:
+        return str(exc)
+    except Exception as exc:
+        return f"Could not apply backup schedule: {exc}"
+    return None
 
 
 def _h_backup_config_set(req, _groups):
@@ -21,7 +53,7 @@ def _h_backup_config_set(req, _groups):
     body = req._json()
     allowed_keys = {
         "enabled", "destination", "local_path", "ssh_host", "ssh_user", "ssh_path",
-        "webdav_url", "webdav_user", "webdav_pass", "keep_n",
+        "webdav_url", "webdav_user", "webdav_pass", "keep_n", "schedule",
     }
     with _lock:
         vault = _session["vault"]
@@ -34,7 +66,12 @@ def _h_backup_config_set(req, _groups):
                 cfg[k] = v
         vault.save(state, passphrase)
     _refresh_cache_unlocked(vault, passphrase, admin_id)
-    return {"ok": True}
+
+    resp = {"ok": True}
+    warning = _sync_backup_schedule(vault._path)
+    if warning:
+        resp["schedule_warning"] = warning
+    return resp
 
 
 def _h_backup_trigger(req, _groups):

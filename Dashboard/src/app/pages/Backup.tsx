@@ -1,11 +1,18 @@
 import React, { useEffect, useState } from "react";
-import { api, BackupConfig, BackupEntry } from "../api";
+import { api, BackupConfig, BackupEntry, BackupSchedule } from "../api";
 import { useEscapeKey } from "../hooks/useEscapeKey";
 
 const DEST_LABELS: Record<string, string> = {
   local: "Local Filesystem",
   ssh: "SSH / rsync",
   webdav: "WebDAV (self-hosted)",
+};
+
+const SCHEDULE_LABELS: Record<BackupSchedule, string> = {
+  off: "Manual only (no schedule)",
+  hourly: "Hourly",
+  daily: "Daily (03:00)",
+  weekly: "Weekly (Sun 03:00)",
 };
 
 function formatBytes(n: number): string {
@@ -38,6 +45,9 @@ export function Backup() {
   const [webdavPass, setWebdavPass] = useState("");
   const [keepN, setKeepN] = useState(10);
   const [enabled, setEnabled] = useState(false);
+  const [schedule, setSchedule] = useState<BackupSchedule>("off");
+  const [scheduleActive, setScheduleActive] = useState(false);
+  const [scheduleWarning, setScheduleWarning] = useState<string | null>(null);
   const [savingConfig, setSavingConfig] = useState(false);
   const [saveSuccess, setSaveSuccess] = useState(false);
 
@@ -63,6 +73,8 @@ export function Backup() {
       const c = cfgResult.value.backup_config;
       setConfig(c);
       setDest((c.destination as "local" | "ssh" | "webdav") ?? "local");
+      setSchedule((c.schedule as BackupSchedule) ?? "off");
+      setScheduleActive(cfgResult.value.schedule_active ?? false);
       setLocalPath(c.local_path ?? "");
       setSshHost(c.ssh_host ?? "");
       setSshUser(c.ssh_user ?? "");
@@ -96,10 +108,12 @@ export function Backup() {
     e.preventDefault();
     setSavingConfig(true);
     setSaveSuccess(false);
+    setScheduleWarning(null);
     try {
-      await api.setBackupConfig({
+      const res = await api.setBackupConfig({
         enabled,
         destination: dest,
+        schedule,
         local_path: localPath || null,
         ssh_host: sshHost || null,
         ssh_user: sshUser || null,
@@ -110,6 +124,7 @@ export function Backup() {
         keep_n: keepN,
       });
       setSaveSuccess(true);
+      if (res.schedule_warning) setScheduleWarning(res.schedule_warning);
       load();
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : "Failed to save config");
@@ -156,6 +171,22 @@ export function Backup() {
     <div className="p-6 space-y-8 max-w-3xl">
       <h1 className="text-2xl font-bold text-gray-900">Backup</h1>
 
+      <div className="bg-blue-50 border border-blue-200 rounded-xl p-5 text-sm text-blue-900 space-y-2">
+        <p className="font-medium">What this does</p>
+        <p className="text-blue-800">
+          A backup is an exact copy of your <strong>encrypted vault file</strong> — every admin
+          credential, WireGuard key, client, DNS mapping, and setting. It is copied as-is and is
+          only readable with your vault passphrase, so it is safe to store off-box. If the server
+          dies or the vault is lost, restoring a backup brings everything back.
+        </p>
+        <p className="text-blue-800">
+          Pick a <strong>destination</strong> (local disk, an SSH host via rsync, or a self-hosted
+          WebDAV server), choose a <strong>schedule</strong> for unattended copies, then run one now
+          with <strong>Trigger Backup Now</strong>. Restore from the list below with the passphrase
+          the backup was created under.
+        </p>
+      </div>
+
       {error && (
         <div className="bg-red-50 border border-red-200 rounded-lg p-4 text-sm text-red-700">
           {error}
@@ -170,15 +201,20 @@ export function Backup() {
           <h2 className="text-lg font-semibold text-gray-800">Configuration</h2>
 
           <form onSubmit={handleSaveConfig} className="space-y-4">
-            <label className="flex items-center gap-2 text-sm font-medium text-gray-700">
-              <input
-                type="checkbox"
-                checked={enabled}
-                onChange={e => setEnabled(e.target.checked)}
-                className="rounded"
-              />
-              Enable automatic backup
-            </label>
+            <div>
+              <label className="flex items-center gap-2 text-sm font-medium text-gray-700">
+                <input
+                  type="checkbox"
+                  checked={enabled}
+                  onChange={e => setEnabled(e.target.checked)}
+                  className="rounded"
+                />
+                Enable backups
+              </label>
+              <p className="text-xs text-gray-500 mt-1 ml-6">
+                Required to run manual backups and to install a schedule. Leave off to pause all backups.
+              </p>
+            </div>
 
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-1">
@@ -193,6 +229,41 @@ export function Backup() {
                   <option key={k} value={k}>{v}</option>
                 ))}
               </select>
+            </div>
+
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">
+                Schedule
+              </label>
+              <div className="flex items-center gap-3">
+                <select
+                  value={schedule}
+                  onChange={e => setSchedule(e.target.value as BackupSchedule)}
+                  className="flex-1 border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                >
+                  {(Object.keys(SCHEDULE_LABELS) as BackupSchedule[]).map(k => (
+                    <option key={k} value={k}>{SCHEDULE_LABELS[k]}</option>
+                  ))}
+                </select>
+                {schedule !== "off" && (
+                  <span
+                    className={`text-xs px-2 py-1 rounded-full whitespace-nowrap ${
+                      scheduleActive
+                        ? "bg-green-100 text-green-700"
+                        : "bg-gray-100 text-gray-500"
+                    }`}
+                    title={scheduleActive
+                      ? "An OS scheduler entry is installed"
+                      : "Save config to install the scheduler entry"}
+                  >
+                    {scheduleActive ? "● Schedule active" : "○ Not installed"}
+                  </span>
+                )}
+              </div>
+              <p className="text-xs text-gray-500 mt-1">
+                Unattended copies run via the OS scheduler (cron on Linux/macOS, Task Scheduler on
+                Windows). The job copies the encrypted vault — no passphrase is stored or needed.
+              </p>
             </div>
 
             {dest === "local" && (
@@ -279,6 +350,16 @@ export function Backup() {
               </>
             )}
 
+            {dest !== "local" && (
+              <div className="bg-amber-50 border border-amber-200 rounded-lg p-3 text-xs text-amber-800">
+                <strong>Push-only destination.</strong> {dest === "ssh" ? "SSH/rsync" : "WebDAV"} backups
+                are uploaded but cannot be listed or restored from this page (no standard remote
+                listing). The “Existing Backups” table and one-click Restore work for the
+                <strong> Local Filesystem</strong> destination only. To restore from {dest === "ssh" ? "SSH" : "WebDAV"},
+                pull the file back into your local backup folder first.
+              </div>
+            )}
+
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-1">
                 Keep last N backups
@@ -305,6 +386,13 @@ export function Backup() {
                 <span className="text-sm text-green-600">Configuration saved.</span>
               )}
             </div>
+
+            {scheduleWarning && (
+              <p className="text-sm text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
+                Config saved, but the schedule could not be installed: {scheduleWarning}
+                {" "}Manual backups still work. (Scheduling usually needs the server to run as root/admin.)
+              </p>
+            )}
           </form>
         </section>
       )}

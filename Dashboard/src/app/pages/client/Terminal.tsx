@@ -98,6 +98,10 @@ export function Terminal() {
       cursorBlink: true,
       cursorStyle: "block",
       allowProposedApi: true,
+      scrollback: 5000,
+      scrollOnUserInput: true,
+      smoothScrollDuration: 0,
+      macOptionIsMeta: true,
       theme: {
         background: "#0b0f14",
         foreground: "#d4d4d4",
@@ -117,8 +121,20 @@ export function Terminal() {
     const fit = new FitAddon();
     term.loadAddon(fit);
     term.loadAddon(new WebLinksAddon());
-    term.open(termContainerRef.current);
-    fit.fit();
+    const host = termContainerRef.current;
+    term.open(host);
+
+    // Fit once layout has settled (double rAF avoids a 0-height first measure).
+    const fitAndNotify = () => {
+      try {
+        fit.fit();
+        const ws = wsRef.current;
+        if (ws && ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({ type: "resize", cols: term.cols, rows: term.rows }));
+        }
+      } catch { /* ignore */ }
+    };
+    requestAnimationFrame(() => requestAnimationFrame(fitAndNotify));
 
     term.writeln("\x1b[90mWireSeal SSH Terminal\x1b[0m");
     term.writeln("\x1b[90mConnect to a server to start a session.\x1b[0m");
@@ -127,22 +143,27 @@ export function Terminal() {
     termRef.current = term;
     fitRef.current = fit;
 
-    const onResize = () => {
-      try {
-        fit.fit();
-        if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-          wsRef.current.send(JSON.stringify({
-            type: "resize",
-            cols: term.cols,
-            rows: term.rows,
-          }));
-        }
-      } catch { /* ignore */ }
-    };
-    window.addEventListener("resize", onResize);
+    // Refit on ANY container size change (window resize, sidebar toggle,
+    // form show/hide). Debounced through rAF so we coalesce bursts.
+    let rafId = 0;
+    const ro = new ResizeObserver(() => {
+      cancelAnimationFrame(rafId);
+      rafId = requestAnimationFrame(fitAndNotify);
+    });
+    ro.observe(host);
+
+    // Natural copy: selecting text copies it to the clipboard automatically.
+    const selDisp = term.onSelectionChange(() => {
+      const sel = term.getSelection();
+      if (sel && navigator.clipboard) {
+        navigator.clipboard.writeText(sel).catch(() => { /* ignore */ });
+      }
+    });
 
     return () => {
-      window.removeEventListener("resize", onResize);
+      cancelAnimationFrame(rafId);
+      ro.disconnect();
+      selDisp.dispose();
       term.dispose();
       termRef.current = null;
       fitRef.current = null;
@@ -571,10 +592,13 @@ export function Terminal() {
           )}
         </div>
         <div
-          ref={termContainerRef}
-          className="p-2"
-          style={{ height: "calc(100vh - 360px)", minHeight: "320px" }}
-        />
+          className="bg-[#0b0f14] p-2"
+          style={{ height: "calc(100vh - 340px)", minHeight: "360px" }}
+        >
+          {/* xterm attaches here — host has NO padding so FitAddon measures
+              the true content box and the scrollback viewport works. */}
+          <div ref={termContainerRef} className="h-full w-full" />
+        </div>
       </div>
 
       {!connected && !connecting && (
