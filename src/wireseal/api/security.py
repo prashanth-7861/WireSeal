@@ -43,8 +43,10 @@ def _h_audit_log(req: "_Handler", _groups: tuple) -> dict:
     """
     _require_unlocked()
     from urllib.parse import urlsplit, parse_qs
-    qs = parse_qs(urlsplit(getattr(req, "path", "") or "").query)
+    raw_path = getattr(req, "path", "")
+    path_str = raw_path if isinstance(raw_path, str) else ""
     try:
+        qs = parse_qs(urlsplit(path_str).query)
         limit = int(qs.get("limit", ["100"])[0])
     except (ValueError, TypeError):
         limit = 100
