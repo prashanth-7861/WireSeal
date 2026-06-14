@@ -7,6 +7,80 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [1.0.0] — 2026-06-14
+
+**First stable release.** WireSeal is positioned as *the audited, zero-trust,
+zero-telemetry home network gateway you fully own* — no cloud control plane, no
+account, no telemetry; your keys never leave your box.
+
+### Security
+- **Full source-level security audit** performed across the entire server attack
+  surface (vault/auth/session, network-facing SSH/SFTP/DNS/backup, and all new
+  feature modules). Findings + remediation published in
+  [`SECURITY_AUDIT_v1.0.0.md`](SECURITY_AUDIT_v1.0.0.md). No remote code
+  execution, auth bypass, or hardcoded secret found; the crypto/auth core was
+  assessed as strong.
+- **Added [`SECURITY.md`](SECURITY.md)** — private disclosure policy, security
+  posture, zero-telemetry proof, and release-verification guide.
+- **Hardening fixes from the audit:**
+  - Validate `vault_dir` against a safe path charset before it is written into
+    the systemd unit — closes a newline→`ExecStart=` injection (root RCE) reachable
+    by an admin (`platform/linux.py`).
+  - WebDAV backup now **rejects HTTP redirects** so the SSRF guard can't be
+    bypassed by a 3xx to an internal host (`backup/manager.py`).
+  - **All SFTP read operations** (`list/read/stat/exists`) now require the admin
+    role, matching the write side (`api/sftp.py`).
+  - SFTP paths must be **absolute** (no relative/CWD resolution) (`api/sftp.py`).
+  - Backup cron command **shell-quotes** the executable path (`backup/scheduler.py`).
+  - MTU detection **validates the interface name** before using it as a `/sys`
+    path component (`api/_shared.py`).
+  - Notification dispatch **restricts URLs to http/https** (blocks `file://`
+    etc.), **returns generic errors** (no SMTP-banner/host leak), and **strips
+    CR/LF from email headers** (`notify/dispatch.py`).
+  - Audit-log endpoints read a **memory-bounded tail** instead of the whole file
+    (`api/security.py`).
+- **Zero telemetry verified** — no analytics/phone-home; every outbound call is a
+  user-enabled feature to a user-controlled endpoint.
+
+### Added
+- **Live per-peer data on the Clients page** — the Clients table now shows each
+  peer's **data up/down** and **endpoint IP** alongside the existing live
+  online/last-handshake badge (5s poll). `_parse_wg_show` now also parses the
+  `endpoint:` line (`api/service.py`); `Peer` gains `endpoint`
+- **Notifications (ntfy / webhook / email)** — new **Notifications** page +
+  `GET/POST /api/notifications` and `POST /api/notifications/test`. Best-effort
+  fan-out (`notify/dispatch.py`, stdlib only) to ntfy, a JSON webhook, or SMTP.
+  Per-event toggles: client connect, failed unlock, backup done/failed, client
+  expiring, tamper detected. Wired emitters for **failed unlock** and **backup
+  done/failed** so far; secrets (ntfy token / SMTP password) are vault-stored,
+  redacted in API responses, and preserved across edits via a `__SET__` sentinel
+- **Per-client ACLs (resource access control)** — restrict which LAN
+  destinations a client may reach. New `Shield` action on each client opens an
+  editor (mode `allow_all` | `restricted`, rules of dest IP/CIDR + proto +
+  port). Enforced via a dedicated, idempotent `inet wg_acl` nftables table
+  (forward hook priority -10, established/related always allowed, explicit
+  accepts then a per-client catch-all drop) written to `/etc/nftables.d/` for
+  boot persistence (`core/acl.py`). `GET/PUT /api/clients/<name>/acl`
+  (admin-only). Linux-only; other servers report unsupported gracefully
+
+### Changed
+- **Version bump** to 1.0.0 — first stable release
+
+### Security notes (features)
+- ACL rule inputs validated through `ipaddress` + a proto/port whitelist — no
+  untrusted string reaches the nft script (injection-safe). ACL changes are
+  admin-gated and audited (`acl-update`). The ACL table never alters the global
+  forward policy, so a bad ruleset cannot lock out unrestricted clients
+- Notification dispatch never raises into the triggering action; channel
+  failures are logged + collected. Outbound URLs are admin-supplied (config is
+  admin-gated)
+
+### Tests
+- `tests/core/test_acl.py` (validation + ruleset generation) and
+  `tests/notify/test_dispatch.py` (gating + fan-out) — full suite 488 passing
+
+---
+
 ## [0.9.49] — 2026-06-13
 
 ### Added

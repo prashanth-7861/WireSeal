@@ -122,6 +122,7 @@ export interface AdminInfo {
 export interface Peer {
   public_key_short: string;
   allowed_ips: string;
+  endpoint: string;                  // "ip:port" or "" when never connected
   last_handshake: string;
   last_handshake_seconds: number;   // -1 = never; seconds since last handshake otherwise
   transfer_rx: string;               // pre-formatted: "1.29 MB", "466.94 KB", "0 B"
@@ -291,6 +292,19 @@ export interface NetworkServicesResponse {
   ssdp_available: boolean;
   cached: boolean;
   cache_age_seconds: number;
+}
+
+export interface AclRule { dest: string; port: number | null; proto: "tcp" | "udp" | "any"; }
+export interface ClientAcl { mode: "allow_all" | "restricted"; rules: AclRule[]; }
+
+export interface NotificationConfig {
+  enabled: boolean;
+  events: Record<string, boolean>;
+  channels: {
+    ntfy: { enabled: boolean; url: string; topic: string; token?: string };
+    webhook: { enabled: boolean; url: string };
+    smtp: { enabled: boolean; host: string; port: number; user: string; pass?: string; from: string; to: string };
+  };
 }
 
 export type BackupSchedule = "off" | "hourly" | "daily" | "weekly";
@@ -525,6 +539,19 @@ export const api = {
   auditVerify: () =>
     _fetch<{ valid: boolean; verified: number; error: string | null }>(
       "GET", "/audit-log/verify"),
+
+  getNotifications: () =>
+    _fetch<{ notifications: NotificationConfig; events: string[] }>("GET", "/notifications"),
+  setNotifications: (cfg: NotificationConfig) =>
+    _fetch<{ ok: boolean }>("POST", "/notifications", { notifications: cfg }),
+  testNotifications: () =>
+    _fetch<{ sent: string[]; errors: string[] }>("POST", "/notifications/test"),
+
+  getClientAcl: (name: string) =>
+    _fetch<{ acl: ClientAcl }>("GET", `/clients/${encodeURIComponent(name)}/acl`),
+  setClientAcl: (name: string, acl: ClientAcl) =>
+    _fetch<{ ok: boolean; applied: boolean; warning?: string }>(
+      "PUT", `/clients/${encodeURIComponent(name)}/acl`, acl),
 
   sessionSummary: () =>
     _fetch<SessionSummary>("GET", "/session-summary"),

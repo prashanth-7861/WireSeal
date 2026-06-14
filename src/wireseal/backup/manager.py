@@ -292,9 +292,19 @@ class BackupManager:
             import base64
             creds = base64.b64encode(f"{webdav_user}:{webdav_pass}".encode()).decode()
             req.add_header("Authorization", f"Basic {creds}")
+        # SEC-031 (redirect hardening): the SSRF guard validated the configured
+        # URL, but urllib follows 3xx redirects by default — a WebDAV server
+        # could 302 us to an internal address and receive the vault bytes.
+        # Reject all redirects so the validated host is the only host contacted.
+        class _NoRedirect(urllib.request.HTTPRedirectHandler):
+            def redirect_request(self, *_a, **_k):
+                return None
+        opener = urllib.request.build_opener(_NoRedirect)
         try:
-            urllib.request.urlopen(req, timeout=60)
+            opener.open(req, timeout=60)
         except urllib.error.HTTPError as exc:
+            if exc.code in (301, 302, 303, 307, 308):
+                raise RuntimeError("WebDAV PUT refused: server attempted a redirect.") from exc
             raise RuntimeError(f"WebDAV PUT failed: HTTP {exc.code}") from exc
         import time
         return BackupEntry(path=url, created_at=time.time(), size_bytes=len(data))

@@ -81,6 +81,7 @@ def _parse_wg_show(output: str) -> list[dict]:
                 "public_key":             s.split(":", 1)[1].strip(),
                 "public_key_short":       s.split(":", 1)[1].strip()[:12] + "...",
                 "allowed_ips":            "",
+                "endpoint":               "",
                 "last_handshake":         "never",
                 "last_handshake_seconds": -1,
                 "transfer_rx":            "0 B",
@@ -90,6 +91,8 @@ def _parse_wg_show(output: str) -> list[dict]:
         elif cur:
             if s.startswith("allowed ips:"):
                 cur["allowed_ips"] = s.split(":", 1)[1].strip()
+            elif s.startswith("endpoint:"):
+                cur["endpoint"] = s.split(":", 1)[1].strip()
             elif s.startswith("latest handshake:"):
                 hs = s.split(":", 1)[1].strip()
                 cur["last_handshake"] = hs

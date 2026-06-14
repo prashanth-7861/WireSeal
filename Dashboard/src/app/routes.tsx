@@ -9,6 +9,7 @@ import { About } from "./pages/About";
 import { Admin } from "./pages/Admin";
 import { Dns } from "./pages/Dns";
 import { Network } from "./pages/Network";
+import { Notifications } from "./pages/Notifications";
 import { Backup } from "./pages/Backup";
 import { TwoFactor } from "./pages/TwoFactor";
 import { Connect } from "./pages/client/Connect";
@@ -32,6 +33,7 @@ export const router = createBrowserRouter([
       { path: "admin", Component: Admin },
       { path: "dns", Component: Dns },
       { path: "network", Component: Network },
+      { path: "notifications", Component: Notifications },
       { path: "two-factor", Component: TwoFactor },
       { path: "backup", Component: Backup },
       { path: "troubleshoot", Component: Troubleshoot },

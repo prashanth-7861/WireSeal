@@ -1,10 +1,11 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import {
   Plus, Monitor, Trash2, QrCode, X, AlertTriangle, CheckCircle, RefreshCw,
-  Download,
+  Download, Shield,
 } from "lucide-react";
 import { api, cancelSignal, type Client, type Status, type TunnelMode } from "../api";
 import { ClientTtlBadge } from "../components/ClientTtlBadge";
+import { ClientAclEditor } from "../components/clients/ClientAclEditor";
 import { useEscapeKey } from "../hooks/useEscapeKey";
 
 const QR_TTL = 60; // seconds before QR auto-dismisses
@@ -25,6 +26,7 @@ export function Clients() {
   const [error, setError] = useState("");
   const [success, setSuccess] = useState("");
   const [peerStatus, setPeerStatus] = useState<Status | null>(null);
+  const [aclClient, setAclClient] = useState<{ name: string; ip: string } | null>(null);
 
   // Add dialog
   const [showAddDialog, setShowAddDialog] = useState(false);
@@ -390,6 +392,7 @@ export function Clients() {
                   <th className="text-left px-6 py-3 text-sm font-medium text-gray-700">Access</th>
                   <th className="text-left px-6 py-3 text-sm font-medium text-gray-700">Assigned IP</th>
                   <th className="text-left px-6 py-3 text-sm font-medium text-gray-700">Status</th>
+                  <th className="text-left px-6 py-3 text-sm font-medium text-gray-700">Data</th>
                   <th className="text-left px-6 py-3 text-sm font-medium text-gray-700">Expires</th>
                   <th className="text-right px-6 py-3 text-sm font-medium text-gray-700">Actions</th>
                 </tr>
@@ -432,6 +435,22 @@ export function Clients() {
                       })()}
                     </td>
                     <td className="px-6 py-4">
+                      {(() => {
+                        const ip = client.ip.split("/")[0];
+                        const peer = peerMap.get(ip);
+                        if (!peer || (peer.transfer_rx === "0 B" && peer.transfer_tx === "0 B" && !peer.connected)) {
+                          return <span className="text-xs text-gray-400">—</span>;
+                        }
+                        return (
+                          <div className="text-xs text-gray-600 tabular-nums leading-tight" title={peer.endpoint ? `Endpoint ${peer.endpoint}` : undefined}>
+                            <div className="text-green-600">↓ {peer.transfer_rx}</div>
+                            <div className="text-blue-600">↑ {peer.transfer_tx}</div>
+                            {peer.endpoint && <div className="text-gray-400 font-mono mt-0.5">{peer.endpoint}</div>}
+                          </div>
+                        );
+                      })()}
+                    </td>
+                    <td className="px-6 py-4">
                       <ClientTtlBadge
                         permanent={client.permanent ?? true}
                         expiresInSeconds={client.expires_in_seconds ?? null}
@@ -439,6 +458,13 @@ export function Clients() {
                     </td>
                     <td className="px-6 py-4 text-right">
                       <div className="flex items-center justify-end gap-1">
+                        <button
+                          onClick={() => setAclClient({ name: client.name, ip: client.ip })}
+                          className="text-gray-500 hover:text-blue-700 p-2 rounded-lg hover:bg-blue-50 transition-colors"
+                          title="Access control (ACL)"
+                        >
+                          <Shield className="w-5 h-5" />
+                        </button>
                         <button
                           onClick={() => openQr(client.name)}
                           disabled={qrRefreshing}
@@ -783,6 +809,15 @@ export function Clients() {
             </form>
           </div>
         </div>
+      )}
+
+      {aclClient && (
+        <ClientAclEditor
+          clientName={aclClient.name}
+          clientIp={aclClient.ip}
+          onClose={() => setAclClient(null)}
+          onSaved={fetchClients}
+        />
       )}
     </div>
   );

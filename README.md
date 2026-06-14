@@ -1,5 +1,7 @@
 # WireSeal
 
+**The audited, zero-trust, zero-telemetry home network gateway you fully own.**
+
 Secure home network access — manage encrypted WireGuard tunnels, client connections, and
 LAN device access with zero plaintext secrets on disk. Automates key generation, client
 lifecycle, cross-platform firewall rules, and optional dynamic DNS. All cryptographic
@@ -7,13 +9,38 @@ material lives inside a dual-layer AES-256-GCM / ChaCha20-Poly1305 encrypted vau
 Argon2id key derivation. If the vault file is stolen without the passphrase, no keys,
 tokens, or secrets are exposed.
 
+Unlike managed mesh VPNs, there is **no cloud control plane, no account, and no
+telemetry**: your keys never leave your box, the management API binds to localhost only,
+and every privileged action is written to a **tamper-evident, hash-chained audit log on
+your own machine** — not someone else's cloud.
+
 [![CI](https://github.com/prashanth-7861/WireSeal/actions/workflows/build.yml/badge.svg)](https://github.com/prashanth-7861/WireSeal/actions/workflows/build.yml)
 [![Python](https://img.shields.io/badge/python-3.12%20%E2%80%93%203.14-blue)](https://python.org)
-[![Version](https://img.shields.io/badge/version-0.9.45-green)](https://github.com/prashanth-7861/WireSeal/releases)
+[![Version](https://img.shields.io/badge/version-1.0.0-green)](https://github.com/prashanth-7861/WireSeal/releases)
+[![Security](https://img.shields.io/badge/security-audited-brightgreen)](SECURITY_AUDIT_v1.0.0.md)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 [![Website](https://img.shields.io/badge/website-wireseal.vercel.app-blue)](https://wireseal.vercel.app)
 
 **Official site:** https://wireseal.vercel.app
+
+---
+
+## Security & trust
+
+WireSeal is security infrastructure, and we treat it that way:
+
+- **Local-only control plane** — the management API binds to `127.0.0.1`; it is never
+  exposed to the network. Cross-origin browser requests are rejected.
+- **Encrypted multi-admin vault** — dual-layer AEAD + Argon2id; TOTP 2FA; rate-limited,
+  audited unlock.
+- **Tamper-evident audit log** — every privileged action is SHA-256 hash-chained; the
+  dashboard verifies the chain and flags tampering. The log lives **on your box**.
+- **Per-client ACLs** — least-privilege LAN access enforced by the host firewall.
+- **Zero telemetry** — no analytics, no phone-home. Every outbound connection is a feature
+  you enable, to an endpoint you choose. See [SECURITY.md](SECURITY.md).
+- **Audited** — a full source-level security audit was performed for 1.0.0; findings and
+  remediation are published in [SECURITY_AUDIT_v1.0.0.md](SECURITY_AUDIT_v1.0.0.md).
+- **Report a vulnerability** — see [SECURITY.md](SECURITY.md) for private disclosure.
 
 ---
 

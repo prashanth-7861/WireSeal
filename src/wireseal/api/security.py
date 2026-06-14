@@ -55,10 +55,20 @@ def _h_audit_log(req: "_Handler", _groups: tuple) -> dict:
     if not _s._AUDIT_PATH.exists():
         return {"entries": [], "total": 0, "returned": 0}
     try:
-        lines   = _s._AUDIT_PATH.read_text().strip().splitlines()
-        total   = len(lines)
+        # SEC (F6): memory-bounded tail read — never load a huge audit log
+        # fully into memory. One pass, keeping only the last `limit` lines.
+        from collections import deque
+        total = 0
+        tail: deque = deque(maxlen=limit)
+        with open(_s._AUDIT_PATH, "r", encoding="utf-8", errors="replace") as _f:
+            for _line in _f:
+                _line = _line.strip()
+                if not _line:
+                    continue
+                total += 1
+                tail.append(_line)
         entries = []
-        for line in lines[-limit:]:
+        for line in tail:
             try:
                 entries.append(json.loads(line))
             except json.JSONDecodeError:

@@ -520,6 +520,12 @@ def _record_unlock_failure(ip: str) -> None:
         _unlock_attempts.setdefault(ip, []).append(_time.time())
     from wireseal.security.audit import AuditLog
     AuditLog(_AUDIT_PATH).log("unlock-failed", {"ip": ip}, actor="system")
+    _notify_event(
+        "unlock_failed",
+        "WireSeal: failed unlock attempt",
+        f"A vault unlock attempt failed from {ip}.",
+        priority="high",
+    )
 
 
 def _clear_unlock_failures(ip: str) -> None:
@@ -1313,6 +1319,29 @@ def _refresh_cache_unlocked(vault: Any, passphrase: Any, admin_id: str = "owner"
         logging.getLogger("wireseal").warning("Cache refresh failed: %s", _e)
 
 
+def _notify_event(event: str, title: str, body: str, priority: str = "default") -> None:
+    """Fire a notification for *event* in a background thread (best-effort).
+
+    Reads the notifications config from the session cache and dispatches via
+    :func:`wireseal.notify.dispatch.notify`. Never blocks the caller and never
+    raises — a notification failure must not affect the triggering action.
+    """
+    try:
+        with _lock:
+            cache = _session.get("cache") or {}
+        cfg = cache.get("notifications", {}) or {}
+        if not cfg.get("enabled"):
+            return
+        import threading
+        from wireseal.notify.dispatch import notify as _notify
+        threading.Thread(
+            target=lambda: _notify(cfg, event, title, body, priority),
+            daemon=True,
+        ).start()
+    except Exception as _e:  # never propagate
+        logging.getLogger("wireseal.notify").debug("notify emit skipped: %s", _e)
+
+
 def _migrate_legacy_client_tokens(state: Any, vault: Any, passphrase: Any) -> None:
     """Phase 5.4: assign heartbeat tokens to legacy clients missing them.
 
@@ -1453,6 +1482,11 @@ def _detect_mtu() -> int:
             iface_match = _re.search(r"\bdev\s+(\S+)", result.stdout)
             if iface_match:
                 iface = iface_match.group(1)
+                # SEC (H-3): validate the interface name before using it as a
+                # path component, so crafted routing output can't traverse out
+                # of /sys/class/net/ (kernel names are <=15 safe chars anyway).
+                if not _re.fullmatch(r"[A-Za-z0-9_.-]{1,15}", iface):
+                    return 1420
                 mtu_result = _sp.run(
                     ["cat", f"/sys/class/net/{iface}/mtu"],
                     capture_output=True, text=True, timeout=5,

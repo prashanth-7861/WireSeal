@@ -146,10 +146,13 @@ def _wireseal_executable() -> Path:
 
 def build_cron_content(schedule: str, exe: Path) -> str:
     """Build the /etc/cron.d/wireseal-backup fragment for *schedule*."""
+    import shlex
     expr = SCHEDULES[schedule]
+    # SEC (H-01): shell-quote the executable path so spaces/metacharacters in
+    # the resolved path cannot split the cron command into a different binary.
     return (
         "# Managed by WireSeal -- DO NOT EDIT\n"
-        f"{expr} root {exe} backup --non-interactive\n"
+        f"{expr} root {shlex.quote(str(exe))} backup --non-interactive\n"
     )
 
 

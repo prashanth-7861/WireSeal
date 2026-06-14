@@ -14,6 +14,8 @@ from . import ssh as _ssh_module
 from . import sftp as _sftp_module
 from . import client_mode as _client_mode_module
 from . import network as _network_module
+from . import notify as _notify_module
+from . import acl as _acl_module
 
 # Re-export all names from _shared (before remaining code, so remaining code can use them)
 for _api_shared_name in dir(_api_shared_module):
@@ -79,6 +81,14 @@ for _client_mode_name in dir(_client_mode_module):
 for _network_name in dir(_network_module):
     if not _network_name.startswith("__"):
         globals()[_network_name] = getattr(_network_module, _network_name)
+
+for _notify_name in dir(_notify_module):
+    if not _notify_name.startswith("__"):
+        globals()[_notify_name] = getattr(_notify_module, _notify_name)
+
+for _acl_name in dir(_acl_module):
+    if not _acl_name.startswith("__"):
+        globals()[_acl_name] = getattr(_acl_module, _acl_name)
 
 
 """WireSeal REST API server.
@@ -353,6 +363,15 @@ _ROUTES: list[tuple[str, re.Pattern, Any]] = [
     ("POST",   re.compile(r"^/api/network/services/scan$"),               _h_network_services_scan),
 
     ("POST",   re.compile(r"^/api/network/device/ports$"),                _h_network_device_ports),
+
+    # Notifications (ntfy / webhook / SMTP)
+    ("GET",    re.compile(r"^/api/notifications$"),                       _h_notifications_get),
+    ("POST",   re.compile(r"^/api/notifications$"),                       _h_notifications_set),
+    ("POST",   re.compile(r"^/api/notifications/test$"),                  _h_notifications_test),
+
+    # Per-client ACLs (resource access control)
+    ("GET",    re.compile(r"^/api/clients/([^/]+)/acl$"),                 _h_client_acl_get),
+    ("PUT",    re.compile(r"^/api/clients/([^/]+)/acl$"),                 _h_client_acl_set),
 
 ]
 

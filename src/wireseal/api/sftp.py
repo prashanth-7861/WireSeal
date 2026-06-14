@@ -24,6 +24,10 @@ def _validate_sftp_path(path: str) -> str:
     parts = normalized.split("/")
     if ".." in parts:
         raise _ApiError("Path traversal not allowed", 400)
+    # SEC (H-05): require an absolute path so an empty/relative path can't be
+    # resolved against the remote CWD into an unintended location.
+    if not normalized.startswith("/"):
+        raise _ApiError("Path must be absolute", 400)
     return normalized
 
 
@@ -146,6 +150,7 @@ def _h_sftp_disconnect(req: "_Handler", _groups: tuple) -> dict:
 
 def _h_sftp_list(req: "_Handler", _groups: tuple) -> dict:
     _require_unlocked()
+    _require_admin_role()  # SEC (H-03): reading remote files is admin-only
     body = req._json()
     if not isinstance(body, dict):
         raise _ApiError("Invalid JSON body", 400)
@@ -190,6 +195,7 @@ def _h_sftp_list(req: "_Handler", _groups: tuple) -> dict:
 
 def _h_sftp_read(req: "_Handler", _groups: tuple) -> dict:
     _require_unlocked()
+    _require_admin_role()  # SEC (H-03): reading remote files is admin-only
     body = req._json()
     if not isinstance(body, dict):
         raise _ApiError("Invalid JSON body", 400)
@@ -419,6 +425,7 @@ def _h_sftp_chmod(req: "_Handler", _groups: tuple) -> dict:
 def _h_sftp_stat(req: "_Handler", _groups: tuple) -> dict:
     """Get detailed file/directory attributes."""
     _require_unlocked()
+    _require_admin_role()  # SEC (H-03): remote metadata is admin-only
     body = req._json()
     if not isinstance(body, dict):
         raise _ApiError("Invalid JSON body", 400)
@@ -457,6 +464,7 @@ def _h_sftp_stat(req: "_Handler", _groups: tuple) -> dict:
 def _h_sftp_exists(req: "_Handler", _groups: tuple) -> dict:
     """Check if a remote path exists (used for overwrite confirmation)."""
     _require_unlocked()
+    _require_admin_role()  # SEC (H-03): remote metadata is admin-only
     body = req._json()
     if not isinstance(body, dict):
         raise _ApiError("Invalid JSON body", 400)

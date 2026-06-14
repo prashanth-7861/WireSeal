@@ -88,6 +88,9 @@ def _h_backup_trigger(req, _groups):
     try:
         entry = _backup_manager.create_backup(vault_path, cfg)
     except (ValueError, RuntimeError) as exc:
+        _notify_event("backup_failed", "WireSeal: backup failed",
+                      f"Backup to {cfg.get('destination', 'local')} failed: {exc}",
+                      priority="high")
         raise _ApiError(str(exc), 500)
     keep_n = cfg.get("keep_n", 10)
     if isinstance(keep_n, int) and keep_n > 0:
@@ -101,6 +104,8 @@ def _h_backup_trigger(req, _groups):
     AuditLog(_s._AUDIT_PATH).log("backup-trigger", {
         "path": entry.path, "size_bytes": entry.size_bytes, "actor": admin_id,
     })
+    _notify_event("backup_done", "WireSeal: backup complete",
+                  f"Backup created at {entry.path} ({entry.size_bytes} bytes).")
     return {"ok": True, "path": entry.path, "size_bytes": entry.size_bytes,
             "created_at": entry.created_at}
 

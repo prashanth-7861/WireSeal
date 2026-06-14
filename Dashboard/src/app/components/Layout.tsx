@@ -5,7 +5,7 @@ import {
   Server, ScrollText, Monitor, Settings, Lock, Play, Eye,
   EyeOff, AlertCircle, CheckCircle, Shield, Sparkles, RotateCcw,
   KeyRound, ArrowLeft, ShieldAlert, Timer, Globe, HardDrive,
-  ShieldCheck, Smartphone, Info, Radar, Wrench,
+  ShieldCheck, Smartphone, Info, Radar, Wrench, Bell,
 } from "lucide-react";
 import { api, VAULT_LOCKED_EVENT, type Status } from "../api";
 import { AppModeProvider, useAppMode } from "../context/AppModeContext";
@@ -479,6 +479,7 @@ function LayoutInner() {
     { to: "/two-factor", label: "Two-Factor Auth", icon: Smartphone },
     { to: "/dns", label: "DNS", icon: Globe },
     { to: "/network", label: "Network", icon: Radar },
+    { to: "/notifications", label: "Notifications", icon: Bell },
     { to: "/backup", label: "Backup", icon: HardDrive },
     { to: "/settings", label: "Settings", icon: Settings },
     { to: "/troubleshoot", label: "Troubleshoot", icon: Wrench },

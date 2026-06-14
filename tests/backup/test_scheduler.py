@@ -17,10 +17,11 @@ def test_schedules_have_expected_keys():
 @pytest.mark.unit
 @pytest.mark.parametrize("sched", ["hourly", "daily", "weekly"])
 def test_cron_content_is_root_and_noninteractive(sched):
+    import shlex
     exe = Path("/usr/bin/wireseal")
     content = scheduler.build_cron_content(sched, exe)
     assert "Managed by WireSeal" in content
-    assert f" root {exe} backup --non-interactive" in content
+    assert f" root {shlex.quote(str(exe))} backup --non-interactive" in content
     assert content.startswith("#")
     assert content.endswith("\n")
     assert scheduler.SCHEDULES[sched] in content

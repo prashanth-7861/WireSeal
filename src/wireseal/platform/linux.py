@@ -1539,6 +1539,15 @@ class LinuxAdapter(AbstractPlatformAdapter):
         if vault_dir:
             if not vault_dir.startswith("/"):
                 raise SetupError(f"vault_dir must be an absolute path, got: {vault_dir!r}")
+            # SEC: vault_dir is interpolated into the systemd unit ExecStart line.
+            # Restrict to a safe path charset so a newline cannot inject a second
+            # ExecStart= directive (arbitrary root command execution).
+            import re as _re_vd
+            if not _re_vd.fullmatch(r"/[A-Za-z0-9._/\-]*", vault_dir):
+                raise SetupError(
+                    "vault_dir contains invalid characters (allowed: letters, "
+                    "digits, '.', '_', '-', '/')."
+                )
 
         self._migrate_legacy_unit()
         wireseal_bin = self._find_wireseal_launcher()
