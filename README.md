@@ -359,6 +359,26 @@ sudo wireseal remove-client alice
 You will be prompted for a vault passphrase on first `init`. The passphrase never appears
 on the command line or in any log.
 
+### Router port forward (required for remote access)
+
+WireSeal runs WireGuard on your home server, but your **router** must let inbound VPN
+traffic reach it. In your router's admin page, add **one port-forward rule**:
+
+| Setting | Value |
+|---------|-------|
+| Protocol | **UDP** (WireGuard is UDP — TCP will not work) |
+| External / WAN port | the port you chose at `init` — default **51820** |
+| Internal IP | your WireSeal server's LAN IP (e.g. `192.168.1.100`) |
+| Internal port | the same port — default **51820** |
+
+That single rule is the only router change needed. WireSeal configures the server's own
+firewall + NAT automatically; the router forward is the one thing it can't do for you.
+
+- If you ran `init --port <N>`, forward `<N>` instead of `51820`.
+- If your ISP rotates your public IP, configure **DuckDNS** (`wireseal duckdns <name>`) so
+  clients always find you even after the IP changes.
+- Automatic **UPnP / NAT-PMP** port forwarding (so you can skip this step) is on the roadmap.
+
 ---
 
 ## Adding Clients
